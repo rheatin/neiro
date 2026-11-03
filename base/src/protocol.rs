@@ -16,9 +16,10 @@ use neiro_audio::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackState {
+    #[default]
     Stopped,
     Ready,
     Playing,
@@ -28,11 +29,6 @@ pub enum PlaybackState {
     Error,
 }
 
-impl Default for PlaybackState {
-    fn default() -> Self {
-        Self::Stopped
-    }
-}
 
 impl From<SessionPhase> for PlaybackState {
     fn from(phase: SessionPhase) -> Self {
@@ -44,6 +40,68 @@ impl From<SessionPhase> for PlaybackState {
             SessionPhase::DeviceLost => Self::DeviceLost,
             SessionPhase::Ended => Self::Ended,
             SessionPhase::Error => Self::Error,
+        }
+    }
+}
+
+/// How the engine should choose the output rate.
+///
+/// These are the engine's output modes, not a second vocabulary: `Native` asks
+/// for the source rate, `Device` takes whatever the endpoint negotiates, and
+/// `Fixed` asks for one rate and reports a coercion when the driver refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum OutputRatePolicy {
+    /// Open at the source rate. A track that the endpoint refuses is coerced,
+    /// and the render path says so.
+    Native,
+    /// Open at the rate the endpoint grants for the source format.
+    #[default]
+    Device,
+    /// Ask for this rate. Not a promise: the endpoint may refuse it.
+    Fixed { rate_hz: u32 },
+}
+
+
+/// Resampler quality, mirrored from the engine's tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResamplerQuality {
+    Fast,
+    #[default]
+    High,
+    VeryHigh,
+}
+
+
+/// WASAPI share mode. `Shared` is a deliberate choice for an environment where
+/// another process holds the endpoint; it is never a fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareMode {
+    #[default]
+    Exclusive,
+    Shared,
+}
+
+
+/// Everything that has to be decided before a stream can be opened.
+///
+/// These are open-time settings in the engine, so changing one while a track is
+/// playing reopens the session at the current position. The resulting facts are
+/// in `RenderPath`; this type is only the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PlaybackPolicy {
+    pub rate: OutputRatePolicy,
+    pub quality: ResamplerQuality,
+    pub share: ShareMode,
+}
+
+impl PlaybackPolicy {
+    pub fn shared() -> Self {
+        Self {
+            share: ShareMode::Shared,
+            ..Self::default()
         }
     }
 }
@@ -66,6 +124,10 @@ pub struct Snapshot {
     pub render_path: Option<RenderPath>,
     pub queue: Vec<PathBuf>,
     pub queue_index: Option<usize>,
+    /// The policy the next open will use, and the one the current session was
+    /// opened with. `render_path` says what the engine actually did with it;
+    /// this says what was asked for.
+    pub policy: PlaybackPolicy,
     /// The analysis for the current track, if it has arrived. `None` is
     /// "not measured yet", never "this track has no facts".
     pub analysis: Option<Analysis>,
@@ -189,6 +251,12 @@ pub enum Command {
     SetCrossfade {
         params: CrossfadeParams,
     },
+    /// Change how the output is opened. Takes effect immediately: an open
+    /// session is reopened at the current position, because output mode and
+    /// resampler quality are open-time settings in the engine.
+    SetPolicy {
+        policy: PlaybackPolicy,
+    },
     /// Stop playback, close the stream and end both workers.
     Shutdown,
 }
@@ -199,7 +267,10 @@ pub enum Command {
 pub enum Event {
     /// A state transition or a track/queue change. Carries the whole snapshot
     /// so a late subscriber does not have to stitch several events together.
-    State(Snapshot),
+    ///
+    /// Boxed: this variant is three times the size of the next largest, and
+    /// every `Event` would otherwise be allocated at that size.
+    State(Box<Snapshot>),
     TrackChanged {
         path: PathBuf,
         device_id: String,
@@ -216,6 +287,11 @@ pub enum Event {
         path: PathBuf,
         render_path: RenderPath,
     },
+    /// The output policy changed. `render_path` in the next `State` says what
+    /// the engine actually did with it.
+    PolicyChanged {
+        policy: PlaybackPolicy,
+    },
     /// The applied DSP parameters were changed or read after a setter.
     SettingsChanged {
         settings: SessionSettings,
@@ -228,7 +304,9 @@ pub enum Event {
     /// Base cache rather than a fresh decode.
     AnalysisReady {
         path: PathBuf,
-        analysis: Analysis,
+        /// Boxed: `Analysis` is the largest payload in the protocol, and every
+        /// `Event` is allocated at the size of its largest variant.
+        analysis: Box<Analysis>,
         cached: bool,
     },
     QueueChanged {

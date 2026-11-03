@@ -13,6 +13,13 @@
 //! touching UI state.
 
 #![allow(non_camel_case_types)]
+// `not_unsafe_ptr_arg_deref`: these exports take raw pointers by necessity -- a
+// C or Swift caller has nothing else to pass -- but they are deliberately safe
+// to call from Rust. Every one of them null-checks its arguments before
+// dereferencing, and every body runs under `catch_unwind`, so the worst a bad
+// argument produces is an error code. Marking them `unsafe` would only move the
+// burden to the Rust harnesses while changing nothing for the C side.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};

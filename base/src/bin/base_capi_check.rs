@@ -43,6 +43,37 @@ fn main() {
     let stop = CString::new(r#"{"command":"stop"}"#).unwrap();
     assert_eq!(NAE_BaseCommand(base, stop.as_ptr()), 0);
 
+    // The policy types are part of the serialized contract, so a Swift client
+    // sets the output mode through the same JSON command, with no second entry
+    // point to keep in sync.
+    let policy = CString::new(
+        r#"{"command":"set_policy","policy":{"rate":{"mode":"fixed","rate_hz":96000},"quality":"very_high","share":"shared"}}"#,
+    )
+    .unwrap();
+    assert_eq!(NAE_BaseCommand(base, policy.as_ptr()), 0);
+
+    // A command is a message to the control thread, not a synchronous call.
+    // Reading the snapshot once right after it returns the state before the
+    // message was handled, so wait for the state being asserted.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut json = String::new();
+    let mut snapshot = serde_json::Value::Null;
+    while Instant::now() < deadline {
+        let ptr = NAE_BaseSnapshot(base);
+        assert!(!ptr.is_null(), "snapshot after set_policy");
+        json = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+        NAE_BaseFreeString(ptr);
+        snapshot = serde_json::from_str(&json).expect("snapshot JSON");
+        if snapshot["policy"]["rate"]["mode"] == "fixed" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(snapshot["policy"]["rate"]["mode"], "fixed", "{json}");
+    assert_eq!(snapshot["policy"]["rate"]["rate_hz"], 96000, "{json}");
+    assert_eq!(snapshot["policy"]["quality"], "very_high", "{json}");
+    assert_eq!(snapshot["policy"]["share"], "shared", "{json}");
+
     let deadline = Instant::now() + Duration::from_secs(2);
     while EVENTS.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));

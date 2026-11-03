@@ -18,7 +18,12 @@ extern "C" {
  *
  * Commands and events are the serialized types in `base/src/protocol.rs`:
  *   {"command":"play","path":"...","device_id":null}
+ *   {"command":"set_policy","policy":{"rate":{"mode":"fixed","rate_hz":96000},
+ *    "quality":"very_high","share":"shared"}}
  *   {"event":"state","state":"playing",...}
+ *
+ * `set_policy` is a request. The engine reports the rate it actually granted in
+ * the snapshot's `render_path`; `policy` is what was asked for and may differ.
  */
 typedef struct NAE_Base NAE_Base;
 

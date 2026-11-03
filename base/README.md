@@ -7,7 +7,8 @@ and it does not own a device, a clock, a sample or a measurement.
 UI / remote client
     ↕  commands + events (serializable)
 Base (Rust)
-    ├─ session policy: play/pause/seek/stop, queue, endpoint choice
+    ├─ transport: play/pause/seek/stop, queue, endpoint choice
+    ├─ output policy: rate mode, resampler quality, share mode
     ├─ analysis scheduler + LRU cache
     ├─ render-path fact (`RenderPath`)
     └─ plugin boundary (planned)
@@ -51,7 +52,7 @@ socket.
 
 Commands: `play`, `enqueue`, `pause`, `resume`, `stop`, `seek`, `next`,
 `analyze`, `set_volume`, `set_eq`, `set_crossfeed`, `set_replay_gain`,
-`set_convolver`, `set_crossfade`, `shutdown`.
+`set_convolver`, `set_crossfade`, `set_policy`, `shutdown`.
 
 `settings` in the snapshot is the applied configuration read back from the
 session (`EqParams`, `CrossfeedParams`, `ConvolverParams`, `CrossfadeParams`,
@@ -60,12 +61,38 @@ stream. They are deliberately separate: a configured stage may be bypassed on
 this source, and the UI must not merge the two.
 
 Events: `state`, `track_changed`, `position`, `analysis_ready`,
-`render_path_changed`, `queue_changed`, `error`, `shutdown`.
+`render_path_changed`, `settings_changed`, `policy_changed`,
+`queue_changed`, `error`, `shutdown`.
 
 `snapshot()` is the state a late subscriber paints from. Events are changes; the
 snapshot is the whole. `Snapshot.resolved` is the engine's actual resolved path
 and diagnostics JSON for the current track; it is refreshed on open and on a
 gapless track change, not derived by Base.
+
+## Output policy
+
+`PlaybackPolicy` is the one description of how a stream is opened:
+
+| Field | Values | Default |
+|---|---|---|
+| `rate` | `native`, `device`, `fixed { rate_hz }` | `device` |
+| `quality` | `fast`, `high`, `very_high` | `high` |
+| `share` | `exclusive`, `shared` | `exclusive` |
+
+These are open-time settings in the engine, so `set_policy` on a live session
+reopens it at the current position, and while paused it reopens it paused. A
+policy change that only updated a field would leave the old stream resampling
+while the UI reported "native", which is exactly the disagreement the render
+path exists to prevent.
+
+`set_policy` is a request, not a guarantee. The endpoint decides: `fixed` may
+be refused, and the engine reports the rate it granted plus a coercion reason in
+`render_path`. `policy` in the snapshot is what was asked for; `render_path` is
+what happened. Both are published because they can differ.
+
+`Shared` is never chosen automatically. It exists for an environment where
+another process holds the endpoint, and `Base::start_with_share` / the
+`NEIRO_BASE_SHARE` probe input are the only ways to ask for it.
 
 ## Analysis
 
@@ -175,6 +202,9 @@ runtime plugin ABI that only works on desktop.
 - Analysis is one worker and is not cancellable mid-decode.
 - No plugin loader and no out-of-process UI transport yet; both boundaries are
   represented by serializable protocol types.
+- `set_policy` reopens the stream, which costs one device close and open. There
+  is no crossfade or click suppression across that boundary; a UI should
+  debounce a slider rather than send every intermediate value.
 - The C ABI has one subscription and no unsubscribe; shutdown is the lifetime
   boundary.
 - iOS is not built or verified here. `nae.dll` is Windows-only; an iOS build

@@ -6,7 +6,7 @@
 //! previous track cannot overwrite the one now playing.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
@@ -53,7 +53,7 @@ pub(crate) fn run(
 }
 
 fn publish(
-    path: &PathBuf,
+    path: &Path,
     analysis: neiro_audio::Analysis,
     cached: bool,
     state: &Arc<Mutex<Snapshot>>,
@@ -64,7 +64,7 @@ fn publish(
         .unwrap_or_else(|e| e.into_inner())
         .path
         .as_deref()
-        == Some(path.as_path());
+        == Some(path);
     if is_current && analysis.error == 0 {
         state.lock().unwrap_or_else(|e| e.into_inner()).analysis = Some(analysis.clone());
     }
@@ -75,8 +75,8 @@ fn publish(
         });
     }
     events.emit(Event::AnalysisReady {
-        path: path.clone(),
-        analysis,
+        path: path.to_path_buf(),
+        analysis: Box::new(analysis),
         cached,
     });
 }

@@ -37,7 +37,7 @@ mod control;
 pub mod protocol;
 
 use cache::Cache;
-use protocol::{Command, Event, Snapshot};
+use protocol::{Command, Event, PlaybackPolicy, Snapshot};
 
 #[derive(Debug)]
 pub enum BaseError {
@@ -189,6 +189,13 @@ impl BaseHandle {
         self.dispatch(Command::SetCrossfade { params })
     }
 
+    /// Change output mode, resampler quality or share mode. A live stream is
+    /// reopened at the current position, because the engine decides these when
+    /// it opens the device.
+    pub fn set_policy(&self, policy: PlaybackPolicy) -> Result<(), BaseError> {
+        self.dispatch(Command::SetPolicy { policy })
+    }
+
     /// Ask the workers to stop. `Base`'s `Drop` also does this and joins.
     pub fn shutdown(&self) -> Result<(), BaseError> {
         self.dispatch(Command::Shutdown)
@@ -225,9 +232,20 @@ impl Base {
     /// where another process holds the endpoint exclusively. It is a choice, not
     /// a fallback: the player still never moves to shared on its own.
     pub fn start_with_share(share: neiro_audio::ShareKind) -> Result<Self, BaseError> {
+        let policy = match share {
+            neiro_audio::ShareKind::Shared => PlaybackPolicy::shared(),
+            neiro_audio::ShareKind::Exclusive => PlaybackPolicy::default(),
+        };
+        Self::start_with_policy(policy)
+    }
+
+    /// Start Base with an explicit output policy: rate mode, resampler quality
+    /// and share mode. No device is opened here; the first `Play` chooses one.
+    pub fn start_with_policy(policy: PlaybackPolicy) -> Result<Self, BaseError> {
         let version = analyzer_version();
         let state = Arc::new(Mutex::new(Snapshot {
             analyzer_version: version,
+            policy,
             ..Snapshot::default()
         }));
         let events = EventBus::default();
@@ -247,7 +265,7 @@ impl Base {
                     audio_events,
                     audio_state,
                     version,
-                    share,
+                    policy,
                 );
             })
             .map_err(|e| BaseError::Spawn(e.to_string()))?;

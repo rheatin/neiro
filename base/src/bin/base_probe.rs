@@ -12,7 +12,7 @@ use neiro_audio::{
     CrossfadeParams, CrossfeedParams, EqBand, EqParams, ReplayGainParams,
     CROSSFADE_EQUAL_POWER, EQ_PEAKING, EQ_PHASE_MINIMUM, RG_ALBUM,
 };
-use neiro_base::protocol::{Event, PlaybackState};
+use neiro_base::protocol::{Event, OutputRatePolicy, PlaybackPolicy, PlaybackState};
 use neiro_audio::ShareKind;
 use neiro_base::Base;
 
@@ -152,6 +152,98 @@ fn main() {
             .is_some_and(|v| !v.is_empty()),
         "resolved diagnostics",
         resolved["diagnostics"].to_string(),
+    );
+
+    check(
+        snap.policy == PlaybackPolicy::default(),
+        "policy is reported",
+        format!("{:?}", snap.policy),
+    );
+
+    // Output mode and quality are open-time settings. Changing the policy has
+    // to reopen the stream, and the render path is the proof it did: a policy
+    // change that only updated a field would leave sample_rate alone.
+    let snap = wait_until(
+        &events,
+        || handle.snapshot(),
+        Duration::from_secs(20),
+        |s| s.position > 2.0,
+        "A plays past 2 s",
+    );
+    let before_policy = snap.position;
+    let device_rate = render.sample_rate;
+
+    handle
+        .set_policy(PlaybackPolicy {
+            rate: OutputRatePolicy::Fixed { rate_hz: 96_000 },
+            ..snap.policy
+        })
+        .expect("send policy");
+    let snap = wait_until(
+        &events,
+        || handle.snapshot(),
+        Duration::from_secs(20),
+        |s| {
+            s.render_path
+                .as_ref()
+                .is_some_and(|r| r.sample_rate == 96_000)
+        },
+        "policy reopens at 96 kHz",
+    );
+    check(
+        snap.render_path.as_ref().map(|r| r.sample_rate) == Some(96_000),
+        "fixed rate reaches the engine",
+        format!("{} Hz", snap.render_path.map(|r| r.sample_rate).unwrap_or(0)),
+    );
+    check(
+        snap.state == PlaybackState::Playing,
+        "policy change keeps playing",
+        format!("{:?}", snap.state),
+    );
+    // A seek is asynchronous, so the position cannot be read once and compared:
+    // right after the reopen it is whatever the new session had before the seek
+    // landed.
+    //
+    // The budget is bounded on purpose. A wait that is merely "long enough" is
+    // satisfied by plain playback when the seek is missing entirely -- a fresh
+    // session at 0 s reaches the old position on its own. The window here is
+    // shorter than the 2 s of playback that was already behind us, so a stream
+    // that restarted at zero cannot reach the target in time.
+    let deadline = Instant::now() + Duration::from_millis(1_200);
+    let mut restored = handle.snapshot().position;
+    while Instant::now() < deadline {
+        restored = handle.snapshot().position;
+        if (restored - before_policy).abs() < 0.30 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    check(
+        (restored - before_policy).abs() < 0.30,
+        "policy change keeps position",
+        format!("{:.3}s -> {:.3}s", before_policy, restored),
+    );
+
+    // Back to the default, so the rest of the probe runs on the same path it
+    // was written against.
+    handle
+        .set_policy(PlaybackPolicy::default())
+        .expect("send policy");
+    let snap = wait_until(
+        &events,
+        || handle.snapshot(),
+        Duration::from_secs(20),
+        |s| {
+            s.render_path
+                .as_ref()
+                .is_some_and(|r| r.sample_rate == device_rate)
+        },
+        "policy returns to the device rate",
+    );
+    check(
+        snap.policy.rate == OutputRatePolicy::Device,
+        "policy reset is reported",
+        format!("{:?}", snap.policy.rate),
     );
 
     let snap = wait_until(

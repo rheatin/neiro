@@ -14,7 +14,10 @@ use neiro_audio::{
     default_device_id, OutputMode, Quality, Session, SessionPhase, SessionSettings, ShareKind,
 };
 
-use crate::protocol::{Event, PlaybackState, RenderPath, Snapshot};
+use crate::protocol::{
+    Event, OutputRatePolicy, PlaybackPolicy, PlaybackState, RenderPath, ResamplerQuality,
+    ShareMode, Snapshot,
+};
 use crate::EventBus;
 
 const POLL: Duration = Duration::from_millis(30);
@@ -26,7 +29,7 @@ pub(crate) fn run(
     events: EventBus,
     state: Arc<Mutex<Snapshot>>,
     version: u32,
-    share: ShareKind,
+    policy: PlaybackPolicy,
 ) {
     let mut control = Control {
         commands,
@@ -38,7 +41,7 @@ pub(crate) fn run(
         queue: Vec::new(),
         index: None,
         device_id: None,
-        share,
+        policy,
         settings: None,
         last_serial: None,
         last_phase: None,
@@ -63,7 +66,7 @@ struct Control {
     queue: Vec<PathBuf>,
     index: Option<usize>,
     device_id: Option<String>,
-    share: ShareKind,
+    policy: PlaybackPolicy,
     settings: Option<SessionSettings>,
     last_serial: Option<u64>,
     last_phase: Option<SessionPhase>,
@@ -157,6 +160,7 @@ impl Control {
                 self.poll();
             }
             Command::Next => self.skip(),
+            Command::SetPolicy { policy } => self.set_policy(policy),
             Command::Analyze { path } => {
                 let _ = self.analysis.send(path);
             }
@@ -228,6 +232,62 @@ impl Control {
         }
     }
 
+    /// Output mode and resampler quality are open-time settings in the engine,
+    /// so a change is only real once the stream is reopened. Reopen at the
+    /// current position rather than deferring it to the next track: a UI that
+    /// reports "native now" while the old stream keeps resampling is reporting
+    /// a change that did not happen.
+    ///
+    /// With no live stream there is nothing to reopen; the next `open_at` uses
+    /// the new policy.
+    fn set_policy(&mut self, policy: PlaybackPolicy) {
+        if self.policy == policy {
+            return;
+        }
+        self.policy = policy;
+        self.events.emit(Event::PolicyChanged { policy });
+        self.publish_phase(
+            PlaybackState::from(self.last_phase.unwrap_or(SessionPhase::Idle)),
+            self.render_path(),
+        );
+
+        let Some(index) = self.index else {
+            return;
+        };
+        let paused = matches!(self.last_phase, Some(SessionPhase::Paused));
+        let live = matches!(
+            self.last_phase,
+            Some(SessionPhase::Playing | SessionPhase::Paused)
+        );
+        if !live {
+            return;
+        }
+        let position = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .position;
+
+        self.open_at(index, true);
+        let mut errors = Vec::new();
+        if let Some(session) = self.session.as_mut() {
+            if position > 0.0 {
+                if let Err(e) = session.seek(position) {
+                    errors.push(e.to_string());
+                }
+            }
+            if paused {
+                if let Err(e) = session.pause() {
+                    errors.push(e.to_string());
+                }
+            }
+        }
+        for message in errors {
+            self.emit_error("policy", &message);
+        }
+        self.poll();
+    }
+
     fn skip(&mut self) {
         let Some(index) = self.index else {
             return;
@@ -264,13 +324,8 @@ impl Control {
             },
         };
 
-        match Session::open(
-            &path,
-            device_id.as_deref(),
-            OutputMode::Device,
-            Quality::High,
-            self.share,
-        ) {
+        let (mode, quality, share) = to_engine(self.policy);
+        match Session::open(&path, device_id.as_deref(), mode, quality, share) {
             Ok(mut session) => {
                 if let Err(e) = session.play() {
                     self.emit_error("play", &e.to_string());
@@ -374,6 +429,7 @@ impl Control {
         guard.resolved = self.resolved.clone();
         guard.queue = self.queue.clone();
         guard.queue_index = self.index;
+        guard.policy = self.policy;
         guard.analyzer_version = self.version;
         if path_changed {
             guard.analysis = None;
@@ -382,7 +438,7 @@ impl Control {
         drop(guard);
 
         if path_changed || track_changed || phase_changed {
-            self.events.emit(Event::State(snapshot.clone()));
+            self.events.emit(Event::State(Box::new(snapshot.clone())));
             if let Some(path) = current_path.clone() {
                 self.events.emit(Event::TrackChanged {
                     path,
@@ -486,10 +542,31 @@ impl Control {
             guard.resolved = self.resolved.clone();
             guard.queue = self.queue.clone();
             guard.queue_index = self.index;
+            guard.policy = self.policy;
             guard.analyzer_version = self.version;
             guard.clone()
         };
-        self.events.emit(Event::State(snapshot.clone()));
+        self.events.emit(Event::State(Box::new(snapshot.clone())));
         snapshot
     }
+}
+
+/// One translation, in one place: the policy is the only description of an
+/// open request, and the engine's types are derived from it here.
+fn to_engine(policy: PlaybackPolicy) -> (OutputMode, Quality, ShareKind) {
+    let mode = match policy.rate {
+        OutputRatePolicy::Native => OutputMode::Native,
+        OutputRatePolicy::Device => OutputMode::Device,
+        OutputRatePolicy::Fixed { rate_hz } => OutputMode::Fixed(rate_hz),
+    };
+    let quality = match policy.quality {
+        ResamplerQuality::Fast => Quality::Fast,
+        ResamplerQuality::High => Quality::High,
+        ResamplerQuality::VeryHigh => Quality::VeryHigh,
+    };
+    let share = match policy.share {
+        ShareMode::Exclusive => ShareKind::Exclusive,
+        ShareMode::Shared => ShareKind::Shared,
+    };
+    (mode, quality, share)
 }
