@@ -413,12 +413,21 @@ fn main() {
     // that reports 192 kHz, so a renegotiation would be visible in the rate.
     let before_next = handle.snapshot();
     handle.next().expect("next");
+    // The path flips to B before the position necessarily reflects it, and the
+    // new track starts advancing immediately. Waiting for the path alone and
+    // then sampling the position afterwards compares two different moments --
+    // which read 2.0 s against 3.6 s once, and looked like a skip that had not
+    // happened. The condition therefore includes the position.
     let after_next = wait_until(
         &events,
         || handle.snapshot(),
         Duration::from_secs(10),
-        |s| s.path.as_deref() == Some(b.as_path()) && s.state == PlaybackState::Playing,
-        "B playing",
+        |s| {
+            s.path.as_deref() == Some(b.as_path())
+                && s.state == PlaybackState::Playing
+                && s.position < before_next.position
+        },
+        "B playing from its own start",
     );
     check(
         after_next.render_path.as_ref().map(|r| r.sample_rate)
@@ -442,24 +451,10 @@ fn main() {
             before_next.track_serial, after_next.track_serial
         ),
     );
-    // The position is asynchronous -- the session reports it from the render
-    // thread -- so it is read as a wait rather than once. The budget is short on
-    // purpose: playback advances the position at about one second per second, so
-    // a wait long enough to reach 2.2 s by playing on would pass without the skip
-    // having done anything.
-    let deadline = Instant::now() + Duration::from_millis(1_500);
-    let mut restarted = after_next.position;
-    while Instant::now() < deadline {
-        restarted = handle.snapshot().position;
-        if restarted < before_next.position {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
     check(
-        restarted < before_next.position,
+        after_next.position < before_next.position,
         "the skip restarts the position",
-        format!("{:.3}s -> {:.3}s", before_next.position, restarted),
+        format!("{:.3}s -> {:.3}s", before_next.position, after_next.position),
     );
 
     handle.stop().expect("stop");
@@ -541,6 +536,101 @@ fn main() {
         format!("{duplicates} extra"),
     );
     let _ = std::fs::remove_file(&c);
+
+    // ---- device list and selection -----------------------------------------
+    //
+    // This runs last, on its own track, because a device change reopens the
+    // stream and therefore advances the current one by the length of the reopen.
+    // Sharing a fixture with the skip and policy checks made every one of them
+    // race the end of a 12 s file.
+    //
+    // The engine probes each endpoint by opening it, so the list is a
+    // measurement rather than a cache. Two things are checked: that Base
+    // forwards it, and that choosing an endpoint is a different command from
+    // `play` -- `play` replaces the queue by design, and a device menu that did
+    // the same would discard what the listener queued.
+    let d = dir.join("base_probe_d.wav");
+    write_click(&d, 0.06);
+    handle.play(&d, None).expect("play D");
+    handle.enqueue(vec![b.clone()]).expect("enqueue B again");
+    wait_until(
+        &events,
+        || handle.snapshot(),
+        Duration::from_secs(20),
+        |s| s.state == PlaybackState::Playing && s.path.as_deref() == Some(d.as_path()),
+        "D playing",
+    );
+
+    handle.list_devices().expect("list devices");
+    let snap = wait_until(
+        &events,
+        || handle.snapshot(),
+        Duration::from_secs(20),
+        |s| !s.devices.is_empty(),
+        "device list",
+    );
+    let devices = snap.devices;
+    check(
+        devices.iter().all(|d| !d.id.is_empty() && !d.name.is_empty()),
+        "every device has an id and a name",
+        format!("{} devices", devices.len()),
+    );
+    let queue_before = handle.snapshot().queue;
+    let index_before = handle.snapshot().queue_index;
+    // A device that is NOT the one already open: choosing the current one
+    // returns early without reopening, so a check built on it could not fail.
+    // The device that is actually open. `play` with no id leaves Base's field
+    // unset until `open_at` fills it in, so the snapshot is the authority --
+    // reading `None` here would pick devices[0] even when that is the endpoint
+    // already playing, and `set_device` would then return early.
+    let current = handle.snapshot().device_id.clone();
+    let chosen = match devices.iter().find(|dev| Some(&dev.id) != current.as_ref()) {
+        Some(dev) => dev.id.clone(),
+        None => {
+            println!("  [INFO] only one endpoint here; the reopen path is not exercised");
+            devices[0].id.clone()
+        }
+    };
+    let different = Some(&chosen) != current.as_ref();
+    handle.set_device(Some(&chosen)).expect("set device");
+    let snap = wait_until(
+        &events,
+        || handle.snapshot(),
+        Duration::from_secs(20),
+        |s| s.device_id.as_deref() == Some(chosen.as_str()),
+        "device chosen",
+    );
+    check(
+        snap.queue == queue_before && snap.queue_index == index_before,
+        "choosing a device leaves the queue alone",
+        format!("{} entries, index {:?}", snap.queue.len(), snap.queue_index),
+    );
+    if different {
+        // What can be asserted without racing the reopen: the state still
+        // reports playback and the track is unchanged. The engine's own
+        // resolved report is NOT asserted here -- `open_at` reopens and the
+        // resolved event lands on its own schedule, and a check that waits for
+        // it either races or cannot fail. It is listed as unverified in
+        // README.md rather than covered by a check that means nothing.
+        check(
+            snap.state == PlaybackState::Playing,
+            "changing the endpoint keeps playing",
+            format!("{:?}", snap.state),
+        );
+        check(
+            snap.path.as_deref()
+                == queue_before.get(index_before.unwrap_or(0)).map(|p| p.as_path()),
+            "changing the endpoint keeps the track",
+            format!("{:?}", snap.path),
+        );
+    } else {
+        check(
+            snap.state == PlaybackState::Playing,
+            "choosing the current device does not stop playback",
+            format!("{:?}", snap.state),
+        );
+    }
+    let _ = std::fs::remove_file(&d);
 
     base.shutdown();
     let _ = std::fs::remove_file(&a);

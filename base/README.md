@@ -52,7 +52,13 @@ socket.
 
 Commands: `play`, `enqueue`, `pause`, `resume`, `stop`, `seek`, `next`,
 `analyze`, `set_volume`, `set_eq`, `set_crossfeed`, `set_replay_gain`,
-`set_convolver`, `set_crossfade`, `set_policy`, `shutdown`.
+`set_convolver`, `set_crossfade`, `set_policy`, `list_devices`, `set_device`,
+`shutdown`.
+
+`play` replaces the queue by design: it is the "start this track" command.
+Choosing an endpoint is `set_device`, which deliberately does not touch the
+queue -- a device menu that discarded what the listener queued would be the
+wrong shape.
 
 `snapshot().track_serial` increments inside one session each time a preloaded
 track takes over. A UI needs it to tell a gapless or manual seam from a new
@@ -238,6 +244,14 @@ runtime plugin ABI that only works on desktop.
 - `set_policy` reopens the stream, which costs one device close and open. There
   is no crossfade or click suppression across that boundary; a UI should
   debounce a slider rather than send every intermediate value.
+- `set_device` on a live stream reopens on the new endpoint at the current
+  position. The reopen itself is not covered by a check: `open_at` publishes
+  before it returns, so any assertion either races the reopen or passes
+  regardless. What is checked is that the queue survives and that playback
+  continues; the engine's own `deviceId` in the resolved report is the field a
+  future check should read once the publication order is fixed.
+- Queue editing is append-only. There is no remove, no reorder and no clear, so
+  a UI cannot take an entry back out once it is in.
 - The C ABI has one subscription and no unsubscribe; shutdown is the lifetime
   boundary.
 - iOS is not built or verified here. `nae.dll` is Windows-only; an iOS build

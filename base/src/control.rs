@@ -16,8 +16,8 @@ use neiro_audio::{
 
 use crate::analysis::{self, CancelRegistry};
 use crate::protocol::{
-    Event, OutputRatePolicy, PlaybackPolicy, PlaybackState, RenderPath, ResamplerQuality,
-    ShareMode, Snapshot,
+    DeviceInfo, Event, OutputRatePolicy, PlaybackPolicy, PlaybackState, RenderPath,
+    ResamplerQuality, ShareMode, Snapshot,
 };
 use crate::EventBus;
 
@@ -45,6 +45,7 @@ pub(crate) fn run(
         device_id: None,
         policy,
         registry,
+        devices: Vec::new(),
         settings: None,
         last_serial: None,
         last_phase: None,
@@ -71,6 +72,7 @@ struct Control {
     device_id: Option<String>,
     policy: PlaybackPolicy,
     registry: CancelRegistry,
+    devices: Vec<DeviceInfo>,
     settings: Option<SessionSettings>,
     last_serial: Option<u64>,
     last_phase: Option<SessionPhase>,
@@ -102,11 +104,16 @@ impl Control {
                 if let Some(id) = device_id {
                     self.device_id = Some(id);
                 }
+                // `play` replaces the queue by design: it is the "start this
+                // track" command. Choosing an endpoint is `SetDevice`, which
+                // deliberately does not touch the queue.
                 self.close_session();
                 self.queue = vec![path];
                 self.index = Some(0);
                 self.open_at(0, false);
             }
+            Command::ListDevices => self.list_devices(),
+            Command::SetDevice { device_id } => self.set_device(device_id),
             Command::Enqueue { paths } => {
                 if paths.is_empty() {
                     return true;
@@ -238,6 +245,108 @@ impl Control {
             self.resolved = Some(value.clone());
             self.events.emit(Event::ResolvedPathChanged { resolved: value });
         }
+    }
+
+    /// Ask the engine for the endpoint list.
+    ///
+    /// The engine probes each endpoint by really opening it, so this can take a
+    /// moment and can report a device as not exclusive-capable simply because
+    /// another program holds it. That is the engine's answer, not a cached one,
+    /// and Base passes it through unchanged.
+    fn list_devices(&mut self) {
+        match neiro_audio::enumerate_devices() {
+            Ok(devices) => {
+                self.devices = devices
+                    .into_iter()
+                    .map(|d| DeviceInfo {
+                        id: d.id,
+                        name: d.name,
+                        sample_rate: d.sample_rate,
+                        bits_per_sample: d.bits_per_sample,
+                        valid_bits: d.valid_bits,
+                        channels: d.channels,
+                        exclusive: d.exclusive,
+                        shared: d.shared,
+                    })
+                    .collect();
+                let devices = self.devices.clone();
+                self.events.emit(Event::DevicesChanged {
+                    devices: devices.clone(),
+                });
+                self.publish_phase(
+                    PlaybackState::from(self.last_phase.unwrap_or(SessionPhase::Idle)),
+                    self.render_path(),
+                );
+            }
+            Err(e) => self.emit_error("devices", &e.to_string()),
+        }
+    }
+
+    /// Choose the endpoint without disturbing the queue.
+    ///
+    /// A live stream is reopened at the current position on the new endpoint,
+    /// because the endpoint is an open-time choice in the engine. That is the
+    /// same reason `set_policy` reopens; a UI that showed the new device while
+    /// the old one kept playing would be reporting a change that did not happen.
+    ///
+    /// `None` clears the choice, so the next open asks the engine for the
+    /// system default once. It is not a request to move to "some other device"
+    /// after a device-lost error: that stays an error.
+    fn set_device(&mut self, device_id: Option<String>) {
+        if self.device_id == device_id {
+            return;
+        }
+        self.device_id = device_id;
+        self.publish_phase(
+            PlaybackState::from(self.last_phase.unwrap_or(SessionPhase::Idle)),
+            self.render_path(),
+        );
+
+        let Some(index) = self.index else {
+            return;
+        };
+        let live = matches!(
+            self.last_phase,
+            Some(SessionPhase::Playing | SessionPhase::Paused)
+        );
+        if !live {
+            return;
+        }
+        let paused = matches!(self.last_phase, Some(SessionPhase::Paused));
+        let position = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .position;
+
+        self.open_at(index, true);
+        // `open_at` reports its own failure and leaves `self.session` as None.
+        // Without this the snapshot kept the previous stream's resolved report,
+        // naming an endpoint the engine is no longer on -- a UI would show the
+        // old device while nothing was playing.
+        if self.session.is_none() {
+            self.resolved = None;
+            self.events.emit(Event::ResolvedPathChanged {
+                resolved: serde_json::Value::Null,
+            });
+        }
+        let mut errors = Vec::new();
+        if let Some(session) = self.session.as_mut() {
+            if position > 0.0 {
+                if let Err(e) = session.seek(position) {
+                    errors.push(e.to_string());
+                }
+            }
+            if paused {
+                if let Err(e) = session.pause() {
+                    errors.push(e.to_string());
+                }
+            }
+        }
+        for message in errors {
+            self.emit_error("device", &message);
+        }
+        self.poll();
     }
 
     /// Output mode and resampler quality are open-time settings in the engine,
@@ -461,6 +570,7 @@ impl Control {
         guard.state = PlaybackState::from(phase);
         guard.path = current_path.clone();
         guard.device_id = self.device_id.clone();
+        guard.devices = self.devices.clone();
         guard.position = state.position;
         guard.duration = state.duration;
         guard.track_serial = state.track_serial;
@@ -592,6 +702,7 @@ impl Control {
             guard.state = state;
             guard.path = self.current_path();
             guard.device_id = self.device_id.clone();
+            guard.devices = self.devices.clone();
             guard.render_path = render;
             guard.settings = self.settings.clone();
             guard.resolved = self.resolved.clone();

@@ -44,6 +44,25 @@ impl From<SessionPhase> for PlaybackState {
     }
 }
 
+/// One output endpoint, as the engine enumerated it.
+///
+/// Copied from the engine verbatim. Base does not cache a format and present it
+/// as current: `sample_rate` and the bit fields are what the endpoint reported
+/// when the list was taken, and a host that opened the device knows better than
+/// to treat them as the live stream's format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    /// The endpoint's native rate. 0 when it did not report one.
+    pub sample_rate: u32,
+    pub bits_per_sample: u32,
+    pub valid_bits: u32,
+    pub channels: u32,
+    pub exclusive: bool,
+    pub shared: bool,
+}
+
 /// How the engine should choose the output rate.
 ///
 /// These are the engine's output modes, not a second vocabulary: `Native` asks
@@ -115,7 +134,13 @@ impl PlaybackPolicy {
 pub struct Snapshot {
     pub state: PlaybackState,
     pub path: Option<PathBuf>,
+    /// The endpoint the next open will use. `None` before one has been chosen.
     pub device_id: Option<String>,
+    /// The endpoints the engine reported the last time they were listed.
+    ///
+    /// Empty means "not listed yet", not "this machine has none" -- the same
+    /// rule the analysis plane follows for a missing measurement.
+    pub devices: Vec<DeviceInfo>,
     pub position: f64,
     pub duration: f64,
     /// Increments inside one session each time a preloaded track takes over.
@@ -264,6 +289,19 @@ pub enum Command {
     SetPolicy {
         policy: PlaybackPolicy,
     },
+    /// Ask Base to list the endpoints. The answer arrives as a
+    /// `devices_changed` event and is also stored in the snapshot.
+    ListDevices,
+    /// Choose the endpoint for the next open, and for the current one if a
+    /// track is playing. This is separate from `Play` so a UI can offer a
+    /// device menu without stopping playback or discarding the queue.
+    ///
+    /// `None` means "the endpoint last used"; if there is none, the system
+    /// default is chosen once. It never silently moves to another endpoint
+    /// after a device-lost error.
+    SetDevice {
+        device_id: Option<String>,
+    },
     /// Stop playback, close the stream and end both workers.
     Shutdown,
 }
@@ -298,6 +336,12 @@ pub enum Event {
     /// the engine actually did with it.
     PolicyChanged {
         policy: PlaybackPolicy,
+    },
+    /// The endpoint list was refreshed. An empty list is a measurement -- the
+    /// engine found none -- and is not the same as "not listed yet", which is
+    /// the absence of this event.
+    DevicesChanged {
+        devices: Vec<DeviceInfo>,
     },
     /// The applied DSP parameters were changed or read after a setter.
     SettingsChanged {

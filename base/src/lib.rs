@@ -196,6 +196,21 @@ impl BaseHandle {
         self.dispatch(Command::SetPolicy { policy })
     }
 
+    /// Ask Base to list the endpoints. The answer arrives as a
+    /// `DevicesChanged` event and is stored in the snapshot.
+    pub fn list_devices(&self) -> Result<(), BaseError> {
+        self.dispatch(Command::ListDevices)
+    }
+
+    /// Choose the endpoint, without touching the queue. A live stream reopens
+    /// at the current position on the new endpoint. `None` means "the endpoint
+    /// last used"; if there is none, the system default is chosen once.
+    pub fn set_device(&self, device_id: Option<&str>) -> Result<(), BaseError> {
+        self.dispatch(Command::SetDevice {
+            device_id: device_id.map(str::to_owned),
+        })
+    }
+
     /// Ask the workers to stop. `Base`'s `Drop` also does this and joins.
     pub fn shutdown(&self) -> Result<(), BaseError> {
         self.dispatch(Command::Shutdown)
