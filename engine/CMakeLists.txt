@@ -872,6 +872,11 @@ add_custom_command(TARGET replaygain_check POST_BUILD
 # Gapless: two same-format files, the engine preloads the second and the session
 # queue advances the serial. The engine's underrun/pad counters must not move at
 # the seam; the session must stay PLAYING through it.
+add_executable(skip_check skip_check.cpp)
+target_include_directories(skip_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(skip_check PRIVATE nae)
+add_dependencies(skip_check nae)
+
 add_executable(gapless_check gapless_check.cpp)
 target_include_directories(gapless_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gapless_check PRIVATE nae shell32)

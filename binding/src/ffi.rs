@@ -1279,6 +1279,7 @@ extern "C" {
     pub fn NAE_SessionSeek(session: *mut NAE_Session, seconds: f64) -> i32;
     pub fn NAE_SessionStop(session: *mut NAE_Session) -> i32;
     pub fn NAE_SessionGetState(session: *mut NAE_Session, out: *mut NAE_SessionState) -> i32;
+    pub fn NAE_SessionSkipToNext(session: *mut NAE_Session) -> i32;
     pub fn NAE_SessionQueueAdd(session: *mut NAE_Session, path: *const c_char) -> i32;
     pub fn NAE_SessionQueueClear(session: *mut NAE_Session) -> i32;
     pub fn NAE_SessionQueueCount(session: *mut NAE_Session) -> i32;

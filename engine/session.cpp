@@ -40,6 +40,10 @@ struct NAE_Session {
     std::atomic<bool> quit{false};
     std::atomic<bool> pauseCmd{false};
     std::atomic<bool> resumeCmd{false};
+    /// A manual skip. Consumed by the session thread, which calls
+    /// NAE_SkipToNext on the handle and then has to preload whatever the queue
+    /// holds after that.
+    std::atomic<bool> skipCmd{false};
     std::atomic<double> seekRequest{-1.0};
     std::atomic<double> volumeRequest{-1.0};
     std::atomic<double> volume{1.0};
@@ -965,6 +969,20 @@ void sessionThread(NAE_Session* s) {
         if (s->pauseCmd.exchange(false)) NAE_Pause(s->handle);
         if (s->resumeCmd.exchange(false)) NAE_Resume(s->handle);
 
+        if (s->skipCmd.exchange(false)) {
+            // The engine switches between slices, so the serial and the position
+            // read below already describe the new track. Preloading the one after
+            // it here is what keeps the queue moving: without this the queue
+            // stops at whatever was preloaded when the skip was requested.
+            const int32_t skipRc = NAE_SkipToNext(s->handle);
+            if (skipRc != NAE_OK) {
+                setError(s, skipRc);
+            } else {
+                s->nextPreloaded = false;
+                s->queuePending = true;
+            }
+        }
+
         const int32_t st = s->state.load();
         if (st == NAE_SESSION_PLAYING || st == NAE_SESSION_PAUSED ||
             st == NAE_SESSION_ENDED) {
@@ -1621,6 +1639,20 @@ int32_t NAE_SessionGetCrossfade(NAE_Session* session,
         }
     }
     out->structSize = sizeof(NAE_CrossfadeParams);
+    return NAE_OK;
+}
+
+int32_t NAE_SessionSkipToNext(NAE_Session* session) NAE_NOEXCEPT {
+    if (!session) return NAE_ERR_INVALID_ARGUMENT;
+    if (!session->nextPreloaded) {
+        // Nothing to switch to. The engine's own NAE_SkipToNext would answer the
+        // same way; asking here keeps the session's last-error in step with the
+        // caller's error code.
+        std::lock_guard<std::mutex> lock(session->errMutex);
+        session->lastError = "no next track is preloaded";
+        return NAE_ERR_NOT_OPEN;
+    }
+    session->skipCmd = true;
     return NAE_OK;
 }
 

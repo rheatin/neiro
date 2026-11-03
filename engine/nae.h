@@ -1296,6 +1296,22 @@ int32_t NAE_PreloadNext(NAE_Handle* handle, const char* path) NAE_NOEXCEPT;
 /** Drop the preloaded next file. The current file keeps playing. */
 int32_t NAE_ClearNext(NAE_Handle* handle) NAE_NOEXCEPT;
 
+/**
+ * Switch to the preloaded next track now, discarding the rest of this one.
+ *
+ * The seam is normally crossed by the render loop when the source runs out, which
+ * is gapless and costs nothing. This is the manual case: the listener pressed
+ * skip, so the remainder is not wanted. Doing it here rather than by closing and
+ * reopening a handle keeps the device stream, the negotiated format and the
+ * resampler phase, so there is no gap and no renegotiation -- which is what the
+ * close-and-reopen path cost.
+ *
+ * The switch itself happens on the render thread between slices, because that is
+ * where the fifo and the resampler live; this only records the request. Returns
+ * NAE_ERR_NOT_OPEN when there is nothing preloaded to switch to.
+ */
+int32_t NAE_SkipToNext(NAE_Handle* handle) NAE_NOEXCEPT;
+
 /** Increments each time a preloaded file takes over. 0 for a tone. */
 uint64_t NAE_GetTrackSerial(NAE_Handle* handle) NAE_NOEXCEPT;
 
@@ -1887,6 +1903,15 @@ int32_t NAE_SessionGetCrossfade(NAE_Session* session, NAE_CrossfadeParams* out) 
  * rate or channel count differs, the track stays queued and the last error says
  * why it could not be preloaded.
  */
+/**
+ * Switch to the next queued track now, without closing the stream.
+ *
+ * The manual counterpart of the gapless seam: the session thread asks the handle
+ * to switch between slices, so the device stays open, the negotiated format is
+ * kept and there is no gap. Returns NAE_ERR_NOT_OPEN when nothing is preloaded.
+ */
+int32_t NAE_SessionSkipToNext(NAE_Session* session) NAE_NOEXCEPT;
+
 int32_t NAE_SessionQueueAdd(NAE_Session* session, const char* path) NAE_NOEXCEPT;
 int32_t NAE_SessionQueueClear(NAE_Session* session) NAE_NOEXCEPT;
 int32_t NAE_SessionQueueCount(NAE_Session* session) NAE_NOEXCEPT;

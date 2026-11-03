@@ -54,6 +54,11 @@ Commands: `play`, `enqueue`, `pause`, `resume`, `stop`, `seek`, `next`,
 `analyze`, `set_volume`, `set_eq`, `set_crossfeed`, `set_replay_gain`,
 `set_convolver`, `set_crossfade`, `set_policy`, `shutdown`.
 
+`snapshot().track_serial` increments inside one session each time a preloaded
+track takes over. A UI needs it to tell a gapless or manual seam from a new
+stream: a seam keeps the session and the counter moves, while a close and reopen
+starts over at 0 -- and every other field looks the same.
+
 `settings` in the snapshot is the applied configuration read back from the
 session (`EqParams`, `CrossfeedParams`, `ConvolverParams`, `CrossfadeParams`,
 `ReplayGainParams`, volume). `render_path` is what is actually active on the
@@ -215,8 +220,11 @@ runtime plugin ABI that only works on desktop.
 
 ## Limits
 
-- Manual `next` closes and reopens the session; automatic advancement is the
-  session's gapless queue.
+- Manual `next` crosses the same seam gapless uses, so the stream, the
+  negotiated format and the resampler phase are kept. It falls back to closing
+  and reopening when the engine refuses the seam -- an empty queue, or a next
+  track whose rate or channel count differs from the current one, which is
+  exactly the condition gapless requires.
 - The cache is bounded LRU (256 entries); there is no pre-analysis of a whole
   library yet.
 - Cancellation is between decoded blocks, so a decode stops within one packet

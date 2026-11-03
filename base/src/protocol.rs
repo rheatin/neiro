@@ -118,6 +118,13 @@ pub struct Snapshot {
     pub device_id: Option<String>,
     pub position: f64,
     pub duration: f64,
+    /// Increments inside one session each time a preloaded track takes over.
+    ///
+    /// This is how a UI tells a gapless or manual seam from a new stream: a seam
+    /// keeps the same session and the counter moves, while a close and reopen
+    /// starts a new session back at 0. The two look identical in every other
+    /// field, which is why this one is carried.
+    pub track_serial: u64,
     /// The render path the engine actually reports: resampling, dithering,
     /// every DSP stage that is active, and the bit-perfect reason. Never
     /// reconstructed from the settings the UI asked for.

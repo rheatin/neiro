@@ -306,6 +306,37 @@ impl Control {
             self.publish_phase(PlaybackState::Stopped, self.render_path());
             return;
         }
+
+        // The engine can switch at the source boundary, which keeps the device
+        // stream, the negotiated format and the resampler phase. Closing and
+        // reopening cost all three and left an audible gap, which is why this
+        // is the first path tried rather than the fallback.
+        //
+        // The session owns the queue it was seeded with and pops as it preloads,
+        // so after this switch its next preload is already the track after the
+        // one being opened. Base only has to move its own index.
+        let skipped = match self.session.as_mut() {
+            Some(session) => match session.skip_to_next() {
+                Ok(()) => true,
+                // Nothing preloaded: an empty queue, or a format the engine
+                // cannot seam across (gapless requires the same rate and
+                // channel count). Reopening is the honest answer for those.
+                Err(_) => false,
+            },
+            None => false,
+        };
+
+        if skipped {
+            // The index is not advanced here. `poll` moves it when the engine's
+            // serial changes, which is the moment the audio actually switched;
+            // advancing now would report track B while track A is still what the
+            // device is being fed, and every path-derived fact would be about a
+            // file that is not playing.
+            self.last_position_emit = Instant::now();
+            self.poll();
+            self.request_current_and_next();
+            return;
+        }
         self.open_at(index + 1, true);
     }
 
@@ -432,6 +463,7 @@ impl Control {
         guard.device_id = self.device_id.clone();
         guard.position = state.position;
         guard.duration = state.duration;
+        guard.track_serial = state.track_serial;
         guard.render_path = Some(render.clone());
         guard.settings = self.settings.clone();
         guard.resolved = self.resolved.clone();

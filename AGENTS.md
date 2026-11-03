@@ -103,6 +103,7 @@ cd engine/build
 .\mode_check.exe
 .\reopen_check.exe
 .\source_width_check.exe
+.\skip_check.exe  g1.wav g2.wav
 ```
 
 The Rust binding is the cross-language ABI probe:

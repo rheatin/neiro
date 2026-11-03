@@ -407,13 +407,59 @@ fn main() {
         "seek to 2s",
     );
 
+    // A manual skip now crosses the seam the way gapless does. What that has to
+    // look like from outside is the same format on both sides: a close and
+    // reopen could renegotiate the endpoint, and this probe runs on a device
+    // that reports 192 kHz, so a renegotiation would be visible in the rate.
+    let before_next = handle.snapshot();
     handle.next().expect("next");
-    wait_until(
+    let after_next = wait_until(
         &events,
         || handle.snapshot(),
         Duration::from_secs(10),
         |s| s.path.as_deref() == Some(b.as_path()) && s.state == PlaybackState::Playing,
         "B playing",
+    );
+    check(
+        after_next.render_path.as_ref().map(|r| r.sample_rate)
+            == before_next.render_path.as_ref().map(|r| r.sample_rate),
+        "the skip keeps the negotiated rate",
+        format!(
+            "{:?} -> {:?}",
+            before_next.render_path.as_ref().map(|r| r.sample_rate),
+            after_next.render_path.as_ref().map(|r| r.sample_rate)
+        ),
+    );
+    // The rate and the position alone cannot tell a seam from a reopened
+    // stream: a close and reopen also keeps the rate and also starts at zero.
+    // The serial is the field that separates them -- it moves inside one session
+    // and starts over in a new one.
+    check(
+        after_next.track_serial > before_next.track_serial,
+        "the skip crosses a seam instead of reopening the session",
+        format!(
+            "serial {} -> {}",
+            before_next.track_serial, after_next.track_serial
+        ),
+    );
+    // The position is asynchronous -- the session reports it from the render
+    // thread -- so it is read as a wait rather than once. The budget is short on
+    // purpose: playback advances the position at about one second per second, so
+    // a wait long enough to reach 2.2 s by playing on would pass without the skip
+    // having done anything.
+    let deadline = Instant::now() + Duration::from_millis(1_500);
+    let mut restarted = after_next.position;
+    while Instant::now() < deadline {
+        restarted = handle.snapshot().position;
+        if restarted < before_next.position {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    check(
+        restarted < before_next.position,
+        "the skip restarts the position",
+        format!("{:.3}s -> {:.3}s", before_next.position, restarted),
     );
 
     handle.stop().expect("stop");

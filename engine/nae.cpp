@@ -1050,6 +1050,12 @@ struct NAE_Handle {
 
     /// Increments when a preloaded file takes over. A tone stays at 0.
     uint64_t trackSerial = 0;
+    /// Set by NAE_SkipToNext, consumed by the next render slice.
+    ///
+    /// The switch has to happen where the fifo and the resampler are owned -- on
+    /// the render thread, between slices -- so the request is a flag rather than
+    /// a swap performed by the caller.
+    std::atomic<bool> skipRequested{false};
 
     // ---- DoP ----
     //
@@ -2277,6 +2283,24 @@ int32_t NAE_ClearNext(NAE_Handle* handle) NAE_NOEXCEPT {
     handle->nextPrefetchedFrames = 0;
 #endif
     return NAE_OK;
+}
+
+int32_t NAE_SkipToNext(NAE_Handle* handle) NAE_NOEXCEPT {
+    if (!handle) return NAE_ERR_INVALID_ARGUMENT;
+#ifdef NEIRO_HAVE_FFMPEG
+    // Nothing preloaded means there is no next track yet. Reporting that here is
+    // better than accepting the request and letting the render loop discover
+    // there was nothing to switch to -- the caller could not tell those apart.
+    if (!handle->nextDecoder) {
+        g_lastErrorText = "no next track is preloaded";
+        return NAE_ERR_NOT_OPEN;
+    }
+    handle->skipRequested.store(true);
+    return NAE_OK;
+#else
+    (void)handle;
+    return NAE_ERR_NOT_OPEN;
+#endif
 }
 
 uint64_t NAE_GetTrackSerial(NAE_Handle* handle) NAE_NOEXCEPT {
@@ -5426,6 +5450,11 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
     size_t fifoProduced = 0;
     size_t fifoConsumed = 0;
     bool sourceDone = sourcePos >= sourceLimit;
+    // Whether this handle is playing a file rather than generating a tone.
+    bool haveFile = false;
+#ifdef NEIRO_HAVE_FFMPEG
+    haveFile = handle->decoder != nullptr;
+#endif
 
     // Swap the preloaded file at the source boundary. Returns false when there
     // is nothing to swap to; the caller then treats the track as finished.
@@ -5443,12 +5472,15 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
 #endif
     };
 
-    // Whether this handle is playing a file rather than generating a tone. Hoisted
-    // out of the loop so the per-block branch is a plain bool test.
-    bool haveFile = false;
-#ifdef NEIRO_HAVE_FFMPEG
-    haveFile = handle->decoder != nullptr;
-#endif
+    // A manual skip. The rest of this track is discarded rather than played
+    // out: without clearing the fifo the device would deliver up to a second of
+    // the track the listener just skipped past before the new one started.
+    if (handle->skipRequested.exchange(false)) {
+        fifo.clear();
+        sourcePos = sourceLimit;
+        sourceDone = true;
+        atBoundary();
+    }
 
     // Feed the resampler until it has produced at least `want` device frames, or
     // the source has run out. Bounded, so a pathological ratio cannot spin here.

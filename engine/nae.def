@@ -37,6 +37,7 @@ EXPORTS
     NAE_Position
     NAE_PreloadNext
     NAE_ClearNext
+    NAE_SkipToNext
     NAE_GetTrackSerial
     NAE_Duration
     NAE_GetLastErrorText
@@ -110,6 +111,7 @@ NAE_QueryDecodePath
     NAE_SessionSetCrossfade
     NAE_SessionGetCrossfade
     NAE_SessionQueueAdd
+    NAE_SessionSkipToNext
     NAE_SessionQueueClear
     NAE_SessionQueueCount
     NAE_ParamCount

@@ -247,6 +247,16 @@ impl Session {
         self.check(unsafe { ffi::NAE_SessionQueueAdd(self.raw, c.as_ptr()) })
     }
 
+    /// Switch to the next queued track without closing the stream.
+    ///
+    /// This is the manual skip. The session thread asks the handle to switch
+    /// between render slices, so the device stays open and the negotiated format
+    /// is kept -- the same seam gapless uses. Returns an error when nothing is
+    /// preloaded, which is what a queue that has run out looks like.
+    pub fn skip_to_next(&mut self) -> Result<()> {
+        self.check(unsafe { ffi::NAE_SessionSkipToNext(self.raw) })
+    }
+
     pub fn queue_clear(&mut self) -> Result<()> {
         self.check(unsafe { ffi::NAE_SessionQueueClear(self.raw) })
     }
