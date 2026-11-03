@@ -1,0 +1,197 @@
+# Linker version script for nae.dll (GNU ld / MinGW).
+#
+# `--output-def` alone does NOT restrict exports: it left 8598 symbols visible,
+# which turned every piece of C++ internals -- mangled std::* helpers,
+# openExclusiveSineImpl, the whole COM plumbing -- into part of the DLL's public
+# ABI. bindgen could bind to any of it, and none of it was meant to be stable.
+#
+# `local: *;` is the part that matters: it makes everything not explicitly
+# listed private to the DLL.
+#
+# On MSVC the equivalent is nae.def, selected by CMake below.
+
+{
+  global:
+    # The public C ABI. Keep in sync with nae.def and with the Rust bindings.
+    NAE_GetEngineCapabilities;
+    NAE_GetLastError;
+    NAE_GetLastHresult;
+    NAE_EnumerateDevices;
+    NAE_FreeString;
+    NAE_OpenExclusive;
+    NAE_OpenExclusiveSine;
+    NAE_PlaySine;
+    NAE_Close;
+    NAE_Shutdown;
+    NAE_GetDefaultDeviceId;
+
+    # File playback. NAE_Play is the honest name and is what new code calls;
+    # NAE_PlaySine above stays exported because the Rust host still calls it, and
+    # the two are the same function.
+    #
+    # Note that a function missing from this list is not a link error inside the
+    # DLL -- it compiles, links and works. It simply does not appear in the export
+    # table, so the host fails to resolve it at load time. A new entry point that
+    # "is not there" means this file first.
+    NAE_OpenFile;
+
+    # DoP is a transport, not a decode path. It bypasses the float chain.
+    NAE_OpenDop;
+    NAE_OpenDopDownrated;
+    NAE_OpenNativeDsd;
+    NAE_OpenNativeDsdSink;
+    NAE_PlayNativeDsd;
+    NAE_PlayDop;
+
+    # 与 NAE_OpenFile 完全相同，只有 share mode 不同。分开导出是因为能力声明
+    # 列的是一份**模式清单**，而读清单的宿主必须能逐个去要——「声明了却打不开」
+    # 正是这个改动要消除的那个 bug。
+    NAE_OpenFileShared;
+    NAE_OpenFileWithRouting;
+    NAE_OpenFileWithBuffer;
+    NAE_Play;
+    NAE_Seek;
+    NAE_Position;
+    NAE_PreloadNext;
+    NAE_ClearNext;
+    NAE_GetTrackSerial;
+    NAE_Duration;
+    NAE_GetLastErrorText;
+    NAE_PipelineStats;
+
+    # Telemetry. Added for the signal-path display, and the two entry points that
+    # make the chain explainable rather than merely reportable.
+    NAE_QuerySignalPath;
+    NAE_QuerySupportedRates;
+
+    # The output spectrum tap. Added because on the exclusive route the samples
+    # never enter the webview, so the player had no data source for its
+    # visualiser at all -- while this header had claimed for a long time that the
+    # engine had a spectrum tap. It now has one, and it is inside the render loop
+    # so the bins describe what the device receives rather than what the file says.
+    NAE_QuerySpectrum;
+
+    # 时域包络，节拍检测用。与频谱 tap 共用同一个环形缓冲，所以采样依然不出 DLL。
+    #
+    # 和上面那个文件头的警告是同一件事：不在这个列表里的函数**不会**让 DLL 链接
+    # 失败，它只是不会出现在导出表里，然后宿主在加载时解析失败。这次就是这样——
+    # 编译通过了、链接通过了、函数确实在 DLL 里，只是不在导出表上。
+    NAE_QueryEnvelope;
+
+    # 整首波形的 peaks。**阻塞**：要再解一遍文件（实测典型曲目约 0.5 秒，
+    # 245 MB / 192 kHz 约 1.6 秒），所以必须在调用方的后台线程上跑。
+    #
+    # **它收的是路径，不是 handle** —— 一开始写的是 handle 版，而
+    # `src-tauri/src/audio/service.rs:5-17` 写着应用那条更严的约定（stream `!Send`、
+    # 「nothing audio-related is ever handed between threads」、开/用/关都在同一个
+    # 线程）。从另一个线程拿那个 handle 正是那条约定不允许的事，而且 handle 的生命
+    # 周期归音频线程，随时可能被关掉。路径本来就是消息（`playing_path()` 就是）。
+    #
+    # 这里正是那个警告的第二次现身：修 decode_check 时加好了实现、编译过了、链接也
+    # 过了，而 peaks_check 报 `undefined reference` —— 因为符号不在这个列表里。
+    # **三处列表（nae.def / nae.map / rust 侧）要一起改。**
+    NAE_ComputePeaks;
+    NAE_OutputPolicyDefaults;
+    NAE_BuildRoutingMatrix;
+    NAE_RegisterRoutingMatrix;
+    NAE_ReleaseRoutingMatrix;
+    NAE_GetRoutingMatrix;
+    NAE_ResolveSignalPath;
+
+    # Analysis plane: path-based, no device, full tags + loudness/DR/peaks/BPM.
+    NAE_AnalyzeFile;
+    NAE_QueryDeviceCaps;
+
+    NAE_GetAnalyzerVersion;
+
+    # 文件元数据。之前 `track` 事件只带 channels 和 durationMs，于是本地文件的
+    # fact strip 少了九个值——而这些字段本来就在 decoder->info() 里，只是在 open
+    # 时没有被带上来。存在而没上报，和不存在一样让界面只能说不知道。
+    NAE_QueryTrackInfo;
+
+    # 文件标签（年份、流派、专辑、艺人、码率）。与 NAE_QueryTrackInfo 分开是因为
+    # 失败方式不同：格式信息一定存在，标签可能不存在，而混在一处会让两者共享同一种
+    # 缺失的表示。
+    NAE_QueryTags;
+    NAE_QueryDecodePath;
+
+    # Stop the device stream without closing the handle. Added with the fix for
+    # the periodic click: the render loop now deliberately stays started across
+    # slice boundaries, so a host that stops or pauses has to say so explicitly.
+    NAE_Stop;
+
+    # Pause by feeding silence rather than by stopping. NAE_Stop is audible on
+    # this endpoint -- 100 stop/play cycles gave one artefact per cycle, and the
+    # same cycles without the stop were clean -- so a pause expressed as a stop
+    # costs a discontinuity the samples do not contain. These keep the stream
+    # running, which means there is no boundary at all.
+    NAE_Pause;
+    NAE_Resume;
+    NAE_SetVolume;
+    NAE_SetChannelTrim;
+    NAE_SetBalance;
+    NAE_SetPolarityMask;
+    NAE_SetChannelDelay;
+    NAE_SetClipGuard;
+    NAE_GetClipGuardReductionDb;
+    NAE_SetDitherMode;
+    NAE_GetDitherMode;
+    NAE_GetVolume;
+    NAE_EqDefaults;
+    NAE_SetEq;
+    NAE_GetEq;
+    NAE_CrossfeedDefaults;
+    NAE_SetCrossfeed;
+    NAE_GetCrossfeed;
+    NAE_ReplayGainDefaults;
+    NAE_QueryReplayGain;
+    NAE_SetReplayGain;
+    NAE_GetReplayGain;
+    NAE_GetReplayGainGain;
+    NAE_ConvolverDefaults;
+    NAE_SetConvolver;
+    NAE_GetConvolver;
+    NAE_CrossfadeDefaults;
+    NAE_SetCrossfade;
+    NAE_GetCrossfade;
+
+    # The session owns the playback clock. The primitive above is still the
+    # render call inside it; these are the entry points a host should use.
+    NAE_SessionOpen;
+    NAE_SessionOpenWithPolicy;
+    NAE_SessionGetOutputPolicy;
+    NAE_SessionPlay;
+    NAE_SessionPause;
+    NAE_SessionResume;
+    NAE_SessionSeek;
+    NAE_SessionStop;
+    NAE_SessionSetVolume;
+    NAE_SessionGetVolume;
+    NAE_SessionSetEq;
+    NAE_SessionGetEq;
+    NAE_SessionSetCrossfeed;
+    NAE_SessionGetCrossfeed;
+    NAE_SessionSetReplayGain;
+    NAE_SessionGetReplayGain;
+    NAE_SessionSetConvolver;
+    NAE_SessionGetConvolver;
+    NAE_SessionSetCrossfade;
+    NAE_SessionGetCrossfade;
+    NAE_SessionQueueAdd;
+    NAE_SessionQueueClear;
+    NAE_SessionQueueCount;
+    NAE_ParamCount;
+    NAE_ParamAt;
+    NAE_SessionParamGet;
+    NAE_SessionParamSet;
+    NAE_SessionParamGetString;
+    NAE_SessionParamSetString;
+    NAE_SessionGetState;
+    NAE_SessionGetResolvedSignalPath;
+    NAE_SessionGetResolvedSignalPathJson;
+    NAE_SessionLastError;
+    NAE_SessionClose;
+
+  local:
+    *;
+};

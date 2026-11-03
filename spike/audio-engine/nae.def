@@ -1,0 +1,124 @@
+; Exports for the audio engine DLL — MSVC path.
+;
+; Keep in sync with nae.map (the GNU version script) and with the Rust
+; declarations in rust/src/ffi.rs. Three places, one list, and they drift.
+;
+; DO NOT let the linker write to this file. An earlier build used
+; -Wl,--output-def,nae.def, which made ld overwrite this source with generated
+; ordinals and mangled C++ symbols. On MinGW that was invisible because
+; nae.map was doing the real work, so the corruption sat unnoticed until the
+; MSVC path was read. The linker now writes nowhere near here.
+
+LIBRARY nae
+EXPORTS
+    NAE_GetEngineCapabilities
+    NAE_GetLastError
+    NAE_GetLastHresult
+    NAE_EnumerateDevices
+    NAE_GetDefaultDeviceId
+    NAE_FreeString
+    NAE_OpenExclusive
+    NAE_OpenExclusiveSine
+    NAE_PlaySine
+    NAE_Close
+    NAE_Shutdown
+    NAE_OpenFile
+    NAE_OpenDop
+    NAE_OpenDopDownrated
+    NAE_OpenNativeDsd
+    NAE_OpenNativeDsdSink
+    NAE_PlayNativeDsd
+    NAE_PlayDop
+    NAE_OpenFileShared
+    NAE_OpenFileWithRouting
+    NAE_OpenFileWithBuffer
+    NAE_Play
+    NAE_Seek
+    NAE_Position
+    NAE_PreloadNext
+    NAE_ClearNext
+    NAE_GetTrackSerial
+    NAE_Duration
+    NAE_GetLastErrorText
+    NAE_PipelineStats
+    NAE_QuerySignalPath
+    NAE_QuerySupportedRates
+    NAE_QuerySpectrum
+NAE_QueryEnvelope
+    NAE_ComputePeaks
+    NAE_OutputPolicyDefaults
+    NAE_BuildRoutingMatrix
+    NAE_RegisterRoutingMatrix
+    NAE_ReleaseRoutingMatrix
+    NAE_GetRoutingMatrix
+    NAE_ResolveSignalPath
+    NAE_AnalyzeFile
+    NAE_QueryDeviceCaps
+    NAE_GetAnalyzerVersion
+NAE_QueryTrackInfo
+NAE_QueryTags
+NAE_QueryDecodePath
+    NAE_Stop
+    NAE_Pause
+    NAE_Resume
+    NAE_SetVolume
+    NAE_SetChannelTrim
+    NAE_SetBalance
+    NAE_SetPolarityMask
+    NAE_SetChannelDelay
+    NAE_SetClipGuard
+    NAE_GetClipGuardReductionDb
+    NAE_SetDitherMode
+    NAE_GetDitherMode
+    NAE_GetVolume
+    NAE_EqDefaults
+    NAE_SetEq
+    NAE_GetEq
+    NAE_CrossfeedDefaults
+    NAE_SetCrossfeed
+    NAE_GetCrossfeed
+    NAE_ReplayGainDefaults
+    NAE_QueryReplayGain
+    NAE_SetReplayGain
+    NAE_GetReplayGain
+    NAE_GetReplayGainGain
+    NAE_ConvolverDefaults
+    NAE_SetConvolver
+    NAE_GetConvolver
+    NAE_CrossfadeDefaults
+    NAE_SetCrossfade
+    NAE_GetCrossfade
+    NAE_SessionOpen
+    NAE_SessionOpenWithPolicy
+    NAE_SessionGetOutputPolicy
+    NAE_SessionPlay
+    NAE_SessionPause
+    NAE_SessionResume
+    NAE_SessionSeek
+    NAE_SessionStop
+    NAE_SessionSetVolume
+    NAE_SessionGetVolume
+    NAE_SessionSetEq
+    NAE_SessionGetEq
+    NAE_SessionSetCrossfeed
+    NAE_SessionGetCrossfeed
+    NAE_SessionSetReplayGain
+    NAE_SessionGetReplayGain
+    NAE_SessionSetConvolver
+    NAE_SessionGetConvolver
+    NAE_SessionSetCrossfade
+    NAE_SessionGetCrossfade
+    NAE_SessionQueueAdd
+    NAE_SessionQueueClear
+    NAE_SessionQueueCount
+    NAE_ParamCount
+    NAE_ParamAt
+    NAE_SessionParamGet
+    NAE_SessionParamSet
+    NAE_SessionParamGetString
+    NAE_SessionParamSetString
+    NAE_SessionGetState
+    NAE_SessionGetResolvedSignalPath
+    NAE_SessionGetResolvedSignalPathJson
+    NAE_SessionLastError
+    NAE_SessionClose
