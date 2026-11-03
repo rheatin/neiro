@@ -40,9 +40,15 @@ drive `NAE_Play`, or infer a DSP stage from the setting the user requested.
 
 ```powershell
 cd engine
-cmake -B build -G Ninja
+cmake --preset windows
 cmake --build build
 ```
+
+The preset brings the UCRT toolchain file with it. A bare `cmake -B build -G Ninja`
+fails on the UCRT-only MinGW builds, because `cmake_minimum_required()` implicitly
+runs `project()`, which compiles the first test program before any flag in
+`CMakeLists.txt` can apply — `ld: cannot find -lmsvcrt`. If you must configure by
+hand, pass `-DCMAKE_TOOLCHAIN_FILE=cmake/mingw-ucrt.cmake`.
 
 Needs MinGW-w64, CMake >= 3.20, and an FFmpeg shared build (found under
 `scoop/apps/ffmpeg-shared/current`, override with `-DNEIRO_FFMPEG_ROOT=...`).

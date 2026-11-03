@@ -23,7 +23,7 @@ The engine is built with `-mcrtdll=ucrt` when the toolchain ships
 
 ```powershell
 cd engine
-cmake -B build -G Ninja
+cmake --preset windows
 cmake --build build
 ```
 

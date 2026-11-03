@@ -118,9 +118,16 @@ If `nae.dll` is held by a running process, the link fails. Stop it first.
 
 There is no MSVC `link.exe` here. Rust uses
 `stable-x86_64-pc-windows-gnu`; the C++ side uses the scoop MinGW. The current
-MinGW-Builds `16.2.0-rt_v14` is a UCRT toolchain, so `CMakeLists.txt` selects
-`-mcrtdll=ucrt` when `libucrt.a` exists. Without it, folding `libwinpthread`
-into the DLL fails on `__intrinsic_setjmpex`.
+MinGW-Builds `16.2.0-rt_v14` is a UCRT-only toolchain -- it ships `libucrt.a`
+and no `libmsvcrt.a` -- so `cmake/mingw-ucrt.cmake` selects `-mcrtdll=ucrt`.
+Without it, even a hello world fails to link (`ld: cannot find -lmsvcrt`), and
+folding `libwinpthread` into the DLL fails on `__intrinsic_setjmpex`.
+
+That is a **toolchain file, not a line in `CMakeLists.txt`**, and it has to stay
+that way. `cmake_minimum_required()` implicitly runs `project()`, which compiles
+the first test program; anything set inside `CMakeLists.txt` arrives after that
+check has already failed. Configure with `cmake --preset windows`, or pass
+`-DCMAKE_TOOLCHAIN_FILE=cmake/mingw-ucrt.cmake` by hand.
 
 A function is only reachable if it is in all three export lists. The DLL is
 loaded by name; an ordinal-only DLL cannot be used by the Rust binding.

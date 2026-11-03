@@ -1,35 +1,20 @@
 cmake_minimum_required(VERSION 3.20)
+
+# The C runtime is chosen in cmake/mingw-ucrt.cmake, not here.
+#
+# It cannot be done in this file. `cmake_minimum_required()` implicitly runs
+# `project()`, and `project()` compiles the first test program; every line below
+# that point is too late. On the UCRT-only MinGW builds (16.2.0-rt_v14 ships
+# libucrt.a and no libmsvcrt.a) that first check fails with
+# `ld: cannot find -lmsvcrt` before anything here is read.
+#
+# Configure with `cmake --preset windows`, or pass
+# `-DCMAKE_TOOLCHAIN_FILE=cmake/mingw-ucrt.cmake`.
+
 project(neiro_audio_engine LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# Which C runtime the whole project targets.
-#
-# The default MinGW runtime is msvcrt, and it is not always the one the
-# toolchain's own libraries were built against. Measured 2026-11-02 on
-# MinGW-Builds 16.2.0-rt_v14-rev1: that toolchain's libwinpthread.a is a UCRT
-# build and its thread object references `__intrinsic_setjmpex`, which
-# libmsvcrt.a does not define -- so folding winpthread into the DLL below failed
-# with `undefined reference to __intrinsic_setjmpex`, on a repository that had
-# not changed. libucrt.a does define it.
-#
-# Prefer UCRT whenever the compiler ships it: Windows 10 and later carry
-# ucrtbase.dll, and it is the runtime the toolchain's libraries were built for.
-# On an msvcrt-only MinGW there is no libucrt.a and nothing is added, so the
-# default stays the default.
-#
-# Directory scope, not per target: the harnesses link the DLL into the same
-# process, and passing this to only one side is how two halves of one process end
-# up on different runtimes.
-execute_process(
-  COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libucrt.a
-  OUTPUT_VARIABLE NEIRO_UCRT_LIB
-  OUTPUT_STRIP_TRAILING_WHITESPACE)
-if(NEIRO_UCRT_LIB AND EXISTS "${NEIRO_UCRT_LIB}")
-  add_compile_options("-mcrtdll=ucrt")
-  add_link_options("-mcrtdll=ucrt")
-endif()
 
 # soxr 0.1.3 declares cmake_minimum_required(VERSION 3.1). CMake 4 removed
 # compatibility with anything below 3.5 and errors out rather than warning, so

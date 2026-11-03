@@ -1,8 +1,8 @@
 {
-  "version": 6,
+  "version": 4,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 20,
+    "minor": 23,
     "patch": 0
   },
   "configurePresets": [
@@ -10,11 +10,10 @@
       "name": "windows",
       "displayName": "Windows: full engine and checks",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-preset",
+      "binaryDir": "${sourceDir}/build",
+      "toolchainFile": "${sourceDir}/cmake/mingw-ucrt.cmake",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_C_FLAGS": "-mcrtdll=ucrt",
-        "CMAKE_CXX_FLAGS": "-mcrtdll=ucrt"
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
     },
     {
@@ -22,6 +21,7 @@
       "displayName": "macOS: platform-neutral core and checks",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-macos",
+      "toolchainFile": "${sourceDir}/cmake/mingw-ucrt.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }

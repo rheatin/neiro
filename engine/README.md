@@ -36,7 +36,7 @@ deliberately conservative.
 Needs MinGW-w64 and CMake ≥ 4, plus an FFmpeg shared build.
 
 ```powershell
-cmake -B build -G Ninja
+cmake --preset windows
 cmake --build build
 ```
 
