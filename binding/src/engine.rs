@@ -1375,6 +1375,23 @@ pub fn analyzer_version() -> u32 {
 /// host owns the cache. A path that is not UTF-8, contains NUL, or cannot be
 /// opened returns an `Analysis` with `error` set, not a panic.
 pub fn analyze_file(path: &std::path::Path, buckets: u32) -> Analysis {
+    analyze_file_cancellable(path, buckets, None)
+}
+
+/// The same decode, abandonable from another thread.
+///
+/// `cancel` is read by the engine between decoded blocks. Storing a non-zero
+/// value stops the decode with `error == NAE_ERR_CANCELLED` and every output
+/// incomplete -- a caller that gets that code must discard the result rather
+/// than cache or show it.
+///
+/// This exists because the call is blocking: without a flag the caller owns,
+/// nothing can reach a decode that is already running.
+pub fn analyze_file_cancellable(
+    path: &std::path::Path,
+    buckets: u32,
+    cancel: Option<&std::sync::atomic::AtomicI32>,
+) -> Analysis {
     let bad = |code: i32| Analysis {
         error: code,
         ..Analysis::default()
@@ -1401,15 +1418,29 @@ pub fn analyze_file(path: &std::path::Path, buckets: u32) -> Analysis {
     // SAFETY: `c_path` is a live NUL-terminated C string; `info` is a live,
     // zeroed struct of the declared size; `out` has exactly `capacity` floats,
     // and the engine rejects a short buffer instead of truncating.
+    // SAFETY: `cancel` points at an `AtomicI32`, which the engine only reads,
+    // through a relaxed atomic load. `AtomicI32` has the same layout as `i32`
+    // and is aligned, so handing its address to the C ABI is sound.
     let rc = unsafe {
-        ffi::NAE_AnalyzeFile(
-            c_path.as_ptr(),
-            buckets,
-            &mut info,
-            out.as_mut_ptr(),
-            capacity as i32,
-            &mut written,
-        )
+        match cancel {
+            Some(flag) => ffi::NAE_AnalyzeFileCancelable(
+                c_path.as_ptr(),
+                buckets,
+                &mut info,
+                out.as_mut_ptr(),
+                capacity as i32,
+                &mut written,
+                flag.as_ptr(),
+            ),
+            None => ffi::NAE_AnalyzeFile(
+                c_path.as_ptr(),
+                buckets,
+                &mut info,
+                out.as_mut_ptr(),
+                capacity as i32,
+                &mut written,
+            ),
+        }
     };
     if rc != 0 {
         return bad(rc);

@@ -53,6 +53,7 @@ NAE_QueryEnvelope
     NAE_GetRoutingMatrix
     NAE_ResolveSignalPath
     NAE_AnalyzeFile
+    NAE_AnalyzeFileCancelable
     NAE_QueryDeviceCaps
     NAE_GetAnalyzerVersion
 NAE_QueryTrackInfo

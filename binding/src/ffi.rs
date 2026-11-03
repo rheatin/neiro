@@ -40,6 +40,9 @@ pub const NAE_ERR_NOT_OPEN: i32 = 7;
 pub const NAE_ERR_DEVICE_LOST: i32 = 10;
 pub const NAE_ERR_INVALID_ARGUMENT: i32 = 8;
 pub const NAE_ERR_CANNOT_OPEN: i32 = 9;
+/// The caller's cancellation flag was raised. Not a failure: the result is
+/// incomplete and must be discarded, not cached or shown.
+pub const NAE_ERR_CANCELLED: i32 = 13;
 
 // Output rate modes, matching `NAE_OUTPUT_*` in `nae.h`.
 pub const NAE_OUTPUT_NATIVE: i32 = 0;
@@ -767,6 +770,16 @@ extern "C" {
         peaks: *mut f32,
         capacity: i32,
         peaks_written: *mut i32,
+    ) -> i32;
+
+    pub fn NAE_AnalyzeFileCancelable(
+        path: *const c_char,
+        buckets: u32,
+        info: *mut NAE_AnalysisInfo,
+        peaks: *mut f32,
+        capacity: i32,
+        peaks_written: *mut i32,
+        cancel: *const i32,
     ) -> i32;
 
     /// The analysis algorithm version; cache keys use it.

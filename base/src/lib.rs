@@ -240,6 +240,7 @@ pub struct Base {
     handle: BaseHandle,
     control_thread: Option<JoinHandle<()>>,
     analysis_threads: Vec<JoinHandle<()>>,
+    registry: analysis::CancelRegistry,
 }
 
 impl Base {
@@ -274,9 +275,11 @@ impl Base {
 
         let (command_tx, command_rx) = mpsc::channel();
         let (analysis_tx, analysis_rx) = mpsc::channel();
+        let registry = analysis::new_registry();
 
         let audio_events = events.clone();
         let audio_state = state.clone();
+        let registry_for_control = registry.clone();
         let control_thread = thread::Builder::new()
             .name("neiro-base-control".into())
             .spawn(move || {
@@ -287,6 +290,7 @@ impl Base {
                     audio_state,
                     version,
                     policy,
+                    registry_for_control,
                 );
             })
             .map_err(|e| BaseError::Spawn(e.to_string()))?;
@@ -301,10 +305,11 @@ impl Base {
             let events = events.clone();
             let state = state.clone();
             let in_flight = in_flight.clone();
+            let registry = registry.clone();
             match thread::Builder::new()
                 .name(format!("neiro-base-analysis-{index}"))
                 .spawn(move || {
-                    analysis::run(rx, cache, state, events, version, in_flight);
+                    analysis::run(rx, cache, state, events, version, in_flight, registry);
                 }) {
                 Ok(thread) => analysis_threads.push(thread),
                 Err(e) => {
@@ -327,6 +332,7 @@ impl Base {
             },
             control_thread: Some(control_thread),
             analysis_threads,
+            registry,
         })
     }
 
@@ -339,6 +345,9 @@ impl Base {
     }
 
     fn stop_workers(&mut self) {
+        // Raise the flags before asking the workers to stop, so a decode that is
+        // running ends at the next block instead of after the whole file.
+        analysis::cancel_all(&self.registry);
         let _ = self.handle.commands.send(Command::Shutdown);
         if let Some(thread) = self.control_thread.take() {
             let _ = thread.join();

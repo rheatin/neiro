@@ -14,6 +14,7 @@ use neiro_audio::{
     default_device_id, OutputMode, Quality, Session, SessionPhase, SessionSettings, ShareKind,
 };
 
+use crate::analysis::{self, CancelRegistry};
 use crate::protocol::{
     Event, OutputRatePolicy, PlaybackPolicy, PlaybackState, RenderPath, ResamplerQuality,
     ShareMode, Snapshot,
@@ -25,11 +26,12 @@ const POSITION_EMIT: Duration = Duration::from_millis(100);
 
 pub(crate) fn run(
     commands: Receiver<crate::protocol::Command>,
-    analysis: Sender<PathBuf>,
+    analysis: Sender<crate::analysis::Request>,
     events: EventBus,
     state: Arc<Mutex<Snapshot>>,
     version: u32,
     policy: PlaybackPolicy,
+    registry: CancelRegistry,
 ) {
     let mut control = Control {
         commands,
@@ -42,6 +44,7 @@ pub(crate) fn run(
         index: None,
         device_id: None,
         policy,
+        registry,
         settings: None,
         last_serial: None,
         last_phase: None,
@@ -58,7 +61,7 @@ pub(crate) fn run(
 
 struct Control {
     commands: Receiver<crate::protocol::Command>,
-    analysis: Sender<PathBuf>,
+    analysis: Sender<crate::analysis::Request>,
     events: EventBus,
     state: Arc<Mutex<Snapshot>>,
     version: u32,
@@ -67,6 +70,7 @@ struct Control {
     index: Option<usize>,
     device_id: Option<String>,
     policy: PlaybackPolicy,
+    registry: CancelRegistry,
     settings: Option<SessionSettings>,
     last_serial: Option<u64>,
     last_phase: Option<SessionPhase>,
@@ -124,7 +128,7 @@ impl Control {
                 for message in errors {
                     self.emit_error("queue", &message);
                 }
-                self.request_analysis(&paths);
+                self.request_explicit(&paths);
                 self.publish_queue();
             }
             Command::Pause => {
@@ -162,7 +166,10 @@ impl Control {
             Command::Next => self.skip(),
             Command::SetPolicy { policy } => self.set_policy(policy),
             Command::Analyze { path } => {
-                let _ = self.analysis.send(path);
+                let _ = self.analysis.send(analysis::Request {
+                    path,
+                    explicit: true,
+                });
             }
             Command::SetVolume { gain } => self.apply("volume", |session| session.set_volume(gain)),
             Command::SetEq { params } => self.apply("eq", |session| session.set_eq(&params)),
@@ -179,6 +186,7 @@ impl Control {
                 self.apply("crossfade", |session| session.set_crossfade(&params))
             }
             Command::Shutdown => {
+                analysis::cancel_all(&self.registry);
                 self.close_session();
                 self.events.emit(Event::Shutdown);
                 return false;
@@ -485,12 +493,27 @@ impl Control {
                 paths.push(path.clone());
             }
         }
-        self.request_analysis(&paths);
+        // Anything else being decoded belongs to a track the listener has moved
+        // past. Publishing the wanted set stops both halves of the problem: a
+        // decode already running is flagged, and a request still in the channel
+        // finds itself unwanted when a worker picks it up.
+        analysis::wanted(&self.registry, paths.clone());
+        for path in paths {
+            let _ = self.analysis.send(analysis::Request {
+                path,
+                explicit: false,
+            });
+        }
     }
 
-    fn request_analysis(&self, paths: &[PathBuf]) {
+    /// Requests the caller asked for by name: an `analyze` command or a newly
+    /// enqueued track. They are not governed by the wanted set.
+    fn request_explicit(&self, paths: &[PathBuf]) {
         for path in paths {
-            let _ = self.analysis.send(path.clone());
+            let _ = self.analysis.send(analysis::Request {
+                path: path.clone(),
+                explicit: true,
+            });
         }
     }
 

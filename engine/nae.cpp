@@ -4583,10 +4583,26 @@ void estimateBpm(const std::vector<double>& envelope, double hopMs, double* bpm,
 /// 为什么要对齐而不是「改好一点」：`paintTimeline` 和导出都用那份 peaks。两条路给出
 /// 不同形状的波形时，**看起来不一样的那个会被当成坏了一个**，而它其实只是另一套
 /// 约定。要改就两边一起改。
+// The cancellation flag is written by the host, on another thread, through
+// whatever its own atomics look like (Rust's AtomicI32 in this repository's
+// host). Reading it with a plain load would be a data race against that store;
+// the relaxed load is the cheapest thing that is not one, and it is all this
+// needs -- the flag is advisory, and a block of extra work is harmless.
+static inline bool cancelRequested(const int32_t* flag) {
+    if (!flag) return false;
+#if defined(__GNUC__) || defined(__clang__)
+    return __atomic_load_n(flag, __ATOMIC_RELAXED) != 0;
+#else
+    return *flag != 0;
+#endif
+}
+
 bool computePeaksFromFile(const std::string& path, uint32_t buckets,
                           std::vector<float>* out, bool* complete,
                           NAE_PeaksInfo* meta, NAE_AnalysisInfo* analysis,
-                          std::string* error) {
+                          std::string* error, const int32_t* cancel = nullptr,
+                          bool* cancelled = nullptr) {
+    if (cancelled) *cancelled = false;
     neiro::Decoder dec;
     if (!dec.open(path, error)) return false;
 
@@ -4679,6 +4695,17 @@ bool computePeaksFromFile(const std::string& path, uint32_t buckets,
     // `read` **流结束时返回 false**，而短读是正常的（一次一个包），所以终止条件是
     // 「没有新样本」，不是「这一块比预期短」。
     for (;;) {
+        // Between blocks, not inside one: a block is one packet, so the caller's
+        // worst-case delay is one packet rather than the whole file.
+        //
+        // The flag is read, never written. It exists as a separate export because
+        // the decode call is blocking: without a flag the caller owns, nobody
+        // could reach a decode that is already running.
+        if (cancelRequested(cancel)) {
+            if (cancelled) *cancelled = true;
+            if (error) *error = "cancelled";
+            return false;
+        }
         block.clear();
         const bool more = dec.read(&block, error);
         if (block.empty()) {
@@ -4881,9 +4908,10 @@ int32_t NAE_ComputePeaks(const char* path, uint32_t buckets, NAE_PeaksInfo* info
 
 uint32_t NAE_GetAnalyzerVersion(void) NAE_NOEXCEPT { return NAE_ANALYZER_VERSION; }
 
-int32_t NAE_AnalyzeFile(const char* path, uint32_t buckets, NAE_AnalysisInfo* info,
-                        float* peaks, int32_t capacity,
-                        int32_t* peaksWritten) NAE_NOEXCEPT {
+static int32_t analyzeFileImpl(const char* path, uint32_t buckets,
+                               NAE_AnalysisInfo* info, float* peaks,
+                               int32_t capacity, int32_t* peaksWritten,
+                               const int32_t* cancel) NAE_NOEXCEPT {
     if (!info || !peaks || !path || !path[0] || buckets == 0 ||
         capacity < static_cast<int32_t>(buckets * 2)) {
         return NAE_ERR_INVALID_ARGUMENT;
@@ -4897,9 +4925,11 @@ int32_t NAE_AnalyzeFile(const char* path, uint32_t buckets, NAE_AnalysisInfo* in
     std::vector<float> result(static_cast<size_t>(buckets) * 2, 0.0f);
     bool complete = false;
     std::string error;
-    if (!computePeaksFromFile(path, buckets, &result, &complete, nullptr, info, &error)) {
+    bool cancelled = false;
+    if (!computePeaksFromFile(path, buckets, &result, &complete, nullptr, info, &error,
+                              cancel, &cancelled)) {
         g_lastErrorText = error;
-        return NAE_ERR_CANNOT_OPEN;
+        return cancelled ? NAE_ERR_CANCELLED : NAE_ERR_CANNOT_OPEN;
     }
     std::copy(result.begin(), result.end(), peaks);
     info->bucketCount = buckets;
@@ -4909,6 +4939,19 @@ int32_t NAE_AnalyzeFile(const char* path, uint32_t buckets, NAE_AnalysisInfo* in
 #else
     return NAE_OK;
 #endif
+}
+
+int32_t NAE_AnalyzeFile(const char* path, uint32_t buckets, NAE_AnalysisInfo* info,
+                        float* peaks, int32_t capacity,
+                        int32_t* peaksWritten) NAE_NOEXCEPT {
+    return analyzeFileImpl(path, buckets, info, peaks, capacity, peaksWritten, nullptr);
+}
+
+int32_t NAE_AnalyzeFileCancelable(const char* path, uint32_t buckets,
+                                  NAE_AnalysisInfo* info, float* peaks,
+                                  int32_t capacity, int32_t* peaksWritten,
+                                  const int32_t* cancel) NAE_NOEXCEPT {
+    return analyzeFileImpl(path, buckets, info, peaks, capacity, peaksWritten, cancel);
 }
 
 // `NAE_AnalysisInfo` layout, written as literal numbers. `rust/src/ffi.rs`

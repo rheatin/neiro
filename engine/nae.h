@@ -75,6 +75,14 @@ extern "C" {
 #define NAE_ERR_REQUIRES_REOPEN 11
 /** The endpoint cannot carry the format at all (e.g. the DoP carrier rate). */
 #define NAE_ERR_DEVICE_CANNOT_CARRY_FORMAT 12
+/**
+ * The caller's cancellation flag was raised and the work stopped early.
+ *
+ * Only `NAE_AnalyzeFileCancelable` returns this. It is not a failure: the result
+ * is incomplete, so it must not be cached or displayed, and it must not be
+ * reported to a user as an error.
+ */
+#define NAE_ERR_CANCELLED 13
 
 typedef struct NAE_Handle NAE_Handle;
 
@@ -945,6 +953,24 @@ typedef struct NAE_AnalysisInfo {
 int32_t NAE_AnalyzeFile(const char* path, uint32_t buckets, NAE_AnalysisInfo* info,
                         float* peaks, int32_t capacity,
                         int32_t* peaksWritten) NAE_NOEXCEPT;
+
+/**
+ * The same decode, with a cancellation flag the caller owns.
+ *
+ * `cancel` points at a caller-owned `int32`; the analyzer reads it between
+ * decoded blocks and stops when it is non-zero. A host that wants to abandon a
+ * decode sets it to 1 from another thread -- a plain store is enough, because
+ * this side only ever reads. Pass NULL for the uncancellable behaviour of
+ * NAE_AnalyzeFile.
+ *
+ * Returns NAE_ERR_CANCELLED when it stopped early. Every output is then
+ * incomplete and must be discarded: do not cache it, and do not show it. The
+ * check happens between blocks, so the delay is one packet, not the whole file.
+ */
+int32_t NAE_AnalyzeFileCancelable(const char* path, uint32_t buckets,
+                                  NAE_AnalysisInfo* info, float* peaks,
+                                  int32_t capacity, int32_t* peaksWritten,
+                                  const int32_t* cancel) NAE_NOEXCEPT;
 
 /** The analysis algorithm version. Cache keys use this; it is not a build id. */
 uint32_t NAE_GetAnalyzerVersion(void) NAE_NOEXCEPT;

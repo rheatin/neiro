@@ -433,6 +433,28 @@ fn main() {
     // are dropped and exactly one `analysis_ready` is published for the path.
     let c = dir.join("base_probe_c.wav");
     write_click(&c, 0.07);
+
+    // The engine has to poll the flag for a cancel to mean anything. A flag
+    // raised before the call is the cheapest way to see that it does: without
+    // the poll the call decodes the file and returns success, and the caller
+    // would cache a result it was told to abandon.
+    {
+        let flag = std::sync::atomic::AtomicI32::new(1);
+        let cancelled = neiro_audio::analyze_file_cancellable(&c, 1024, Some(&flag));
+        check(
+            cancelled.error == neiro_audio::ffi::NAE_ERR_CANCELLED,
+            "a raised flag cancels the decode",
+            format!("error {}", cancelled.error),
+        );
+        flag.store(0, std::sync::atomic::Ordering::Release);
+        let decoded = neiro_audio::analyze_file_cancellable(&c, 1024, Some(&flag));
+        check(
+            decoded.error == 0,
+            "a clear flag decodes normally",
+            format!("error {}", decoded.error),
+        );
+    }
+
     for _ in 0..3 {
         handle.analyze(c.clone()).expect("analyze C");
     }

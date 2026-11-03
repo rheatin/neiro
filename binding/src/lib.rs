@@ -40,7 +40,8 @@ pub mod output;
 pub mod session;
 
 pub use engine::{
-    analyze_file, analyzer_version, capabilities, compute_peaks, default_device, default_device_id,
+    analyze_file, analyze_file_cancellable, analyzer_version, capabilities, compute_peaks,
+    default_device, default_device_id,
     enumerate_devices, last_error, open_exclusive, open_file, open_file_shared,
     open_file_with_share, open_with, shutdown, Analysis, Device, Envelope, LiveSignalPath, Peaks,
     SeamDistribution, ShareMode, SignalPath, Spectrum, Stream, Tags, TrackInfo,

@@ -113,6 +113,14 @@ is requested twice in normal use, once as the current track and once as the next
 track's prefetch, and one decode answers both through the single
 `analysis_ready` event.
 
+A track change cancels what it supersedes, at both ends. The engine's decoder
+polls a flag the caller owns (`NAE_AnalyzeFileCancelable`), so a decode that is
+already running stops between blocks; a request still sitting in the channel is
+dropped when a worker picks it up, because the wanted set moved on without it.
+A cancelled decode publishes nothing and caches nothing -- its result is a
+prefix, not a measurement. That is also how shutdown avoids waiting for a file
+nobody will read.
+
 `bpm_valid == false` means the onset envelope was too short or the
 autocorrelation peak too weak. The UI must show nothing for BPM, not a plausible
 number.
@@ -211,8 +219,10 @@ runtime plugin ABI that only works on desktop.
   session's gapless queue.
 - The cache is bounded LRU (256 entries); there is no pre-analysis of a whole
   library yet.
-- Analysis is not cancellable mid-decode. A track change does not stop a decode
-  that is already running; it only stops it from being the next one started.
+- Cancellation is between decoded blocks, so a decode stops within one packet
+  rather than instantly. It is not offered to the C ABI yet: a Swift host gets
+  the behaviour (Base cancels on a track change) but cannot cancel a decode it
+  started through `analyze`.
 - The analysis worker count is fixed at start; there is no way to resize the pool
   while Base is running.
 - No plugin loader and no out-of-process UI transport yet; both boundaries are

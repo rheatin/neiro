@@ -17,8 +17,9 @@
 //! The bound matters more than the count: each decode holds a decoder and its
 //! buffers, so this is not "one thread per request".
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
@@ -41,26 +42,101 @@ pub(crate) fn new_in_flight() -> InFlight {
     Arc::new(Mutex::new(HashSet::new()))
 }
 
+/// What the control thread still wants analyzed, and every decode that is
+/// currently running with the flag that stops it.
+///
+/// The control thread owns the question "is this still wanted"; a worker owns the
+/// decode. This is where they meet, and both halves are needed:
+///
+/// * `running` stops a decode that has already started. Without it a skip waits
+///   for a file nobody is going to look at.
+/// * `keep` stops one that has not started yet. A request sitting in the channel
+///   when the track changes would otherwise begin decoding after the cancel was
+///   issued, and raise no flag because there was nothing to raise it on.
+pub(crate) struct Registry {
+    keep: HashSet<PathBuf>,
+    running: HashMap<PathBuf, Arc<AtomicI32>>,
+}
+
+pub(crate) type CancelRegistry = Arc<Mutex<Registry>>;
+
+pub(crate) fn new_registry() -> CancelRegistry {
+    Arc::new(Mutex::new(Registry {
+        keep: HashSet::new(),
+        running: HashMap::new(),
+    }))
+}
+
+/// Replace the wanted set and stop every decode that is no longer in it.
+///
+/// A track change is the reason this exists: the decode that was prefetching the
+/// track the listener just skipped is no longer worth the CPU, and the decode of
+/// the new current track should not have to wait for it.
+pub(crate) fn wanted(registry: &CancelRegistry, keep: Vec<PathBuf>) {
+    let mut inner = registry.lock().unwrap_or_else(|e| e.into_inner());
+    let keep: HashSet<PathBuf> = keep.into_iter().collect();
+    for (path, token) in inner.running.iter() {
+        if !keep.contains(path) {
+            token.store(1, Ordering::Release);
+        }
+    }
+    inner.keep = keep;
+}
+
+/// Stop everything. Used on shutdown so the workers join promptly instead of
+/// finishing a decode nobody will read.
+pub(crate) fn cancel_all(registry: &CancelRegistry) {
+    let mut inner = registry.lock().unwrap_or_else(|e| e.into_inner());
+    for token in inner.running.values() {
+        token.store(1, Ordering::Release);
+    }
+    inner.keep.clear();
+}
+
+/// One request from the control thread.
+#[derive(Debug, Clone)]
+pub(crate) struct Request {
+    pub path: PathBuf,
+    /// An explicit `analyze` or `enqueue`. It is answered even when the path is
+    /// not in the wanted set, because the caller asked for it by name.
+    pub explicit: bool,
+}
+
 pub(crate) fn run(
-    requests: Arc<Mutex<Receiver<PathBuf>>>,
+    requests: Arc<Mutex<Receiver<Request>>>,
     cache: Arc<Mutex<Cache>>,
     state: Arc<Mutex<Snapshot>>,
     events: EventBus,
     version: u32,
     in_flight: InFlight,
+    registry: CancelRegistry,
 ) {
     loop {
         // The lock is held only while waiting for the next path, never while
         // decoding: a worker that held it through a decode would serialise every
         // other worker.
-        let path = {
+        let request = {
             let receiver = requests.lock().unwrap_or_else(|e| e.into_inner());
             match receiver.recv() {
-                Ok(path) => path,
+                Ok(request) => request,
                 // Every sender is gone: Base is shutting down.
                 Err(_) => return,
             }
         };
+        let path = request.path;
+
+        // The track changed while this sat in the channel. Nothing will read the
+        // result, so do not spend a decode on it.
+        if !request.explicit {
+            let wanted = registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .keep
+                .contains(&path);
+            if !wanted {
+                continue;
+            }
+        }
 
         let key = CacheKey::for_path(&path, version);
 
@@ -79,11 +155,35 @@ pub(crate) fn run(
             continue;
         }
 
-        let analysis = neiro_audio::analyze_file(&path, BUCKETS);
+        let token = Arc::new(AtomicI32::new(0));
+        {
+            let mut inner = registry.lock().unwrap_or_else(|e| e.into_inner());
+            // The cancel may have been raised between the check above and here;
+            // publishing the token after it would start a decode nothing stops.
+            if !request.explicit && !inner.keep.contains(&path) {
+                continue;
+            }
+            inner.running.insert(path.clone(), token.clone());
+        }
+
+        let analysis = neiro_audio::analyze_file_cancellable(&path, BUCKETS, Some(&token));
+
+        registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .running
+            .remove(&path);
         in_flight
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&key);
+
+        // Cancelled: the result is a prefix of a decode, so it is neither cached
+        // nor published. The request that cancelled it has already asked for
+        // something else, or Base is shutting down.
+        if analysis.error == neiro_audio::ffi::NAE_ERR_CANCELLED {
+            continue;
+        }
         if analysis.error == 0 {
             cache
                 .lock()
