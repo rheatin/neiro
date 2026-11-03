@@ -96,10 +96,22 @@ another process holds the endpoint, and `Base::start_with_share` / the
 
 ## Analysis
 
-`play` and `enqueue` request analysis for the current and next track. The worker
-decodes on its own thread, writes an LRU cache keyed by path + size + mtime +
-`analyzerVersion`, and emits `analysis_ready`. The UI never decodes a file and
-never writes the cache.
+`play` and `enqueue` request analysis for the current and next track. The
+workers decode on their own threads, write an LRU cache keyed by path + size +
+mtime + `analyzerVersion`, and emit `analysis_ready`. The UI never decodes a
+file and never writes the cache.
+
+More than one worker, because the engine's analyzer is per-call state:
+`computePeaksFromFile` builds its own decoder, its error text is `thread_local`,
+and nothing in that path touches an FFmpeg global initialiser. A single worker
+made a skip wait behind the prefetch of the track it was skipping to. The count
+is `min(cores, 4)` — each decode holds a decoder and its buffers, so this is not
+one thread per request — and `NEIRO_BASE_ANALYSIS_WORKERS` overrides it.
+
+Requests for a path already being decoded are dropped, not queued: the same path
+is requested twice in normal use, once as the current track and once as the next
+track's prefetch, and one decode answers both through the single
+`analysis_ready` event.
 
 `bpm_valid == false` means the onset envelope was too short or the
 autocorrelation peak too weak. The UI must show nothing for BPM, not a plausible
@@ -199,7 +211,10 @@ runtime plugin ABI that only works on desktop.
   session's gapless queue.
 - The cache is bounded LRU (256 entries); there is no pre-analysis of a whole
   library yet.
-- Analysis is one worker and is not cancellable mid-decode.
+- Analysis is not cancellable mid-decode. A track change does not stop a decode
+  that is already running; it only stops it from being the next one started.
+- The analysis worker count is fixed at start; there is no way to resize the pool
+  while Base is running.
 - No plugin loader and no out-of-process UI transport yet; both boundaries are
   represented by serializable protocol types.
 - `set_policy` reopens the stream, which costs one device close and open. There

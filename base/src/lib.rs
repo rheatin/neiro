@@ -214,11 +214,32 @@ impl BaseHandle {
     }
 }
 
-/// Owns the two workers. Dropping it stops playback and joins both threads.
+/// How many analysis workers to start.
+///
+/// Each decode holds a decoder and its buffers, so this is deliberately small:
+/// the point is that a skip does not queue behind a prefetch, not that every
+/// core is busy. `NEIRO_BASE_ANALYSIS_WORKERS` overrides it, which is how the
+/// concurrency check compares one worker against several.
+fn analysis_workers() -> usize {
+    if let Ok(text) = std::env::var("NEIRO_BASE_ANALYSIS_WORKERS") {
+        if let Ok(n) = text.trim().parse::<usize>() {
+            return n.clamp(1, MAX_ANALYSIS_WORKERS);
+        }
+    }
+    thread::available_parallelism()
+        .map(|n| n.get().min(MAX_ANALYSIS_WORKERS))
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// Upper bound on decode threads, whatever the machine reports.
+const MAX_ANALYSIS_WORKERS: usize = 4;
+
+/// Owns the workers. Dropping it stops playback and joins every thread.
 pub struct Base {
     handle: BaseHandle,
     control_thread: Option<JoinHandle<()>>,
-    analysis_thread: Option<JoinHandle<()>>,
+    analysis_threads: Vec<JoinHandle<()>>,
 }
 
 impl Base {
@@ -270,21 +291,33 @@ impl Base {
             })
             .map_err(|e| BaseError::Spawn(e.to_string()))?;
 
-        let analysis_events = events.clone();
-        let analysis_state = state.clone();
-        let analysis_thread = match thread::Builder::new()
-            .name("neiro-base-analysis".into())
-            .spawn(move || {
-                analysis::run(analysis_rx, cache, analysis_state, analysis_events, version);
-            }) {
-            Ok(thread) => thread,
-            Err(e) => {
-                // The control worker is already alive and would wait forever.
-                let _ = command_tx.send(Command::Shutdown);
-                let _ = control_thread.join();
-                return Err(BaseError::Spawn(e.to_string()));
+        let analysis_rx = Arc::new(Mutex::new(analysis_rx));
+        let in_flight = analysis::new_in_flight();
+        let workers = analysis_workers();
+        let mut analysis_threads = Vec::with_capacity(workers);
+        for index in 0..workers {
+            let rx = analysis_rx.clone();
+            let cache = cache.clone();
+            let events = events.clone();
+            let state = state.clone();
+            let in_flight = in_flight.clone();
+            match thread::Builder::new()
+                .name(format!("neiro-base-analysis-{index}"))
+                .spawn(move || {
+                    analysis::run(rx, cache, state, events, version, in_flight);
+                }) {
+                Ok(thread) => analysis_threads.push(thread),
+                Err(e) => {
+                    // The control worker is already alive and would wait forever.
+                    let _ = command_tx.send(Command::Shutdown);
+                    let _ = control_thread.join();
+                    for thread in analysis_threads {
+                        let _ = thread.join();
+                    }
+                    return Err(BaseError::Spawn(e.to_string()));
+                }
             }
-        };
+        }
 
         Ok(Self {
             handle: BaseHandle {
@@ -293,7 +326,7 @@ impl Base {
                 state,
             },
             control_thread: Some(control_thread),
-            analysis_thread: Some(analysis_thread),
+            analysis_threads,
         })
     }
 
@@ -310,7 +343,7 @@ impl Base {
         if let Some(thread) = self.control_thread.take() {
             let _ = thread.join();
         }
-        if let Some(thread) = self.analysis_thread.take() {
+        for thread in self.analysis_threads.drain(..) {
             let _ = thread.join();
         }
     }

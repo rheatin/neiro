@@ -425,6 +425,55 @@ fn main() {
         "stopped",
     );
 
+    // One decode per path, however many requests ask for it.
+    //
+    // `play` asks for the current track and the prefetch asks for the next one,
+    // so the same path is requested twice in normal use. Before the workers
+    // shared an in-flight set each request decoded again; with it, the duplicates
+    // are dropped and exactly one `analysis_ready` is published for the path.
+    let c = dir.join("base_probe_c.wav");
+    write_click(&c, 0.07);
+    for _ in 0..3 {
+        handle.analyze(c.clone()).expect("analyze C");
+    }
+    let mut first = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        match events.recv_timeout(Duration::from_millis(50)) {
+            Ok(Event::AnalysisReady { path, cached, .. }) if path == c => {
+                first = Some(cached);
+                break;
+            }
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    check(
+        first == Some(false),
+        "three requests decode C once",
+        format!("first event cached={first:?}"),
+    );
+    // A second event for the same path would mean the duplicates were decoded
+    // rather than deduplicated. The window is short because the answer is
+    // already here: nothing is still decoding C.
+    let mut duplicates = 0;
+    let settle = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < settle {
+        match events.recv_timeout(Duration::from_millis(20)) {
+            Ok(Event::AnalysisReady { path, .. }) if path == c => duplicates += 1,
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    check(
+        duplicates == 0,
+        "no duplicate analysis event for C",
+        format!("{duplicates} extra"),
+    );
+    let _ = std::fs::remove_file(&c);
+
     base.shutdown();
     let _ = std::fs::remove_file(&a);
     let _ = std::fs::remove_file(&b);
