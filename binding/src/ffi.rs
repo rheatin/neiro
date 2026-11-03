@@ -777,7 +777,7 @@ extern "C" {
     /// 算出整首波形的 peaks。`out` 收到 `bucket_count * 2` 个交错的 min/max。
     ///
     /// **收的是路径，不是 handle。** 一开始写的是 handle 版，而
-    /// `src-tauri/src/audio/service.rs:5-17` 写着那条更严的约定：stream 是 `!Send`、
+    /// `binding/src/engine.rs` 写着那条更严的约定：stream 是 `!Send`、
     /// 「commands are messages, not pointers, so nothing audio-related is ever handed
     /// between threads」。从另一个线程拿 handle 正是那条约定不允许的事，而且 handle
     /// 的生命周期归音频线程。路径本来就是消息。

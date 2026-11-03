@@ -10,10 +10,12 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // ../build relative to this crate (spike/audio-engine/rust -> spike/audio-engine/build).
+    // <repo>/engine/build: this crate lives at <repo>/binding, and the C++
+    // sources and their build directory are one level across in engine/.
     let build_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("crate lives inside the engine directory")
+        .expect("crate lives inside the repository")
+        .join("engine")
         .join("build");
 
     let import_lib = build_dir.join("libnae.dll.a");
@@ -22,7 +24,7 @@ fn main() {
             "nae.dll's import library not found at {}\n\
              Build the engine first:\n  \
              cmake -B build -G Ninja && cmake --build build\n\
-             (from spike/audio-engine, with MinGW on PATH)",
+             (from engine, with MinGW on PATH)",
             import_lib.display()
         );
     }

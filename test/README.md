@@ -12,8 +12,8 @@ build depends on this directory.
 `01.你的背包.dff` — DSD64, stereo, 4:00.60. Needed by:
 
 ```powershell
-.\spike\audio-engine\build\decode_check.exe  test\01.你的背包.dff
-.\spike\audio-engine\build\dsd_spectrum.exe  test\01.你的背包.dff --seconds 20
+.\engine\build\decode_check.exe  test\01.你的背包.dff
+.\engine\build\dsd_spectrum.exe  test\01.你的背包.dff --seconds 20
 ```
 
 It is 162 MB of one-bit audio, which is why it is ignored rather than committed.

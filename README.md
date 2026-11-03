@@ -1,19 +1,19 @@
-# Neiro
+# neiro-core
 
-A WASAPI playback engine in C++, behind a C ABI.
+Everything under the UI: the C++ audio engine, its Rust binding and Base.
 
-The project is the engine. Everything that draws pixels has been removed; the
-old UI is preserved in git on `rewrite/gpui` and in the history before
-`core/engine`.
+`neiro` is the app. This repository is the layer beneath it — the only code that
+owns a device, a clock, a sample or a measurement. There is no UI here, and none
+belongs here; a host draws pixels in its own repository through this C ABI.
 
 ## What is here
 
 | Path | What it is |
 |---|---|
-| `spike/audio-engine/` | The engine: decode, resample, dither, exclusive/shared WASAPI output, DSD, transport, telemetry. CMake + MinGW. |
-| `spike/audio-engine/rust/` | An optional Rust binding. It proves the C ABI from a non-C++ caller; it is not on the audio path. |
-| `spike/audio-engine/base/` | Base: the composition root. Session commands, queue/device policy, analysis scheduling and cache, render-path facts and UI-facing events. It is not an audio engine. |
-| `spike/wasapi-probe/` | Hardware measurement of the endpoint itself. |
+| `engine/` | The C++ engine: decode, resample, dither, DSP, exclusive/shared output, DSD, transport, telemetry. CMake + MinGW. |
+| `binding/` | `neiro-audio`, the Rust binding over the C ABI. It proves the ABI from a non-C++ caller and is how Base reaches the engine. |
+| `base/` | `neiro-base`, the composition root: session commands, queue/device policy, analysis scheduling and cache, render-path facts and UI-facing events. It is not an audio engine. |
+| `tools/wasapi-probe/` | Hardware measurement of the endpoint itself, independent of the engine. |
 | `test/README.md` | What the audio fixtures are and where they go. |
 
 `nae.dll` exports a C ABI; only the `NAE_*` names leave the DLL. Audio samples
@@ -39,7 +39,7 @@ drive `NAE_Play`, or infer a DSP stage from the setting the user requested.
 ## Build
 
 ```powershell
-cd spike/audio-engine
+cd engine
 cmake -B build -G Ninja
 cmake --build build
 ```
@@ -105,26 +105,27 @@ mangled at that layer looks like an unreadable file.
 - **Analysis**: `NAE_AnalyzeFile` is a path-based, device-free plane that returns
   format, full tags, ReplayGain, loudness, dynamic range, waveform peaks and BPM
   with a confidence; the host schedules it and owns the cache.
-- **DSP**: digital volume with a 20 ms ramp, 16-band biquad EQ, stereo crossfeed,
-  ReplayGain (track/album), a direct-FIR convolver, and read-only spectrum,
-  envelope and peaks taps.
+- **DSP**: digital volume with a 20 ms ramp, up to 32 biquad or linear-phase EQ
+  bands, stereo crossfeed, ReplayGain (track/album), a uniform-partitioned FFT
+  convolver, a clip guard with a polyphase true-peak detector, BS.1770-4 loudness
+  with gating, and read-only spectrum, envelope and peaks taps.
 - **DoP**: stereo DSF and uncompressed DFF, at the carrier rate the DAC accepts.
 - **API**: a C ABI and a name/value parameter registry; every setting has a
   default and a range. `neiro_cli` is the reference host.
 
 ## Limitations
 
-- Windows only for now. The ABI and CLI are platform-neutral, but the device
-  layer is WASAPI; CoreAudio and ALSA are not implemented. `Base` is Rust and is
-  intended to cross-compile to iOS; the C++ engine still needs a CoreAudio
-  backend and a static (not `nae.dll`) link before an iOS app can ship.
+- Windows only for now. `nae.cpp` opens devices through its own WASAPI path and
+  includes `windows.h`; the platform-neutral `AudioBackend` interface in
+  `engine/audio_backend.h` is implemented by the CoreAudio and AAudio adapters,
+  but the engine itself does not route through it yet. Until it does, macOS and
+  Android build only the core and its checks, and an iOS host would also need a
+  static link instead of `nae.dll`.
 - DoP needs an endpoint that opens 176400 Hz (DSD64) or 352800 Hz (DSD128) at
   24 valid bits **without resampling**. An endpoint that coerces the rate is
   refused; it cannot carry DoP.
 - DoP is stereo and uncompressed only. Volume, EQ, crossfeed, ReplayGain,
   convolver, crossfade and seek are bypassed on a DoP handle.
-- The convolver is a direct FIR limited to 4096 taps. Longer room IRs need
-  partitioned FFT convolution.
 - The internal path is float32, so a true 32-bit integer source on a 32-bit
   endpoint is not bit-perfect even though the current flag does not compare the
   source width.
@@ -134,9 +135,9 @@ mangled at that layer looks like an unreadable file.
 ## Verification
 
 Build, checks, hardware DoP results and measurements are in the developer report:
-[`spike/audio-engine/VERIFICATION.md`](spike/audio-engine/VERIFICATION.md).
+[`engine/VERIFICATION.md`](engine/VERIFICATION.md).
 
 ## License
 
 The engine links FFmpeg (currently a GPL build) and vendored soxr (LGPL 2.1).
-See `spike/audio-engine/README.md` before distributing.
+See `engine/README.md` before distributing.

@@ -95,7 +95,7 @@ internal implementation. The contract above is the prerequisite.
 ## Run the probe
 
 ```powershell
-cd spike/audio-engine
+cd engine
 cmake --build build
 cd base
 $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"

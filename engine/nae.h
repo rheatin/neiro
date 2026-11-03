@@ -821,7 +821,7 @@ typedef struct NAE_PeaksInfo {
  * # 为什么是**路径**而不是 handle
  *
  * 一开始写的是 `NAE_QueryPeaks(handle, ...)`，让调用方从**另一个线程**拿着 handle 调。
- * 而 `src-tauri/src/audio/service.rs:5-17` 写着应用那条更严的约定：
+ * 而 `binding/src/engine.rs` 写着应用那条更严的约定：
  *
  *     neiro_audio::Stream is `!Send` on purpose: an exclusive WASAPI stream
  *     belongs to the COM apartment of the thread that created it.

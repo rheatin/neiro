@@ -228,7 +228,7 @@ impl Stream {
 
     // 这里原来有一个 `Stream::peaks(buckets)`。删掉了：peaks 那一遍**不需要这个流**
     // —— 它收的是路径（见 [`compute_peaks`]），因为从另一个线程拿这个 `!Send` 的
-    // handle 正是 `src-tauri/src/audio/service.rs:5-17` 那条约定不允许的事。
+    // handle 正是本文件开头那条 `!Send` 约定不允许的事。
     // 挂在这里会让人以为它读的是流的内部状态。
 
     /// The rates this device was measured to accept in exclusive mode.

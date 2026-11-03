@@ -1,9 +1,9 @@
 # AGENTS.md
 
-Rules for changing this repository. The UI has been removed; this is the audio
-engine. `README.md` says what is here, `spike/audio-engine/README.md` says how
-the engine behaves, and `spike/audio-engine/LESSONS.md` records what went wrong
-on the way there. Read those before touching the render loop.
+Rules for changing this repository. There is no UI here; this is the audio
+layer beneath one. `README.md` says what is here, `engine/README.md` says how
+the engine behaves, and `engine/LESSONS.md` records what went wrong on the way
+there. Read those before touching the render loop.
 
 The rules below are the ones that have already been broken at least once, with
 the measurement that showed it.
@@ -96,7 +96,7 @@ From `nae.h`, and the only things to get right:
 endpoint:
 
 ```powershell
-cd spike/audio-engine/build
+cd engine/build
 .\nae_test.exe
 .\resample_check.exe
 .\dither_check.exe
@@ -107,7 +107,7 @@ cd spike/audio-engine/build
 The Rust binding is the cross-language ABI probe:
 
 ```powershell
-cd spike/audio-engine/rust
+cd binding
 $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
 cargo run --bin probe -- <file.flac>
 ```

@@ -858,7 +858,7 @@ struct NAE_Handle {
     /// The bubbling, and the reason this flag exists.
     ///
     /// NAE_Play is a *slice* call: the host calls it every 200 ms
-    /// (src-tauri/src/audio/service.rs:50, SLICE_MS) and each call was doing
+    /// (the Tauri host's SLICE_MS, since removed) and each call was doing
     /// prefill-with-zeros, Start, render, Stop. The zero prefill is a full-scale
     /// discontinuity in a continuous waveform, and it happened five times a
     /// second -- which is exactly the periodic click that was reported as

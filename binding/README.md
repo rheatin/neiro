@@ -80,7 +80,7 @@ see mojibake in these logs again, check the shell before touching the code.
 $env:PATH = "$env:USERPROFILE\scoop\persist\rustup\.cargo\bin;" +
             "$env:USERPROFILE\scoop\shims;" +
             "$env:USERPROFILE\scoop\apps\mingw\current\bin;$env:PATH"
-cd spike/audio-engine/rust
+cd binding
 
 # The engine must be built first: build.rs links against its import library.
 cd .. ; cmake -B build -G Ninja ; cmake --build build ; cd rust

@@ -1,8 +1,8 @@
 # Build output.
 #
-# Unanchored on purpose: the repository has more than one — the CMake build
-# directory and each Rust crate's target/. A path-specific pattern would miss
-# the copies inside crates/ and spike/.
+# Unanchored on purpose: the repository has more than one — engine/build, plus
+# a target/ inside each Rust crate (binding/, base/). A path-specific pattern
+# would miss them.
 target/
 build/
 build-*/

@@ -22,7 +22,7 @@ The engine is built with `-mcrtdll=ucrt` when the toolchain ships
 ## Build
 
 ```powershell
-cd spike/audio-engine
+cd engine
 cmake -B build -G Ninja
 cmake --build build
 ```
@@ -393,7 +393,7 @@ thread, the queue, the DSP and the position. Base adds the analysis scheduler,
 the cache, the render-path snapshot and the UI-facing command/event protocol.
 
 ```powershell
-cd spike/audio-engine/base
+cd base
 $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
 cargo run --bin base_probe
 cargo run --bin base_capi_check
@@ -574,7 +574,7 @@ inline path. All existing checks still pass.
 Run every non-hardware check:
 
 ```powershell
-cd spike/audio-engine/build
+cd engine/build
 .\nae_test.exe
 .\resample_check.exe
 .\dither_check.exe

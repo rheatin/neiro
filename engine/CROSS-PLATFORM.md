@@ -63,7 +63,7 @@ once from what still has to be written.
 Configure the core only (it stops before the Windows backend):
 
 ```bash
-cd spike/audio-engine
+cd engine
 cmake --preset macos
 cmake --build --preset macos
 ./build-macos/policy_check

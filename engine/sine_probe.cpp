@@ -60,8 +60,8 @@ int main(int argc, char** argv) {
 
     // The slice is the whole experiment.
     //
-    // The application calls NAE_Play(200) in a loop -- service.rs:50 sets
-    // SLICE_MS to 200 and line 689 calls it repeatedly -- so it cuts the stream
+    // The application called NAE_Play(200) in a loop -- the Tauri host's
+    // SLICE_MS was 200 -- so it cut the stream
     // five times a second. sine_probe used to make one call for the whole run.
     // Same file, same engine, same device, same format: the only difference
     // between a clean run and a bubbling one was how often this function was

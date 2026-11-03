@@ -6,8 +6,9 @@ introduce again, with the measurement that would have caught each one earlier.
 
 The README documents behaviour. This documents the paths that led there.
 
-Related: `RESAMPLING.md` (three early resampler bugs), and
-`../src-tauri/CRASH_POSTMORTEM.md` (the null-pointer crash in the render loop).
+Related: `RESAMPLING.md` (three early resampler bugs). The null-pointer crash in
+the render loop is recorded here, in the render-loop section; its original
+postmortem lived in the Tauri host, which is no longer part of this repository.
 
 ---
 

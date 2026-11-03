@@ -4,8 +4,8 @@ A WASAPI exclusive-mode audio engine behind a C ABI. Decoding, rate conversion,
 dithering, requantisation and device output all happen here, so audio samples
 never cross a language boundary.
 
-C++ (MinGW) → `nae.dll`. Rust bindings in [`rust/`](rust/). vended `soxr` in
-[`third_party/soxr`](third_party/soxr).
+C++ (MinGW) → `nae.dll`. Rust bindings in [`../binding/`](../binding/). vended
+`soxr` in [`third_party/soxr`](third_party/soxr).
 
 > **Why failures are written down separately.** `LESSONS.md` records the bugs
 > found while building this and the measurements that caught them. `RESAMPLING.md`
