@@ -42,8 +42,7 @@ pub mod session;
 pub use engine::{
     analyze_file, analyzer_version, capabilities, compute_peaks, default_device, default_device_id,
     enumerate_devices, last_error, open_exclusive, open_file, open_file_shared,
-    open_file_with_share, open_with, query_envelope, query_signal_path, query_spectrum,
-    query_supported_rates, query_tags, shutdown, Analysis, Device, Envelope, LiveSignalPath, Peaks,
+    open_file_with_share, open_with, shutdown, Analysis, Device, Envelope, LiveSignalPath, Peaks,
     SeamDistribution, ShareMode, SignalPath, Spectrum, Stream, Tags, TrackInfo,
 };
 pub use error::{EngineError, Result};

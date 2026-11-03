@@ -847,13 +847,15 @@ pub fn shutdown() {
 /// anyway: `struct_size` is what says which ones exist, and a host built against
 /// a newer header than the DLL it loaded has to be able to tell the difference
 /// between "zero" and "never set".
-pub fn query_signal_path(handle: *mut ffi::NAE_Handle) -> LiveSignalPath {
-    let mut raw = ffi::NAE_SignalPath::default();
+pub(crate) fn query_signal_path(handle: *mut ffi::NAE_Handle) -> LiveSignalPath {
     // Declare the size this build expects, so a newer DLL that appended fields
     // reports a larger `struct_size` and `complete` stays honest. Without this
     // the engine writes `sizeof(its own struct)` over a zeroed field, which is
     // indistinguishable from "everything written".
-    raw.struct_size = std::mem::size_of::<ffi::NAE_SignalPath>() as u32;
+    let mut raw = ffi::NAE_SignalPath {
+        struct_size: std::mem::size_of::<ffi::NAE_SignalPath>() as u32,
+        ..Default::default()
+    };
     // SAFETY: `raw` is a live, correctly-sized `NAE_SignalPath` with its
     // `struct_size` set to this build's size. The engine copies out at most
     // `min(that, its own size)` bytes, so a DLL with fewer fields cannot write
@@ -998,11 +1000,13 @@ impl Envelope {
 ///
 /// 空句柄返回空的 `Envelope`（`frames_fed == 0`，`has_data` 报「无数据」）。轮询
 /// 一个还没打开的流不是错误，而调用方是按定时器轮询的，不管流存不存在。
-pub fn query_envelope(handle: *mut ffi::NAE_Handle) -> Envelope {
+pub(crate) fn query_envelope(handle: *mut ffi::NAE_Handle) -> Envelope {
     // 第一次只问形状：`envelope` 为 null、capacity 为 0，引擎按文档把它当作
     // 「告诉我多大」处理，不会写入任何数据。
-    let mut probe = ffi::NAE_EnvelopeInfo::default();
-    probe.struct_size = std::mem::size_of::<ffi::NAE_EnvelopeInfo>() as u32;
+    let mut probe = ffi::NAE_EnvelopeInfo {
+        struct_size: std::mem::size_of::<ffi::NAE_EnvelopeInfo>() as u32,
+        ..Default::default()
+    };
     // SAFETY: `probe` 是活的、正确尺寸的零值 `NAE_EnvelopeInfo`，null 指针加 0
     // 容量是文档规定的问法，空句柄按文档返回零值结构。
     unsafe { ffi::NAE_QueryEnvelope(handle, &mut probe, std::ptr::null_mut(), 0) };
@@ -1012,8 +1016,10 @@ pub fn query_envelope(handle: *mut ffi::NAE_Handle) -> Envelope {
         return Envelope::default();
     }
     let mut frames = vec![0.0f32; frame_count];
-    let mut info = ffi::NAE_EnvelopeInfo::default();
-    info.struct_size = std::mem::size_of::<ffi::NAE_EnvelopeInfo>() as u32;
+    let mut info = ffi::NAE_EnvelopeInfo {
+        struct_size: std::mem::size_of::<ffi::NAE_EnvelopeInfo>() as u32,
+        ..Default::default()
+    };
     // SAFETY: `frames` 是恰好 `frame_count` 个 float 的活分配，也就是传进去的容量，
     // 引擎不会写入超过容量的数据。
     let rc = unsafe {
@@ -1093,11 +1099,13 @@ impl Spectrum {
 /// A null handle yields an empty `Spectrum` with `frames_fed == 0`, which
 /// `has_data` reports as no data. It is not an error to poll a stream that has not
 /// opened, and the caller polls on a timer whether or not a stream exists.
-pub fn query_spectrum(handle: *mut ffi::NAE_Handle) -> Spectrum {
+pub(crate) fn query_spectrum(handle: *mut ffi::NAE_Handle) -> Spectrum {
     // First call: ask for the shape only. `bins` is null and `capacity` is zero,
     // which the engine treats as "tell me the size" and does not write to.
-    let mut probe = ffi::NAE_SpectrumInfo::default();
-    probe.struct_size = std::mem::size_of::<ffi::NAE_SpectrumInfo>() as u32;
+    let mut probe = ffi::NAE_SpectrumInfo {
+        struct_size: std::mem::size_of::<ffi::NAE_SpectrumInfo>() as u32,
+        ..Default::default()
+    };
     // SAFETY: `probe` is a live, zeroed `NAE_SpectrumInfo` of exactly the size the
     // engine documents, and a null `bins` with zero capacity is the documented way
     // to ask for the shape. A null handle is documented to yield a zeroed struct.
@@ -1108,8 +1116,10 @@ pub fn query_spectrum(handle: *mut ffi::NAE_Handle) -> Spectrum {
         return Spectrum::default();
     }
     let mut bins = vec![0.0f32; bin_count];
-    let mut info = ffi::NAE_SpectrumInfo::default();
-    info.struct_size = std::mem::size_of::<ffi::NAE_SpectrumInfo>() as u32;
+    let mut info = ffi::NAE_SpectrumInfo {
+        struct_size: std::mem::size_of::<ffi::NAE_SpectrumInfo>() as u32,
+        ..Default::default()
+    };
     // SAFETY: `bins` is a live allocation of exactly `bin_count` floats, which is
     // the capacity passed, and the engine writes no more than `capacity`.
     let rc =
@@ -1229,8 +1239,10 @@ pub fn compute_peaks(path: &std::path::Path, buckets: u32) -> Peaks {
 
     let capacity = (buckets as usize) * 2;
     let mut out = vec![0.0f32; capacity];
-    let mut info = ffi::NAE_PeaksInfo::default();
-    info.struct_size = std::mem::size_of::<ffi::NAE_PeaksInfo>() as u32;
+    let mut info = ffi::NAE_PeaksInfo {
+        struct_size: std::mem::size_of::<ffi::NAE_PeaksInfo>() as u32,
+        ..Default::default()
+    };
     // SAFETY: `c_path` 是一个活着的、NUL 结尾的 C 字符串；`info` 是一个活着的、
     // 清零的 `NAE_PeaksInfo`，大小就是引擎文档里那个；`out` 是一个有 `capacity` 个
     // float 的活分配，而传进去的容量就是它 —— 引擎文档说不超过 `capacity`，且在容量
@@ -1381,8 +1393,10 @@ pub fn analyze_file(path: &std::path::Path, buckets: u32) -> Analysis {
 
     let capacity = buckets as usize * 2;
     let mut out = vec![0.0f32; capacity];
-    let mut info = ffi::NAE_AnalysisInfo::default();
-    info.struct_size = std::mem::size_of::<ffi::NAE_AnalysisInfo>() as u32;
+    let mut info = ffi::NAE_AnalysisInfo {
+        struct_size: std::mem::size_of::<ffi::NAE_AnalysisInfo>() as u32,
+        ..Default::default()
+    };
     let mut written = 0i32;
     // SAFETY: `c_path` is a live NUL-terminated C string; `info` is a live,
     // zeroed struct of the declared size; `out` has exactly `capacity` floats,
@@ -1667,7 +1681,7 @@ impl LiveSignalPath {
 /// supports nothing". The engine distinguishes the two and so does this: a caller
 /// that treats an empty list as a refusal will refuse to play on a machine where
 /// playback works, which is the failure this was added to remove.
-pub fn query_supported_rates(handle: *mut ffi::NAE_Handle) -> Vec<u32> {
+pub(crate) fn query_supported_rates(handle: *mut ffi::NAE_Handle) -> Vec<u32> {
     let mut count: u32 = 0;
     // SAFETY: out-params are live and correctly typed; the engine writes no more
     // than `capacity` entries and reports the true total separately.
@@ -1687,9 +1701,11 @@ pub fn query_supported_rates(handle: *mut ffi::NAE_Handle) -> Vec<u32> {
 /// 读文件标签。
 ///
 /// 空句柄或没有解码器时返回全空的 `Tags`，由调用方按「没有」处理。
-pub fn query_tags(handle: *mut ffi::NAE_Handle) -> Tags {
-    let mut raw = ffi::NAE_Tags::default();
-    raw.struct_size = std::mem::size_of::<ffi::NAE_Tags>() as u32;
+pub(crate) fn query_tags(handle: *mut ffi::NAE_Handle) -> Tags {
+    let mut raw = ffi::NAE_Tags {
+        struct_size: std::mem::size_of::<ffi::NAE_Tags>() as u32,
+        ..Default::default()
+    };
     // SAFETY: `raw` is a live, correctly-sized, zeroed `NAE_Tags`, and a null
     // handle is documented to yield a zeroed struct rather than an error.
     unsafe { ffi::NAE_QueryTags(handle, &mut raw) };
@@ -1716,9 +1732,11 @@ pub fn query_tags(handle: *mut ffi::NAE_Handle) -> Tags {
 ///
 /// 空句柄返回全 0 的默认值。0 位深和「没有文件」必须能分辨：前者不存在，后者只是
 /// 还没打开——把两者混成「不知道」就会让一个 0 看起来像一次测量结果。
-pub fn query_track_info(handle: *mut ffi::NAE_Handle) -> TrackInfo {
-    let mut raw = ffi::NAE_TrackInfo::default();
-    raw.struct_size = std::mem::size_of::<ffi::NAE_TrackInfo>() as u32;
+pub(crate) fn query_track_info(handle: *mut ffi::NAE_Handle) -> TrackInfo {
+    let mut raw = ffi::NAE_TrackInfo {
+        struct_size: std::mem::size_of::<ffi::NAE_TrackInfo>() as u32,
+        ..Default::default()
+    };
     // SAFETY: `raw` is a live, correctly-sized, zeroed `NAE_TrackInfo`, and a null
     // handle is documented to yield a zeroed struct rather than an error. The engine
     // writes at most `sizeof(NAE_TrackInfo)` bytes, all of which are this field's.

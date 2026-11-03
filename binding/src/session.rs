@@ -197,8 +197,10 @@ impl Session {
     }
 
     pub fn state(&self) -> Result<SessionState> {
-        let mut raw = ffi::NAE_SessionState::default();
-        raw.struct_size = std::mem::size_of::<ffi::NAE_SessionState>() as u32;
+        let mut raw = ffi::NAE_SessionState {
+            struct_size: std::mem::size_of::<ffi::NAE_SessionState>() as u32,
+            ..Default::default()
+        };
         // SAFETY: `raw` is a live, correctly-sized, zeroed struct; the session
         // writes at most sizeof(NAE_SessionState) into it.
         let rc = unsafe { ffi::NAE_SessionGetState(self.raw, &mut raw) };
@@ -355,7 +357,7 @@ pub struct EqBand {
 }
 
 impl EqBand {
-    fn to_ffi(self) -> ffi::NAE_EqBand {
+    fn to_ffi(&self) -> ffi::NAE_EqBand {
         ffi::NAE_EqBand {
             kind: self.kind,
             freq_hz: self.freq_hz,
@@ -404,13 +406,15 @@ impl EqParams {
                 "at most {EQ_MAX_BANDS} EQ bands"
             )));
         }
-        let mut raw = ffi::NAE_EqParams::default();
-        raw.struct_size = std::mem::size_of::<ffi::NAE_EqParams>() as u32;
+        let mut raw = ffi::NAE_EqParams {
+            struct_size: std::mem::size_of::<ffi::NAE_EqParams>() as u32,
+            ..Default::default()
+        };
         raw.enabled = i32::from(self.enabled);
         raw.preamp_db = self.preamp_db;
         raw.band_count = self.bands.len() as i32;
         raw.phase = self.phase;
-        for (slot, band) in raw.bands.iter_mut().zip(self.bands.iter().cloned()) {
+        for (slot, band) in raw.bands.iter_mut().zip(self.bands.iter()) {
             *slot = band.to_ffi();
         }
         Ok(raw)
@@ -620,8 +624,10 @@ impl Session {
     }
 
     pub fn eq(&self) -> Result<EqParams> {
-        let mut raw = ffi::NAE_EqParams::default();
-        raw.struct_size = std::mem::size_of::<ffi::NAE_EqParams>() as u32;
+        let mut raw = ffi::NAE_EqParams {
+            struct_size: std::mem::size_of::<ffi::NAE_EqParams>() as u32,
+            ..Default::default()
+        };
         self.check(unsafe { ffi::NAE_SessionGetEq(self.raw, &mut raw) })?;
         Ok(EqParams::from_ffi(&raw))
     }
@@ -632,8 +638,10 @@ impl Session {
     }
 
     pub fn crossfeed(&self) -> Result<CrossfeedParams> {
-        let mut raw = ffi::NAE_CrossfeedParams::default();
-        raw.struct_size = std::mem::size_of::<ffi::NAE_CrossfeedParams>() as u32;
+        let mut raw = ffi::NAE_CrossfeedParams {
+            struct_size: std::mem::size_of::<ffi::NAE_CrossfeedParams>() as u32,
+            ..Default::default()
+        };
         self.check(unsafe { ffi::NAE_SessionGetCrossfeed(self.raw, &mut raw) })?;
         Ok(CrossfeedParams::from_ffi(&raw))
     }
@@ -644,8 +652,10 @@ impl Session {
     }
 
     pub fn replay_gain(&self) -> Result<ReplayGainParams> {
-        let mut raw = ffi::NAE_ReplayGainParams::default();
-        raw.struct_size = std::mem::size_of::<ffi::NAE_ReplayGainParams>() as u32;
+        let mut raw = ffi::NAE_ReplayGainParams {
+            struct_size: std::mem::size_of::<ffi::NAE_ReplayGainParams>() as u32,
+            ..Default::default()
+        };
         self.check(unsafe { ffi::NAE_SessionGetReplayGain(self.raw, &mut raw) })?;
         Ok(ReplayGainParams::from_ffi(&raw))
     }
@@ -656,8 +666,10 @@ impl Session {
     }
 
     pub fn convolver(&self) -> Result<ConvolverParams> {
-        let mut raw = ffi::NAE_ConvolverParams::default();
-        raw.struct_size = std::mem::size_of::<ffi::NAE_ConvolverParams>() as u32;
+        let mut raw = ffi::NAE_ConvolverParams {
+            struct_size: std::mem::size_of::<ffi::NAE_ConvolverParams>() as u32,
+            ..Default::default()
+        };
         self.check(unsafe { ffi::NAE_SessionGetConvolver(self.raw, &mut raw) })?;
         Ok(ConvolverParams::from_ffi(&raw))
     }
@@ -668,8 +680,10 @@ impl Session {
     }
 
     pub fn crossfade(&self) -> Result<CrossfadeParams> {
-        let mut raw = ffi::NAE_CrossfadeParams::default();
-        raw.struct_size = std::mem::size_of::<ffi::NAE_CrossfadeParams>() as u32;
+        let mut raw = ffi::NAE_CrossfadeParams {
+            struct_size: std::mem::size_of::<ffi::NAE_CrossfadeParams>() as u32,
+            ..Default::default()
+        };
         self.check(unsafe { ffi::NAE_SessionGetCrossfade(self.raw, &mut raw) })?;
         Ok(CrossfadeParams::from_ffi(&raw))
     }
