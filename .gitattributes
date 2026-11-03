@@ -1,0 +1,31 @@
+# Normalise line endings in the repository, and check them out as the platform
+# expects.
+#
+# The toolchain is mixed: MinGW/GCC on Windows, Rust, and a Node frontend. Left
+# alone, git warns on every single file about LF becoming CRLF, which is enough
+# noise to make a real warning easy to miss. It also means a file edited on two
+# machines can show every line as changed for no reason.
+
+* text=auto eol=lf
+
+# Windows-native binaries and projects that genuinely want CRLF in the working
+# tree. Nothing in this repository is one, but the rule is stated so that adding
+# one later is a deliberate act rather than an accident.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Not text.
+*.dll   binary
+*.exe   binary
+*.rlib  binary
+*.dll.a binary
+*.png   binary
+*.ico   binary
+*.dff   binary
+*.dsf   binary
+*.wav   binary
+*.flac  binary
+*.aiff  binary
+*.m4a   binary
+*.mp3   binary

@@ -1,0 +1,35 @@
+# Build output.
+#
+# Unanchored on purpose: the repository has more than one — the CMake build
+# directory and each Rust crate's target/. A path-specific pattern would miss
+# the copies inside crates/ and spike/.
+target/
+build/
+build-*/
+
+# Test fixtures.
+#
+# Audio files are not source. A DSD sample is 162 MB of one-bit audio; a file
+# that size makes clone and history unusable. See test/README.md for what
+# belongs here and what the checks need.
+test/*.dff
+test/*.dsf
+test/*.wav
+test/*.flac
+test/*.aiff
+test/*.m4a
+test/*.mp3
+
+# Editor and OS noise.
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Local overrides. The CMake toolchain path is machine-specific and the file
+# most likely to be edited by accident.
+*.local
+.env
+.env.*
