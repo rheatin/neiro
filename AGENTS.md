@@ -102,6 +102,7 @@ cd engine/build
 .\dither_check.exe
 .\mode_check.exe
 .\reopen_check.exe
+.\source_width_check.exe
 ```
 
 The Rust binding is the cross-language ABI probe:

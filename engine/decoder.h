@@ -60,6 +60,14 @@ struct StreamInfo {
     // device's word length -- that is `NAE_SignalPath.granted_bits`, and the two
     // differ routinely.
     uint32_t bits_per_sample = 0;
+    /// Bits the source actually carries, as the demuxer reports them.
+    ///
+    /// `bits_per_sample` above is the *container* width the decoder produces, so
+    /// a 24-bit FLAC and a 32-bit WAV both report 32. This is the number that
+    /// says how much of that container is real, and it is the one that decides
+    /// whether the engine's float32 path can carry the file without loss. Zero
+    /// means the demuxer did not say, which is common for some containers.
+    uint32_t raw_bits_per_sample = 0;
 
     // ---- 标签 ----
     //

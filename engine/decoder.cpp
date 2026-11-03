@@ -554,6 +554,10 @@ bool Decoder::open(const std::string& path, std::string* error, uint32_t outChan
             p.info.bits_per_sample = 0;
             break;
     }
+    // How much of that container is signal. FFmpeg fills this from the stream
+    // for PCM and for FLAC/ALAC, and leaves it 0 when it does not know -- which
+    // is why the caller treats 0 as "no claim" rather than as "8 bits".
+    p.info.raw_bits_per_sample = static_cast<uint32_t>(std::max(0, p.codec->bits_per_raw_sample));
     if (stream->duration > 0 && stream->time_base.den > 0) {
         p.info.duration_ms =
             1000.0 * static_cast<double>(stream->duration) * av_q2d(stream->time_base);

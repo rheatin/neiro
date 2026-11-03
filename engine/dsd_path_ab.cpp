@@ -154,11 +154,24 @@ BandRms measure(const std::string& path, int32_t forceRate) {
     // 而频带计算**可以**放在关闭之后，因为那些数据已经在 `acc` 里了。这里不一样：
     // `NAE_Position` 要问活着的引擎。所以顺序是「问完引擎，再关引擎，最后算频带」。
     {
+        // `NAE_Position` is in **seconds** and `NAE_Play` takes **milliseconds**.
+        // Dividing the first by the second gave a ratio whose ceiling was 0.001,
+        // and the caller asserts 1.0 within 0.02 -- so this check could never
+        // pass and the tool always exited 1, hiding the A/B result it exists to
+        // report.
+        //
+        // The slice is also clamped to what is left of the file: a fixed 4 s
+        // request against a 5 s file, after the spectrum pass above has already
+        // consumed 3.5 s, leaves 1.5 s and a ratio of 0.375 that says nothing
+        // about the engine's rate.
         const double posBefore = NAE_Position(h);
-        NAE_Play(h, 4000);
-        const double posAfter = NAE_Position(h);
-        if (posAfter > posBefore) {
-            out.positionAdvanceRatio = (posAfter - posBefore) / 4000.0;
+        const double duration = NAE_Duration(h);
+        const double remainingMs = std::max(0.0, (duration - posBefore) * 1000.0);
+        const double playMs = std::min(4000.0, remainingMs);
+        if (playMs >= 500.0) {
+            NAE_Play(h, static_cast<int32_t>(playMs));
+            const double posAfter = NAE_Position(h);
+            out.positionAdvanceRatio = (posAfter - posBefore) / (playMs / 1000.0);
         }
     }
 

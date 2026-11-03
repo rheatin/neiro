@@ -52,6 +52,11 @@ extern "C" {
 #define NAE_REASON_PCM_TO_DSD 20
 #define NAE_REASON_LOUDNESS 21
 #define NAE_REASON_PHASE 22
+// The source carries more precision than the engine's float32 path keeps. A
+// 32-bit integer sample has 32 significant bits; the internal path has 24, so
+// converting it in and back out is lossy even when nothing else is applied. The
+// flag used to ignore source width entirely and call such a stream bit-perfect.
+#define NAE_REASON_SOURCE_PRECISION 23
 
 // ---- backends ---------------------------------------------------------------
 

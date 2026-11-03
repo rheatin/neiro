@@ -789,6 +789,15 @@ void sessionThread(NAE_Session* s) {
         if (NAE_QuerySignalPath(handle, &path) == NAE_OK) {
             s->reason = path.reason;
             s->bitPerfect = path.bitPerfect;
+
+            // The resolver answered the same question before the file was
+            // opened, when the source depth was not known yet, so its verdict
+            // can be stale -- a 32-bit source is the case that exposed this: the
+            // resolver reported perfection and the engine, which had seen the
+            // decoder by then, did not. Reporting both would give a UI two
+            // answers for one fact, so the resolved struct takes the engine's.
+            s->resolved.bitPerfect = path.bitPerfect;
+            s->resolved.perfectReason = path.reason;
         }
         {
             NAE_ReplayGainInfo info{};

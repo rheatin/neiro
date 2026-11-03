@@ -645,6 +645,11 @@ set_target_properties(splice_check PROPERTIES
   add_executable(file_check file_check.cpp)
   target_link_libraries(file_check PRIVATE nae)
 
+  # `bit_perfect` against the source, not only the device. Generates its own
+  # 16/24/32-bit fixtures so it runs without the caller supplying anything.
+  add_executable(source_width_check source_width_check.cpp)
+  target_link_libraries(source_width_check PRIVATE nae)
+
   # Steady-state pipeline latency, and the CPU it costs.
   #
   # Reports the FIFO depth the pipeline holds, because that is the latency the

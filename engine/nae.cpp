@@ -1002,6 +1002,13 @@ struct NAE_Handle {
     /// 两者必须分开报。混在一起就会把「文件是 24 bit」说成「设备收到 24 bit」，
     /// 而这个引擎对那个说法有专门的、更严格的定义。
     int32_t fileBitsPerSample = 0;
+    /// Bits the source actually carries (`StreamInfo::raw_bits_per_sample`).
+    ///
+    /// Separate from `fileBitsPerSample` above because that one is the container
+    /// the decoder produces: a 24-bit FLAC and a 32-bit WAV both report 32 there.
+    /// This is the number that decides whether the float32 path can carry the
+    /// file without dropping bits. 0 means the demuxer did not say.
+    int32_t fileRawBits = 0;
     /// 文件时长，毫秒。0 表示容器没有报。
     ///
     /// 之前时长只经由 open 的 out-param 传出去，而那个值只被**打开时**调用 open
@@ -1023,6 +1030,7 @@ struct NAE_Handle {
     int32_t nextFileChannels = 0;
     int32_t nextFileSampleRate = 0;
     int32_t nextFileBitsPerSample = 0;
+    int32_t nextFileRawBits = 0;
     int32_t nextFileDurationMs = 0;
     char nextFileCodec[32] = {};
     std::string nextDecodePath;
@@ -1137,6 +1145,31 @@ static void decodeThreadMain(NAE_Handle* handle) {
     }
 }
 
+/// Downgrade an open-time "bit-perfect" verdict when the source carries more
+/// precision than the float32 path keeps.
+///
+/// The device is negotiated long before the file is opened, so `fileRawBits` is
+/// not known when the verdict is first computed. This runs once the decoder is
+/// attached and only ever clears the flag.
+///
+/// Why 24: every stage between the decoder and the device is float32, which has
+/// 24 significant bits. A 24-bit source survives exactly; a 32-bit integer
+/// source loses its low eight bits on the way in and never gets them back,
+/// whatever the endpoint accepts. The endpoint's valid-bit count is a different
+/// question and answering it instead is how the flag came to claim perfection
+/// for a file it had already truncated.
+///
+/// Conservative in the same direction as the rest of the flag: a float32 source
+/// into a float32 endpoint would survive, but this path does not track whether
+/// the source is float, and an unmeasured claim of perfection is the failure
+/// this field exists to prevent.
+static void applySourcePrecision(NAE_Handle* handle) {
+    if (!handle || !handle->bitPerfect) return;
+    if (handle->fileRawBits <= 24) return;
+    handle->bitPerfect = false;
+    handle->reason = static_cast<neiro::PerfectReason>(NAE_REASON_SOURCE_PRECISION);
+}
+
 static void startDecodeThread(NAE_Handle* handle) {
     if (!handle || !handle->decoder || handle->decodeRunning) return;
     if (handle->decodeThread.joinable()) handle->decodeThread.join();
@@ -1203,6 +1236,10 @@ static void swapNextDecoder(NAE_Handle* handle) {
     handle->fileChannels = handle->nextFileChannels;
     handle->fileSampleRate = handle->nextFileSampleRate;
     handle->fileBitsPerSample = handle->nextFileBitsPerSample;
+    handle->fileRawBits = handle->nextFileRawBits;
+    // The next track may carry more precision than this one, so the verdict is
+    // re-applied rather than inherited.
+    applySourcePrecision(handle);
     handle->fileDurationMs = handle->nextFileDurationMs;
     std::memcpy(handle->fileCodec, handle->nextFileCodec, sizeof(handle->fileCodec));
     handle->fileCodec[sizeof(handle->fileCodec) - 1] = '\0';
@@ -1216,6 +1253,7 @@ static void swapNextDecoder(NAE_Handle* handle) {
     handle->nextFileChannels = 0;
     handle->nextFileSampleRate = 0;
     handle->nextFileBitsPerSample = 0;
+    handle->nextFileRawBits = 0;
     handle->nextFileDurationMs = 0;
     std::memset(handle->nextFileCodec, 0, sizeof(handle->nextFileCodec));
     handle->nextDecodePath.clear();
@@ -1665,9 +1703,11 @@ int32_t openFileImpl(const char* deviceId, const char* path, int32_t outputMode,
     // 就在 `info` 里，之前只是没有被带上来。
     handle->fileSampleRate = static_cast<int32_t>(info.sample_rate);
     handle->fileBitsPerSample = static_cast<int32_t>(info.bits_per_sample);
+    handle->fileRawBits = static_cast<int32_t>(info.raw_bits_per_sample);
     handle->fileDurationMs = static_cast<int32_t>(info.duration_ms);
     // 固定长度，截断而不溢出。见字段注释里关于不用 std::string 的理由。
     std::snprintf(handle->fileCodec, sizeof(handle->fileCodec), "%s", info.codec.c_str());
+    applySourcePrecision(handle);
     if (!handle->routingActive) startDecodeThread(handle);
 
     if (fileChannels) *fileChannels = static_cast<int32_t>(info.channels);
@@ -2195,6 +2235,7 @@ int32_t NAE_PreloadNext(NAE_Handle* handle, const char* path) NAE_NOEXCEPT {
     handle->nextFileChannels = static_cast<int32_t>(info.channels);
     handle->nextFileSampleRate = static_cast<int32_t>(info.sample_rate);
     handle->nextFileBitsPerSample = static_cast<int32_t>(info.bits_per_sample);
+    handle->nextFileRawBits = static_cast<int32_t>(info.raw_bits_per_sample);
     handle->nextFileDurationMs = static_cast<int32_t>(info.duration_ms);
     std::snprintf(handle->nextFileCodec, sizeof(handle->nextFileCodec), "%s",
                   info.codec.c_str());

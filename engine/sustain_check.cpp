@@ -397,15 +397,28 @@ int main(int argc, char** argv) {
     // check, and the RSS verdict was passing on a comparison that had not been
     // made. The halves are parameters now.
     auto verdict = [&](const char* name, const Trend& tr2, const Trend& h1, const Trend& h2,
-                       double limit) {
+                       double limit, double minWindow) {
         const double predicted = std::fabs(tr2.slope * window);
         const double sigma = tr2.residualSigma;
+
+        // A rate threshold is only meaningful over a window long enough for the
+        // rate to show. The drift limit is 6 ms per minute, and the first
+        // seconds after the stream starts carry a settling offset that reads as
+        // a ramp: a 20 s run reported 0.0018 s/s while a 60 s run over the same
+        // engine and file reported 0.00007 s/s. Judging the short window is how
+        // a tool fails a stream that is fine.
+        if (minWindow > 0.0 && window < minWindow) {
+            std::printf("[sustain] [INCONCLUSIVE] %-4s window of %.0f s cannot resolve "
+                        "%.5f/s; run at least %.0f s to judge it\n",
+                        name, window, limit, minWindow);
+            return true;
+        }
         // Two sigma, and the halves must at least agree in sign. A slope whose
         // two halves point opposite ways is a fit chasing a phase.
         const bool halvesDisagree = (tr2.n >= 4) && (h1.slope * h2.slope < 0.0);
         if (predicted < 2.0 * sigma) {
-            std::printf("[sustain] [NO TREND] %-8s predicts %+.1f over %.0f s, under 2x the "
-                        "scatter (%+.1f)\n",
+            std::printf("[sustain] [NO TREND] %-8s predicts %+.4f over %.0f s, under 2x the "
+                        "scatter (%+.4f)\n",
                         name, tr2.slope * window, window, sigma);
             if (halvesDisagree)
                 std::printf("[sustain]            and the two halves disagree in sign "
@@ -414,19 +427,22 @@ int main(int argc, char** argv) {
             return true;
         }
         if (halvesDisagree) {
-            std::printf("[sustain] [NO TREND] %-8s predicts %+.1f over %.0f s, but the "
-                        "halves disagree in sign (%+.3f / %+.3f)\n",
+            std::printf("[sustain] [NO TREND] %-8s predicts %+.4f over %.0f s, but the "
+                        "halves disagree in sign (%+.5f / %+.5f)\n",
                         name, tr2.slope * window, window, h1.slope, h2.slope);
             return true;
         }
         if (std::fabs(tr2.slope) > limit) {
-            std::printf("[sustain] [FAIL]     %-8s grew %.3f/s (limit %.2f), predicting %+.1f "
-                        "over the window against scatter %+.1f\n",
+            // Five decimals, not three: the drift limit is 1e-4 s/s, so `%.3f`
+            // printed every excess as "0.001" and the limit itself as "0.00" --
+            // a verdict whose own numbers cannot be checked against each other.
+            std::printf("[sustain] [FAIL]     %-8s grew %.5f/s (limit %.5f), predicting %+.4f "
+                        "over the window against scatter %+.4f\n",
                         name, tr2.slope, limit, tr2.slope * window, sigma);
             return false;
         }
-        std::printf("[sustain] [PASS]     %-8s slope %+.3f/s is a real trend but under the "
-                    "%.2f limit\n", name, tr2.slope, limit);
+        std::printf("[sustain] [PASS]     %-8s slope %+.5f/s is a real trend but under the "
+                    "%.5f limit\n", name, tr2.slope, limit);
         return true;
     };
 
@@ -461,9 +477,14 @@ int main(int argc, char** argv) {
     const double driftLimit = 1e-4;  // s/s, i.e. 6 ms of slip per minute
 
     bool pass = true;
-    if (!verdict("fifoMax", tf, th1, th2, fifoLimit)) pass = false;
-    if (!verdict("rss", tr, rh1, rh2, rssLimit)) pass = false;
-    if (!verdict("drift", td, dh1, dh2, driftLimit)) pass = false;
+    if (!verdict("fifoMax", tf, th1, th2, fifoLimit, 0.0)) pass = false;
+    if (!verdict("rss", tr, rh1, rh2, rssLimit, 0.0)) pass = false;
+    // 25 s of fitted window -- about a minute of run at the default back-half
+    // trend window. The limit is 6 ms of slip per minute, and a shorter fit
+    // cannot separate that from the settling that follows stream start: a 9 s
+    // window reported 0.0018 s/s on the same engine and file where a 29 s
+    // window reported 0.00007 s/s.
+    if (!verdict("drift", td, dh1, dh2, driftLimit, 25.0)) pass = false;
     if (shortRenders != 0) {
         std::printf("[sustain] [FAIL] %d short renders\n", shortRenders);
         pass = false;

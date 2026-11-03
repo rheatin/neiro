@@ -132,9 +132,10 @@ mangled at that layer looks like an unreadable file.
   refused; it cannot carry DoP.
 - DoP is stereo and uncompressed only. Volume, EQ, crossfeed, ReplayGain,
   convolver, crossfade and seek are bypassed on a DoP handle.
-- The internal path is float32, so a true 32-bit integer source on a 32-bit
-  endpoint is not bit-perfect even though the current flag does not compare the
-  source width.
+- The internal path is float32, which carries 24 significant bits. A source
+  deeper than that -- a 32-bit integer WAV, say -- is reported as *not*
+  bit-perfect with reason `NAE_REASON_SOURCE_PRECISION`, because the low bits are
+  gone before the device sees them, whatever the endpoint accepts.
 - The FFmpeg build is GPL. That is fine for development and not fine to
   distribute; an LGPL build is a link-time change.
 

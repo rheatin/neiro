@@ -172,8 +172,8 @@ parked features are in [`ROADMAP.md`](ROADMAP.md); backend architecture is in
   any other IR channel count is rejected). Longer IRs need more partitions (the
   core supports up to 32) and a larger `NAE_CONVOLVER_MAX_TAPS`.
 - **The internal format is float32.** 16/24-bit integer sources round-trip
-  exactly; a true 32-bit integer source does not, and the bit-perfect flag does
-  not compare the source width.
+  exactly; a true 32-bit integer source does not, and it is reported as not
+  bit-perfect with `NAE_REASON_SOURCE_PRECISION` rather than left to look clean.
 - **Windows only for now.** The device layer is WASAPI; the C ABI and CLI are
   platform-neutral. CoreAudio and ALSA are not implemented.
 
