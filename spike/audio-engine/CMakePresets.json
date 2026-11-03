@@ -1,0 +1,40 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows",
+      "displayName": "Windows: full engine and checks",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-preset",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_FLAGS": "-mcrtdll=ucrt",
+        "CMAKE_CXX_FLAGS": "-mcrtdll=ucrt"
+      }
+    },
+    {
+      "name": "macos",
+      "displayName": "macOS: platform-neutral core and checks",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-macos",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows",
+      "configurePreset": "windows"
+    },
+    {
+      "name": "macos",
+      "configurePreset": "macos"
+    }
+  ]
+}
