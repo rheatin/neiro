@@ -43,7 +43,8 @@ pub use engine::{
     analyze_file, analyze_file_cancellable, analyzer_version, capabilities, compute_peaks,
     default_device, default_device_id,
     enumerate_devices, last_error, open_exclusive, open_file, open_file_shared,
-    open_file_with_share, open_with, shutdown, Analysis, Device, Envelope, LiveSignalPath, Peaks,
+    open_file_with_share, open_with, parameters, shutdown, Analysis, Device, Envelope,
+    LiveSignalPath, ParamDesc, Peaks,
     SeamDistribution, ShareMode, SignalPath, Spectrum, Stream, Tags, TrackInfo,
 };
 pub use error::{EngineError, Result};

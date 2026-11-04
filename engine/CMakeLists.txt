@@ -651,6 +651,11 @@ set_target_properties(splice_check PROPERTIES
   add_executable(source_width_check source_width_check.cpp)
   target_link_libraries(source_width_check PRIVATE nae)
 
+  # The struct-size contract: a caller's declared size is honoured, not
+  # overwritten. Needs no device and no file.
+  add_executable(struct_size_check struct_size_check.cpp)
+  target_link_libraries(struct_size_check PRIVATE nae)
+
   # Steady-state pipeline latency, and the CPU it costs.
   #
   # Reports the FIFO depth the pipeline holds, because that is the latency the

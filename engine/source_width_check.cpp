@@ -47,10 +47,14 @@ void put32(std::vector<std::uint8_t>& out, std::uint32_t v) {
     for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
 }
 
-// One second of a 1 kHz sine at `bits` per sample, stereo, 44.1 kHz.
-bool writeWav(const char* path, int bits) {
-    constexpr std::uint32_t rate = 44100;
-    constexpr std::uint32_t frames = rate;
+// One second of a 1 kHz sine at `bits` per sample, stereo, at `rate`.
+//
+// The rate is the endpoint's own. A fixture at 44.1 kHz on a 192 kHz endpoint is
+// resampled, so `bit_perfect` is already false on the device side and the
+// source-precision rule this check exists for cannot change the answer -- the
+// check would pass whatever the rule did.
+bool writeWav(const char* path, int bits, std::uint32_t rate) {
+    const std::uint32_t frames = rate;
     constexpr std::uint16_t channels = 2;
     const int bytesPerSample = bits / 8;
     const std::uint32_t dataBytes = frames * channels * bytesPerSample;
@@ -104,10 +108,31 @@ bool writeWav(const char* path, int bits) {
 }
 
 struct Verdict {
+    /// What the handle says, from `NAE_QuerySignalPath`.
     bool bitPerfect = false;
     int32_t reason = 0;
+    /// What `NAE_OpenFile` returned in its out-param.
+    bool outBitPerfect = false;
     bool opened = false;
 };
+
+/// The default endpoint's native rate, so the fixtures need no resampling.
+///
+/// Falls back to 48 kHz when nothing reports one; the check's portable
+/// assertion (a 32-bit source is never bit-perfect) holds either way, and the
+/// device-relative one is skipped when the fallback is used.
+std::uint32_t deviceNativeRate() {
+    NAE_Handle* probe = nullptr;
+    int32_t rate = 0, channels = 0, bits = 0, valid = 0, isFloat = 0;
+    double latency = 0.0;
+    if (NAE_OpenExclusiveSine(nullptr, &probe, &rate, &channels, &bits, &valid, &isFloat,
+                              &latency) == NAE_OK &&
+        probe) {
+        NAE_Close(probe);
+        if (rate > 0) return static_cast<std::uint32_t>(rate);
+    }
+    return 48000;
+}
 
 Verdict openNative(const char* path) {
     Verdict v;
@@ -119,6 +144,7 @@ Verdict openNative(const char* path) {
                                     &handle, &rate, &sourceRate, &channels, &bits, &valid,
                                     &isFloat, &resampling, &dithered, &bitPerfect,
                                     &fileChannels, &durationMs, &latencyMs);
+    v.outBitPerfect = bitPerfect != 0;
     if (rc != NAE_OK || !handle) {
         char buf[256] = {0};
         NAE_GetLastErrorText(buf, static_cast<int32_t>(sizeof(buf)));
@@ -143,12 +169,16 @@ int main(int argc, char** argv) {
     // of every other harness here means this one is run the same way.
     (void)utf8Args(argc, argv);
 
+    // The endpoint's own rate, so the device side of the verdict is clean and
+    // the only thing that can make a file imperfect is its depth.
+    const std::uint32_t rate = deviceNativeRate();
+
     const char* p16 = "width_16.wav";
     const char* p24 = "width_24.wav";
     const char* p32 = "width_32.wav";
-    check(writeWav(p16, 16), "16-bit fixture");
-    check(writeWav(p24, 24), "24-bit fixture");
-    check(writeWav(p32, 32), "32-bit fixture");
+    check(writeWav(p16, 16, rate), "16-bit fixture", std::to_string(rate) + " Hz");
+    check(writeWav(p24, 24, rate), "24-bit fixture", std::to_string(rate) + " Hz");
+    check(writeWav(p32, 32, rate), "32-bit fixture", std::to_string(rate) + " Hz");
 
     const Verdict v16 = openNative(p16);
     const Verdict v24 = openNative(p24);
@@ -162,6 +192,21 @@ int main(int argc, char** argv) {
     // Portable: true whatever endpoint this runs on. A 32-bit integer source
     // cannot survive a float32 path, so no device can make this true.
     check(!v32.bitPerfect, "a 32-bit source is never bit-perfect");
+
+    // The open out-param and the handle have to agree.
+    //
+    // `NAE_OpenFile` fills its `bitPerfect` out-param from the device-side
+    // verdict, which is computed before the file is known; the source-precision
+    // rule then clears the handle's copy. Nothing wrote the cleared value back,
+    // so the out-param said 1 while `NAE_QuerySignalPath` on the same handle
+    // said 0 -- and the binding builds `Stream::path.bit_perfect` from the
+    // out-param, so the wrong answer is the one a UI would show.
+    check(v32.outBitPerfect == v32.bitPerfect,
+          "the open out-param agrees with the handle",
+          std::to_string(v32.outBitPerfect) + " vs " + std::to_string(v32.bitPerfect));
+    // The reason is not asserted separately: the out-param has no reason field,
+    // so the comparison would be between the handle and itself. Asserting it
+    // would be a check that cannot fail.
 
     // When the 16-bit file is clean, this device accepted the rate and nothing
     // else interfered -- so the 32-bit verdict can be attributed exactly.

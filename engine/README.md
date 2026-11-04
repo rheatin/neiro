@@ -170,14 +170,20 @@ p95−p10 spread; they are a different, cheaper estimate and are not LUFS.
 `bpmValid` is 0 when the onset envelope is too short or the autocorrelation peak
 is too weak; the host should then show nothing.
 
-## Output policy (proposed)
+## Output policy
 
 [`OUTPUT-POLICY.md`](OUTPUT-POLICY.md) and [`nae_policy.h`](nae_policy.h) define
 the requested `NAE_OutputPolicy`, measured `NAE_DeviceCaps`, and the
-`NAE_ResolvedSignalPath` with per-source diagnostics. `policy.cpp` now implements
+`NAE_ResolvedSignalPath` with per-source diagnostics. `policy.cpp` implements
 defaults, matrix build/registration, the pure resolver and Auto/fallback/failure
-diagnostics; `hilbert.cpp` implements the 255-tap LtRt Hilbert FIR. The resolver
-is not wired into the session yet and `NAE_QueryDeviceCaps` is still pending.
+diagnostics; `hilbert.cpp` implements the IIR all-pass quadrature pair, which is
+the LtRt default, with the 255-tap FIR selectable.
+
+All of it is exported and in use: `NAE_QueryDeviceCaps`, `NAE_ResolveSignalPath`,
+`NAE_OutputPolicyDefaults`, `NAE_SessionOpenWithPolicy`,
+`NAE_SessionGetOutputPolicy` and `NAE_SessionGetResolvedSignalPath` are in
+`nae.def`, `nae.map` and `binding/src/ffi.rs`'s export list, and the session
+applies the resolved policy. `capability_check` verifies the export table.
 The contract covers Auto rate/resampler/dither/DSD/buffer/routing, channel
 trim/phase, clip guard, bit-perfect reasons and no-silent-fallback rules.
 Platform coverage is the current priority. The build sequence, accepted scope and

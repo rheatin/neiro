@@ -1790,3 +1790,68 @@ pub(crate) fn query_track_info(handle: *mut ffi::NAE_Handle) -> TrackInfo {
         },
     }
 }
+
+/// One setting the engine knows about, from its name/value registry.
+///
+/// The typed structs are the contract; this is the discoverable view, so a
+/// host can build a settings panel without hard-coding a list that drifts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamDesc {
+    pub name: String,
+    pub unit: String,
+    pub kind: i32,
+    pub min: f64,
+    pub max: f64,
+    pub default: f64,
+    pub flags: u32,
+    /// Enum labels, empty for a numeric or string parameter.
+    pub values: Vec<String>,
+}
+
+/// Every parameter in the registry.
+///
+/// Read from the engine rather than restated: the count and the entries come
+/// from the same table the setters are driven by, so an entry cannot exist
+/// without a setter and a setter cannot exist without an entry.
+pub fn parameters() -> Vec<ParamDesc> {
+    let count = unsafe { ffi::NAE_ParamCount() };
+    let mut out = Vec::with_capacity(count.max(0) as usize);
+    for index in 0..count.max(0) {
+        let mut raw = ffi::NAE_ParamDesc {
+            struct_size: std::mem::size_of::<ffi::NAE_ParamDesc>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `raw` is a live, correctly-sized struct with its size set; the
+        // engine copies at most that many bytes and fills the pointers from its
+        // own static table.
+        let rc = unsafe { ffi::NAE_ParamAt(index, &mut raw) };
+        if rc != 0 {
+            continue;
+        }
+        // SAFETY: the string pointers point into the DLL's static table, which
+        // outlives the call. A null pointer means "absent".
+        let text = |p: *const std::os::raw::c_char| -> String {
+            if p.is_null() {
+                return String::new();
+            }
+            unsafe { std::ffi::CStr::from_ptr(p) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        out.push(ParamDesc {
+            name: text(raw.name),
+            unit: text(raw.unit),
+            kind: raw.type_,
+            min: raw.min_value,
+            max: raw.max_value,
+            default: raw.default_value,
+            flags: raw.flags,
+            values: text(raw.values)
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        });
+    }
+    out
+}

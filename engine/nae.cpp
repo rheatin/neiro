@@ -1019,6 +1019,12 @@ struct NAE_Handle {
     /// This is the number that decides whether the float32 path can carry the
     /// file without dropping bits. 0 means the demuxer did not say.
     int32_t fileRawBits = 0;
+    /// The open-time verdict, before the source's depth is considered.
+    ///
+    /// `applySourcePrecision` only clears, so a gapless swap has to start from
+    /// this rather than from the previous track's verdict.
+    bool sourceBitPerfect = false;
+    neiro::PerfectReason sourceReason = neiro::PerfectReason::DeviceCannotCarryFormat;
     /// 文件时长，毫秒。0 表示容器没有报。
     ///
     /// 之前时长只经由 open 的 out-param 传出去，而那个值只被**打开时**调用 open
@@ -1179,6 +1185,42 @@ static void decodeThreadMain(NAE_Handle* handle) {
 /// into a float32 endpoint would survive, but this path does not track whether
 /// the source is float, and an unmeasured claim of perfection is the failure
 /// this field exists to prevent.
+/// Clamp a caller's declared struct size to what this build can write.
+///
+/// Zero means "this build's size" -- the convention every harness here uses.
+/// Larger than the build's own size means the caller expects fields this DLL
+/// does not have; writing them would be writing zeroes and calling it data, so
+/// the limit stays at the build's size and `structSize` reports the build's
+/// size rather than echoing a promise that was not kept.
+static uint32_t declaredLimit(uint32_t declared, uint32_t full) {
+    if (declared == 0 || declared > full) return full;
+    if (declared < sizeof(uint32_t)) return static_cast<uint32_t>(sizeof(uint32_t));
+    return declared;
+}
+
+/// Copies a local struct out with the caller's limit, on scope exit.
+///
+/// Used by the query exports so a host built against an older, smaller struct
+/// cannot have its buffer overrun by the tail this build appended. The
+/// destructor runs on every return path, which is why it is a guard rather than
+/// a copy at the end.
+///
+/// `structSize` is set to the number of bytes actually written, which is what
+/// `nae.h` promises: "Out: the size the engine actually wrote". Reporting the
+/// build's full size while writing fewer bytes would tell the caller that fields
+/// exist which were never filled.
+template <typename T>
+struct StructCommit {
+    T* dst;
+    const T* src;
+    uint32_t limit;
+    ~StructCommit() {
+        std::memcpy(dst, src, limit);
+        // The size field is the first member of every one of these structs.
+        *reinterpret_cast<uint32_t*>(dst) = limit;
+    }
+};
+
 static void applySourcePrecision(NAE_Handle* handle) {
     if (!handle || !handle->bitPerfect) return;
     if (handle->fileRawBits <= 24) return;
@@ -1253,8 +1295,16 @@ static void swapNextDecoder(NAE_Handle* handle) {
     handle->fileSampleRate = handle->nextFileSampleRate;
     handle->fileBitsPerSample = handle->nextFileBitsPerSample;
     handle->fileRawBits = handle->nextFileRawBits;
-    // The next track may carry more precision than this one, so the verdict is
-    // re-applied rather than inherited.
+    // Restore the open-time verdict before re-applying the source rule.
+    //
+    // `applySourcePrecision` only clears; it never sets. Inheriting the previous
+    // track's verdict therefore made a wide file poison every later one: 32-bit
+    // A followed by 24-bit B kept reporting `SOURCE_PRECISION` for B, which is a
+    // clean 24-bit source on a path the engine called perfect at open. The
+    // listener hears B correctly and the host reports it as truncated, forever,
+    // for the rest of the queue.
+    handle->bitPerfect = handle->sourceBitPerfect;
+    handle->reason = handle->sourceReason;
     applySourcePrecision(handle);
     handle->fileDurationMs = handle->nextFileDurationMs;
     std::memcpy(handle->fileCodec, handle->nextFileCodec, sizeof(handle->fileCodec));
@@ -1743,6 +1793,18 @@ int32_t openFileImpl(const char* deviceId, const char* path, int32_t outputMode,
     applySourcePrecision(handle);
     if (!handle->routingActive) startDecodeThread(handle);
 
+    // The caller's copy has to agree with the handle's.
+    //
+    // `openExclusiveImpl` filled `*bitPerfect` from the device-side verdict, and
+    // that ran before the file was known. `applySourcePrecision` can only clear
+    // it, so without this write-back a 32-bit source is reported bit-perfect
+    // through the open out-param while `NAE_QuerySignalPath` on the same handle
+    // says it is not -- two answers to one question, and the binding builds
+    // `Stream::path.bit_perfect` from the out-param, so the wrong one is what
+    // reaches a UI. The channel-conversion branch above already does this for
+    // the same reason.
+    if (bitPerfect) *bitPerfect = handle->bitPerfect ? 1 : 0;
+
     if (fileChannels) *fileChannels = static_cast<int32_t>(info.channels);
     if (durationMs) *durationMs = info.duration_ms;
     return NAE_OK;
@@ -1764,8 +1826,20 @@ int32_t NAE_QueryDecodePath(NAE_Handle* handle, char* buf, int32_t bufLen) NAE_N
 
 int32_t NAE_QueryTags(NAE_Handle* handle, NAE_Tags* out) NAE_NOEXCEPT {
     if (!out) return NAE_ERR_INVALID_ARGUMENT;
-    std::memset(out, 0, sizeof(*out));
-    if (out->structSize == 0) out->structSize = static_cast<uint32_t>(sizeof(*out));
+    // Built in a local and copied out with the caller's limit.
+    //
+    // A host built against an older, smaller `NAE_Tags` declares a size this
+    // build no longer matches, and the tail this build appended must not land in
+    // that buffer. Reporting the declared size while writing past it -- which the
+    // first version of this fix did -- is the same overrun with a friendlier
+    // number on it. `NAE_QuerySignalPath` is the pattern: build a local, clamp
+    // the copy to `min(declared, full)`.
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_Tags));
+    NAE_Tags local{};
+    local.structSize = full;
+    const uint32_t limit = declaredLimit(out->structSize, full);
+    StructCommit<NAE_Tags> commit{out, &local, limit};
+
     if (!handle) return NAE_OK;
 #ifdef NEIRO_HAVE_FFMPEG
     if (!handle->decoder) return NAE_OK;
@@ -1776,30 +1850,36 @@ int32_t NAE_QueryTags(NAE_Handle* handle, NAE_Tags* out) NAE_NOEXCEPT {
         std::memcpy(dst, src.data(), n);
         dst[n] = '\0';
     };
-    copyField(out->year, sizeof(out->year), info.year);
-    copyField(out->genre, sizeof(out->genre), info.genre);
-    copyField(out->album, sizeof(out->album), info.album);
-    copyField(out->artist, sizeof(out->artist), info.artist);
-    out->bitrateKbps = static_cast<uint32_t>(info.bitrate_kbps);
+    copyField(local.year, sizeof(local.year), info.year);
+    copyField(local.genre, sizeof(local.genre), info.genre);
+    copyField(local.album, sizeof(local.album), info.album);
+    copyField(local.artist, sizeof(local.artist), info.artist);
+    local.bitrateKbps = static_cast<uint32_t>(info.bitrate_kbps);
 #endif
     return NAE_OK;
 }
 
 int32_t NAE_QueryTrackInfo(NAE_Handle* handle, NAE_TrackInfo* out) NAE_NOEXCEPT {
     if (!out) return NAE_ERR_INVALID_ARGUMENT;
-    std::memset(out, 0, sizeof(*out));
-    if (out->structSize == 0) out->structSize = static_cast<uint32_t>(sizeof(*out));
+    // Local plus a clamped copy, for the reason `NAE_QueryTags` gives: a
+    // smaller declared size must not be overrun by the fields this build added.
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_TrackInfo));
+    NAE_TrackInfo local{};
+    local.structSize = full;
+    const uint32_t limit = declaredLimit(out->structSize, full);
+    StructCommit<NAE_TrackInfo> commit{out, &local, limit};
+
     if (!handle) return NAE_OK;
 
     std::lock_guard<std::mutex> guard(handle->spectrumLock);
-    out->channels = handle->fileChannels;
-    out->sampleRate = handle->fileSampleRate;
-    out->bitsPerSample = handle->fileBitsPerSample;
-    out->durationMs = handle->fileDurationMs;
+    local.channels = handle->fileChannels;
+    local.sampleRate = handle->fileSampleRate;
+    local.bitsPerSample = handle->fileBitsPerSample;
+    local.durationMs = handle->fileDurationMs;
     // 已经是一个以 NUL 结尾的定长缓冲，直接拷进同样定长的目标。不需要长度检查，
     // 也不需要释放——这正是选固定数组而不是 `char*` 的理由。
-    std::memcpy(out->codec, handle->fileCodec, sizeof(out->codec));
-    out->codec[sizeof(out->codec) - 1] = '\0';
+    std::memcpy(local.codec, handle->fileCodec, sizeof(local.codec));
+    local.codec[sizeof(local.codec) - 1] = '\0';
     return NAE_OK;
 }
 
@@ -3208,8 +3288,23 @@ int32_t NAE_PlayDop(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
             }
         }
         UINT32 padding = 0;
-        if (FAILED(remember(handle->client->GetCurrentPadding(&padding)))) {
-            if (traceDop) std::fprintf(stderr, "[dop] padding failed\n");
+        const HRESULT padHr = remember(handle->client->GetCurrentPadding(&padding));
+        if (FAILED(padHr)) {
+            // A device that has gone away fails this call every time, so a bare
+            // `continue` spins forever with `written` never advancing -- the
+            // session thread hangs inside the device period and `NAE_SessionStop`
+            // never joins. This is the same call `NAE_PlaySine` had to be taught
+            // about ("the one that was missed, and it is the one that fires first
+            // in practice"), and the DoP path never learned it: NAE_ERR_DEVICE_LOST
+            // was unreachable here.
+            if (traceDop) std::fprintf(stderr, "[dop] padding failed hr=0x%08X\n",
+                                       static_cast<unsigned>(padHr));
+            if (deviceIsGone(padHr)) {
+                g_lastErrorText = "the output device was removed or is being used by "
+                                  "another program; playback is paused at the current "
+                                  "position";
+                return NAE_ERR_DEVICE_LOST;
+            }
             continue;
         }
         const UINT32 capacity =
@@ -3288,7 +3383,21 @@ int32_t NAE_PlayDop(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
         if (ended) break;
     }
 
-    if (ended || written >= target) {
+    // Stop only when the file is actually over.
+    //
+    // This used to stop whenever the slice budget was met, and the session
+    // calls this every 16 ms against a 50 ms buffer: the next call then found
+    // the stream stopped, prefilled half a buffer with packer silence and
+    // restarted it. DoP inside a session therefore played a fraction of the
+    // track at nowhere near real time, with a stop/start boundary 60 times a
+    // second -- and the half-buffer prefill is silence the engine does not
+    // count as audio. The CLI's single-call path never crossed a slice, which
+    // is why the hardware result in VERIFICATION.md looked clean.
+    //
+    // The same rule the sine loop follows: a slice that ends mid-track leaves
+    // the client running, because "stopped" has to be said by NAE_Stop rather
+    // than inferred from a call returning.
+    if (ended) {
         if (handle->clientRunning) {
             neiro::wasapi::stopClient(handle->client.Get());
             handle->clientRunning = false;
@@ -3841,6 +3950,12 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
         handle->reason = neiro::PerfectReason::BitPerfect;
     }
     handle->coercedToSupportedRate = target.coercedToSupportedRate;
+    // The verdict before the file's own depth is considered. A gapless swap
+    // restores this before re-applying the source rule, because that rule only
+    // clears -- inheriting the previous track's answer made one wide file
+    // poison every later one in the queue.
+    handle->sourceBitPerfect = handle->bitPerfect;
+    handle->sourceReason = handle->reason;
     // 记下实际开流用的模式，供 `NAE_QuerySignalPath` 如实上报。
     handle->exclusive = (shareMode == AUDCLNT_SHAREMODE_EXCLUSIVE);
 
@@ -4365,8 +4480,18 @@ static void fftRadix2(std::vector<double>& re, std::vector<double>& im) {
 int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bins,
                           int32_t capacity) NAE_NOEXCEPT {
     if (!info) return NAE_ERR_INVALID_ARGUMENT;
-    std::memset(info, 0, sizeof(*info));
-    if (info->struct_size == 0) info->struct_size = static_cast<uint32_t>(sizeof(*info));
+    // A null buffer is legal only when the capacity is zero -- that is the
+    // documented "tell me the shape" call. Null with a non-zero capacity is a
+    // caller that believes it passed a buffer, and writing through it is a null
+    // dereference on the first element.
+    if (!bins && capacity > 0) return NAE_ERR_INVALID_ARGUMENT;
+    // Local plus a clamped copy, for the reason `NAE_QueryTags` gives: a
+    // smaller declared size must not be overrun by the fields this build added.
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_SpectrumInfo));
+    NAE_SpectrumInfo local{};
+    local.struct_size = full;
+    const uint32_t limit = declaredLimit(info->struct_size, full);
+    StructCommit<NAE_SpectrumInfo> commit{info, &local, limit};
     if (!handle) return NAE_OK;
 
     std::vector<double> re(kSpectrumFft, 0.0);
@@ -4380,7 +4505,7 @@ int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bin
         fed = handle->spectrumFramesFed;
         filled = handle->spectrumFilled;
         write = handle->spectrumWrite;
-        info->sampleRate = handle->spectrumRate;
+        local.sampleRate = handle->spectrumRate;
         // Read the ring oldest-first. `write` is where the next sample goes, so
         // the oldest sample is the one currently under it once the ring is full.
         if (filled == kSpectrumFft) {
@@ -4393,10 +4518,10 @@ int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bin
         }
     }
 
-    info->fftSize = static_cast<uint32_t>(kSpectrumFft);
-    info->binCount = static_cast<uint32_t>(kSpectrumFft / 2);
-    info->validBits = handle->dither.valid_bits();
-    info->framesFed = fed;
+    local.fftSize = static_cast<uint32_t>(kSpectrumFft);
+    local.binCount = static_cast<uint32_t>(kSpectrumFft / 2);
+    local.validBits = handle->dither.valid_bits();
+    local.framesFed = fed;
     if (filled == 0) return NAE_OK;
 
     // Diagnostic, under NAE_TRACE_SPECTRUM rather than NAE_TRACE: the existing
@@ -4424,7 +4549,7 @@ int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bin
         std::fprintf(stderr,
                      "[nae:spectrum] filled=%zu rate=%u fed=%llu write=%zu mean=%.6f amax=%.6f "
                      "@%zu\n",
-                     filled, info->sampleRate, (unsigned long long)fed, write, mean, amax, argmax);
+                     filled, local.sampleRate, (unsigned long long)fed, write, mean, amax, argmax);
         // The ring itself, walked from `write` exactly as the read path walks it, and
         // also from index 0. Two walks because they must agree: if they do, the
         // read path is faithful to the ring and the fault is in what was fed; if
@@ -4472,7 +4597,7 @@ int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bin
         }
         const double measuredHz =
             (crossings > 1)
-                ? static_cast<double>(crossings - 1) * info->sampleRate /
+                ? static_cast<double>(crossings - 1) * local.sampleRate /
                       static_cast<double>(lastCross - firstCross)
                 : 0.0;
         std::fprintf(stderr,
@@ -4490,8 +4615,8 @@ int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bin
         const double a = std::fabs(v);
         if (a > peak) peak = a;
     }
-    info->peak = peak;
-    info->rms = std::sqrt(sumSquares / static_cast<double>(filled));
+    local.peak = peak;
+    local.rms = std::sqrt(sumSquares / static_cast<double>(filled));
 
     // Hann, over the samples actually present rather than over the full window,
     // so a partially filled ring is not scaled by a window that assumes more
@@ -4511,7 +4636,7 @@ int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bin
     // information. The factor of 2/n makes a full-scale sine read 1.0 in its bin,
     // which is what lets a dB display use 0 dBFS as its reference.
     const double scale = 2.0 / static_cast<double>(filled);
-    const int32_t want = static_cast<int32_t>(info->binCount);
+    const int32_t want = static_cast<int32_t>(local.binCount);
     const int32_t give = capacity < want ? capacity : want;
     for (int32_t k = 0; k < give; ++k) {
         const double m = std::sqrt(re[static_cast<size_t>(k)] * re[static_cast<size_t>(k)] +
@@ -4544,8 +4669,14 @@ static_assert(sizeof(NAE_EnvelopeInfo) == 48, "NAE_EnvelopeInfo 的 sizeof 变�
 int32_t NAE_QueryEnvelope(NAE_Handle* handle, NAE_EnvelopeInfo* info, float* envelope,
                           int32_t capacity) NAE_NOEXCEPT {
     if (info == nullptr) return NAE_ERR_INVALID_ARGUMENT;
-    std::memset(info, 0, sizeof(*info));
-    if (info->struct_size == 0) info->struct_size = static_cast<uint32_t>(sizeof(*info));
+    // Null is legal only with a zero capacity, as in NAE_QuerySpectrum.
+    if (!envelope && capacity > 0) return NAE_ERR_INVALID_ARGUMENT;
+    // Local plus a clamped copy, for the reason `NAE_QueryTags` gives.
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_EnvelopeInfo));
+    NAE_EnvelopeInfo local{};
+    local.struct_size = full;
+    const uint32_t limit = declaredLimit(info->struct_size, full);
+    StructCommit<NAE_EnvelopeInfo> commit{info, &local, limit};
     if (handle == nullptr) return NAE_OK;
 
     // 频谱那边用的同一把锁，因为两者读的都是渲染循环写的状态。包络是从同一个环形
@@ -4554,14 +4685,14 @@ int32_t NAE_QueryEnvelope(NAE_Handle* handle, NAE_EnvelopeInfo* info, float* env
     std::lock_guard<std::mutex> guard(handle->spectrumLock);
     if (handle->envelope.empty()) return NAE_OK;
 
-    info->frame_count = static_cast<uint32_t>(handle->envelope.size());
-    info->frame_hop_ms = kEnvelopeHopMs;
-    info->sample_rate = handle->envelopeRate;
+    local.frame_count = static_cast<uint32_t>(handle->envelope.size());
+    local.frame_hop_ms = kEnvelopeHopMs;
+    local.sample_rate = handle->envelopeRate;
     // 故意用频谱那个计数器：两者描述的是同一个环形缓冲，所以调用方比较这两个数
     // 等于拿一个东西跟它自己比。给两个计数器只会引出一个问题——为什么频谱过期了
     // 而包络没有——而那个问题只可能有一个答案，且答案必然是其中一个有 bug。
-    info->frames_fed = handle->spectrumFramesFed;
-    info->window_ms = static_cast<double>(info->frame_count) * kEnvelopeHopMs;
+    local.frames_fed = handle->spectrumFramesFed;
+    local.window_ms = static_cast<double>(local.frame_count) * kEnvelopeHopMs;
 
     // **顺序是有保证的：最老的在前。**
     //
@@ -4591,7 +4722,7 @@ int32_t NAE_QueryEnvelope(NAE_Handle* handle, NAE_EnvelopeInfo* info, float* env
     for (int32_t i = 0; i < valid; ++i) {
         envelope[i] = handle->envelope[(oldest + static_cast<size_t>(i)) % size];
     }
-    info->frame_valid = valid > 0 ? static_cast<uint32_t>(valid) : 0u;
+    local.frame_valid = valid > 0 ? static_cast<uint32_t>(valid) : 0u;
     return NAE_OK;
 }
 
@@ -4969,12 +5100,25 @@ static_assert(sizeof(NAE_PeaksInfo) == 96,
 int32_t NAE_ComputePeaks(const char* path, uint32_t buckets, NAE_PeaksInfo* info,
                          float* out, int32_t capacity) NAE_NOEXCEPT {
     if (info == nullptr) return NAE_ERR_INVALID_ARGUMENT;
-    std::memset(info, 0, sizeof(*info));
-    info->struct_size = static_cast<uint32_t>(sizeof(*info));
+
+    // Local plus a clamped copy, for the reason `NAE_QueryTags` gives.
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_PeaksInfo));
+    NAE_PeaksInfo local{};
+    local.struct_size = full;
+    const uint32_t limit = declaredLimit(info->struct_size, full);
+    StructCommit<NAE_PeaksInfo> commit{info, &local, limit};
 
     // 桶数/容量不够是**调用方的错**，不截断：截断会让它按错的桶数去画，而那看起来
     // 和「这首歌就是这样」没有区别。
+    //
+    // `buckets * 2` is computed in `uint32_t`, so a value near the top wraps
+    // before the cast: `0x40000001` doubles to `0x80000002`, which casts to a
+    // negative `int32_t`, and the comparison against `capacity` is then false for
+    // every non-negative capacity -- the guard passed and the copy wrote 2^31
+    // floats through the caller's pointer. The bound is checked before any
+    // arithmetic.
     if (path == nullptr || path[0] == '\0' || buckets == 0 || out == nullptr ||
+        buckets > static_cast<uint32_t>(INT32_MAX / 2) ||
         capacity < static_cast<int32_t>(buckets * 2)) {
         return NAE_ERR_INVALID_ARGUMENT;
     }
@@ -4985,13 +5129,15 @@ int32_t NAE_ComputePeaks(const char* path, uint32_t buckets, NAE_PeaksInfo* info
     std::string error;
     // 打不开路径是**故障**，不是「还没有」——所以报错而不是回清零。回清零会把它
     // 显示成「这首歌没有波形」，一个关于音乐的陈述。
-    if (!computePeaksFromFile(path, buckets, &result, &complete, info, nullptr, &error)) {
+    // Into `local`: the commit guard copies it out at the end, so writing to
+    // the caller's buffer here would be overwritten by the local's zeroes.
+    if (!computePeaksFromFile(path, buckets, &result, &complete, &local, nullptr, &error)) {
         return NAE_ERR_CANNOT_OPEN;
     }
 
     std::copy(result.begin(), result.end(), out);
-    info->bucket_count = buckets;
-    info->complete = complete ? 1u : 0u;
+    local.bucket_count = buckets;
+    local.complete = complete ? 1u : 0u;
     return NAE_OK;
 #else
     return NAE_OK;
@@ -5004,13 +5150,21 @@ static int32_t analyzeFileImpl(const char* path, uint32_t buckets,
                                NAE_AnalysisInfo* info, float* peaks,
                                int32_t capacity, int32_t* peaksWritten,
                                const int32_t* cancel) NAE_NOEXCEPT {
+    // The same overflow as NAE_ComputePeaks: `buckets * 2` wraps in uint32_t
+    // before the cast, so a value near the top made the guard pass and the copy
+    // write through the caller's pointer.
     if (!info || !peaks || !path || !path[0] || buckets == 0 ||
+        buckets > static_cast<uint32_t>(INT32_MAX / 2) ||
         capacity < static_cast<int32_t>(buckets * 2)) {
         return NAE_ERR_INVALID_ARGUMENT;
     }
-    std::memset(info, 0, sizeof(*info));
-    info->structSize = sizeof(*info);
-    info->analyzerVersion = NAE_ANALYZER_VERSION;
+
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_AnalysisInfo));
+    NAE_AnalysisInfo local{};
+    local.structSize = full;
+    const uint32_t limit = declaredLimit(info->structSize, full);
+    StructCommit<NAE_AnalysisInfo> commit{info, &local, limit};
+    local.analyzerVersion = NAE_ANALYZER_VERSION;
     if (peaksWritten) *peaksWritten = 0;
 
 #ifdef NEIRO_HAVE_FFMPEG
@@ -5018,14 +5172,17 @@ static int32_t analyzeFileImpl(const char* path, uint32_t buckets,
     bool complete = false;
     std::string error;
     bool cancelled = false;
-    if (!computePeaksFromFile(path, buckets, &result, &complete, nullptr, info, &error,
+    // Into `local`, not into the caller's buffer: the commit guard copies the
+    // local out at the end, so anything written to `info` here would be
+    // overwritten by zeroes -- which is what made every field read as 0.
+    if (!computePeaksFromFile(path, buckets, &result, &complete, nullptr, &local, &error,
                               cancel, &cancelled)) {
         g_lastErrorText = error;
         return cancelled ? NAE_ERR_CANCELLED : NAE_ERR_CANNOT_OPEN;
     }
     std::copy(result.begin(), result.end(), peaks);
-    info->bucketCount = buckets;
-    info->complete = complete ? 1u : 0u;
+    local.bucketCount = buckets;
+    local.complete = complete ? 1u : 0u;
     if (peaksWritten) *peaksWritten = static_cast<int32_t>(buckets * 2);
     return NAE_OK;
 #else
@@ -5504,6 +5661,16 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
     // the track the listener just skipped past before the new one started.
     if (handle->skipRequested.exchange(false)) {
         fifo.clear();
+        // The resampler keeps un-consumed input and soxr's own filter delay,
+        // all of it fed from the track just skipped. Carrying it means the head
+        // of the new track is convolved with the tail of the old one -- a
+        // smear of the wrong file at the exact moment the listener skipped to
+        // get away from it. `NAE_Seek` resets for the same reason; a natural
+        // gapless boundary deliberately does not, because there continuity is
+        // the point.
+        if (handle->resampler.ready()) {
+            handle->resampler.reset();
+        }
         sourcePos = sourceLimit;
         sourceDone = true;
         atBoundary();

@@ -83,7 +83,12 @@ struct NAE_Session {
     std::atomic<bool> queuePending{false};
     std::atomic<bool> clearNextPending{false};
     std::atomic<uint64_t> trackSerial{0};
-    bool nextPreloaded = false;
+    // Atomic because `NAE_SessionSkipToNext` reads it on the host's thread while
+    // the session thread writes it. Every other cross-thread field here is an
+    // atomic; a plain bool is a data race, and the consequence is a skip refused
+    // that was possible (the host then pays a close/reopen) or accepted when it
+    // was not.
+    std::atomic<bool> nextPreloaded{false};
 
     std::atomic<double> position{0.0};
     std::atomic<double> duration{0.0};

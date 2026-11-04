@@ -62,6 +62,41 @@ pub struct NAE_Handle {
 }
 
 // Engine-wide capabilities, as a static JSON string. Never NULL, never freed.
+/// One entry of the name/value parameter registry.
+///
+/// The strings point into the engine's own static table, not into memory the
+/// caller owns: they live as long as the DLL, so there is nothing to free.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NAE_ParamDesc {
+    pub struct_size: u32,
+    pub name: *const c_char,
+    pub unit: *const c_char,
+    pub type_: i32,
+    pub min_value: f64,
+    pub max_value: f64,
+    pub default_value: f64,
+    pub flags: u32,
+    /// Comma-separated enum labels, or null.
+    pub values: *const c_char,
+}
+
+impl Default for NAE_ParamDesc {
+    fn default() -> Self {
+        Self {
+            struct_size: 0,
+            name: std::ptr::null(),
+            unit: std::ptr::null(),
+            type_: 0,
+            min_value: 0.0,
+            max_value: 0.0,
+            default_value: 0.0,
+            flags: 0,
+            values: std::ptr::null(),
+        }
+    }
+}
+
 extern "C" {
     pub fn NAE_GetEngineCapabilities() -> *const c_char;
 }
@@ -1524,4 +1559,32 @@ extern "C" {
         session: *mut NAE_Session,
         out: *mut NAE_CrossfadeParams,
     ) -> i32;
+
+    // ---- the parameter registry -------------------------------------------
+    //
+    // The discoverable view of every setting: the typed structs are the
+    // contract, and this is how a host enumerates them without hard-coding a
+    // list that drifts. README calls it the reference for what exists.
+    pub fn NAE_ParamCount() -> i32;
+    pub fn NAE_ParamAt(index: i32, out: *mut NAE_ParamDesc) -> i32;
+    pub fn NAE_SessionParamGet(session: *mut NAE_Session, name: *const c_char, out: *mut f64) -> i32;
+    pub fn NAE_SessionParamSet(session: *mut NAE_Session, name: *const c_char, value: f64) -> i32;
+    pub fn NAE_SessionParamGetString(
+        session: *mut NAE_Session,
+        name: *const c_char,
+        buf: *mut c_char,
+        buf_len: i32,
+    ) -> i32;
+    pub fn NAE_SessionParamSetString(
+        session: *mut NAE_Session,
+        name: *const c_char,
+        value: *const c_char,
+    ) -> i32;
+
+    /// The pipeline counters, including whether decode runs on its own thread.
+    ///
+    /// Returns a JSON string the caller owns and must release with
+    /// `NAE_FreeString` -- not an out-parameter. Checked against nae.h rather
+    /// than assumed: a wrong signature here reads a different register.
+    pub fn NAE_PipelineStats(handle: *mut NAE_Handle) -> *mut c_char;
 }

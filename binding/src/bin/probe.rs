@@ -118,6 +118,44 @@ fn main() {
         println!("\n== track info: skipped, no file given ==");
     }
 
+    // ---- the parameter registry ------------------------------------------
+    //
+    // The registry is the discoverable view of every setting: the typed structs
+    // are the contract, and this is how a host enumerates them without a list
+    // that drifts. It was exported but not declared in the binding, so no Rust
+    // host could read it -- which is the gap this check closes.
+    println!("== parameter registry ==");
+    {
+        let params = audio::parameters();
+        fail(
+            !params.is_empty(),
+            "the parameter registry is not empty",
+            &format!("{} entries", params.len()),
+        );
+        let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+        fail(
+            names.contains(&"volume.gain"),
+            "the registry lists volume.gain",
+            "",
+        );
+        let volume = params.iter().find(|p| p.name == "volume.gain").unwrap();
+        fail(
+            volume.min == 0.0 && volume.max == 1.0,
+            "volume.gain reports its documented range",
+            &format!("{}..{}", volume.min, volume.max),
+        );
+        let bad: Vec<&str> = params
+            .iter()
+            .filter(|p| p.name.is_empty() || p.default < p.min || p.default > p.max)
+            .map(|p| p.name.as_str())
+            .collect();
+        fail(
+            bad.is_empty(),
+            "every parameter has a name and a default inside its range",
+            &format!("{bad:?}"),
+        );
+    }
+
     println!("== capabilities ==");
     match audio::capabilities() {
         Ok(json) => {

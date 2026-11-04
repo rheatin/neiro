@@ -16,10 +16,10 @@
 //   * A path that cannot be satisfied returns a failure status and leaves the
 //     resolved fields zero; it does not invent a playable fallback.
 //
-// Status: proposed contract for review. The declarations below are not
-// exported by nae.dll yet; the resolver and caps query are the next
-// implementation step. The file is intentionally free of C++ types so Base and
-// Swift can mirror it literally.
+// Status: shipped. Every declaration below is exported by nae.dll and appears in
+// nae.def, nae.map and binding/src/ffi.rs; the session resolves and applies the
+// policy, and `capability_check` verifies the export table. The file is
+// intentionally free of C++ types so Base and Swift can mirror it literally.
 
 #pragma once
 
