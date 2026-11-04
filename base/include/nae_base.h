@@ -27,10 +27,11 @@ extern "C" {
  * Library commands: set_favourite, list_favourites, create_playlist,
  * rename_playlist, delete_playlist, list_playlists, add_to_playlist,
  * remove_from_playlist, list_playlist_entries, list_playlists_containing,
- * record_play, list_most_played.
+ * record_play, list_most_played, preanalyze.
  *
  * Library events: favourites_changed, playlists_changed,
- * playlist_entries_changed, playlists_containing_changed, most_played_changed.
+ * playlist_entries_changed, playlists_containing_changed, most_played_changed,
+ * preanalysis_progress.
  *
  * `set_policy` is a request. The engine reports the rate it actually granted in
  * the snapshot's `render_path`; `policy` is what was asked for and may differ.

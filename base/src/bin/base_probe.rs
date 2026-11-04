@@ -26,6 +26,38 @@ fn put32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
+/// A one-second click track. The pre-analysis check needs hundreds of files, and
+/// twelve seconds each would make the batch longer than the deadline.
+fn write_click_short(path: &Path) {
+    let frames = RATE; // one second
+    let mut wav = Vec::with_capacity(44 + (frames as usize) * 4);
+    wav.extend_from_slice(b"RIFF");
+    put32(&mut wav, 36 + frames * 4);
+    wav.extend_from_slice(b"WAVEfmt ");
+    put32(&mut wav, 16);
+    put16(&mut wav, 1);
+    put16(&mut wav, 2);
+    put32(&mut wav, RATE);
+    put32(&mut wav, RATE * 4);
+    put16(&mut wav, 4);
+    put16(&mut wav, 16);
+    wav.extend_from_slice(b"data");
+    put32(&mut wav, frames * 4);
+    for i in 0..frames {
+        let t = i as f64 / RATE as f64;
+        let phase = t - (t / 0.5).floor() * 0.5;
+        let s = if phase < 0.002 {
+            0.05 * (2.0 * std::f64::consts::PI * 1000.0 * phase).sin()
+        } else {
+            0.0
+        };
+        let v = (s * 32767.0) as i16;
+        wav.extend_from_slice(&v.to_le_bytes());
+        wav.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, wav).expect("write click fixture");
+}
+
 fn write_click(path: &Path, gain: f64) {
     let frames = RATE * SECONDS;
     let mut wav = Vec::with_capacity(44 + (frames as usize) * 4);
@@ -54,6 +86,14 @@ fn write_click(path: &Path, gain: f64) {
         wav.extend_from_slice(&v.to_le_bytes());
     }
     std::fs::write(path, wav).expect("write click fixture");
+}
+
+/// A batch's progress must only ever move forward and must not overshoot.
+fn check_progress(last: &mut usize, total: usize, done: usize, reported: usize, _complete: bool) {
+    assert_eq!(reported, total, "progress reports the batch's own total");
+    assert!(done <= total, "progress cannot exceed the batch: {done}/{total}");
+    assert!(done >= *last, "progress went backwards: {done} after {last}");
+    *last = done;
 }
 
 fn check(ok: bool, label: &str, detail: String) {
@@ -699,6 +739,80 @@ fn main() {
             format!("{:?}", snap.path),
         );
         let _ = std::fs::remove_file(&e);
+    }
+
+    // ---- whole-library pre-analysis ---------------------------------------
+    //
+    // The host supplies the paths; Base does not scan directories. What has to
+    // hold: every path in the batch is accounted for exactly once, the last
+    // event says complete, and the cache grew to hold the batch -- a scan of N
+    // against a 256-entry cache would evict its own early results.
+    {
+        // More than the cache's default 256 entries, because that is the size
+        // at which eviction starts: a batch of six would fit whatever the cache
+        // did, and the check could not tell a grown cache from an untouched one.
+        // The fixtures are one second each, so this is a real scan rather than a
+        // symbol.
+        const BATCH: usize = 300;
+        let paths: Vec<std::path::PathBuf> = (0..BATCH)
+            .map(|i| dir.join(format!("preanalyze_{i}.wav")))
+            .collect();
+        for path in &paths {
+            write_click_short(path);
+        }
+
+        let total = paths.len();
+        handle.preanalyze(paths.clone()).expect("preanalyze");
+
+        let mut last_done = 0usize;
+        let mut saw_complete = false;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline && !saw_complete {
+            match events.recv_timeout(Duration::from_millis(50)) {
+                Ok(Event::PreanalysisProgress { done, total: t, complete }) => {
+                    check_progress(&mut last_done, total, done, t, complete);
+                    saw_complete = complete;
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        check(
+            saw_complete,
+            "the batch reports complete",
+            format!("last done {last_done}/{total}"),
+        );
+        check(
+            last_done == total,
+            "every path in the batch was accounted for",
+            format!("{last_done}/{total}"),
+        );
+
+        // Every one of them is now a cache hit: a scan that decoded but did not
+        // store would leave the second pass decoding again.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut cached = 0usize;
+        for path in &paths {
+            handle.analyze(path.clone()).expect("analyze again");
+        }
+        while Instant::now() < deadline && cached < total {
+            match events.recv_timeout(Duration::from_millis(50)) {
+                Ok(Event::AnalysisReady { cached: true, .. }) => cached += 1,
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        check(
+            cached == total,
+            "the pre-analyzed results are in the cache",
+            format!("{cached}/{total} cache hits"),
+        );
+
+        for path in &paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     // ---- device list and selection -----------------------------------------

@@ -358,6 +358,15 @@ impl BaseHandle {
         self.dispatch(Command::ListMostPlayed { limit })
     }
 
+    /// Analyze a batch of paths ahead of playback.
+    ///
+    /// Base does not scan directories: the host supplies the paths. Results
+    /// arrive as the usual `AnalysisReady` events and
+    /// `PreanalysisProgress` reports how far the batch has got.
+    pub fn preanalyze(&self, paths: Vec<PathBuf>) -> Result<(), BaseError> {
+        self.dispatch(Command::Preanalyze { paths })
+    }
+
     /// Ask the workers to stop. `Base`'s `Drop` also does this and joins.
     pub fn shutdown(&self) -> Result<(), BaseError> {
         self.dispatch(Command::Shutdown)
@@ -462,10 +471,13 @@ impl Base {
         let (command_tx, command_rx) = mpsc::channel();
         let (analysis_tx, analysis_rx) = mpsc::channel();
         let registry = analysis::new_registry();
+        let batches = analysis::new_batches();
 
         let audio_events = events.clone();
         let audio_state = state.clone();
         let registry_for_control = registry.clone();
+        let batches_for_control = batches.clone();
+        let cache_for_control = cache.clone();
         let control_thread = thread::Builder::new()
             .name("neiro-base-control".into())
             .spawn(move || {
@@ -477,6 +489,8 @@ impl Base {
                     version,
                     policy,
                     registry: registry_for_control,
+                    batches: batches_for_control,
+                    cache: cache_for_control,
                     library,
                 });
             })
@@ -493,10 +507,20 @@ impl Base {
             let state = state.clone();
             let in_flight = in_flight.clone();
             let registry = registry.clone();
+            let batches = batches.clone();
             match thread::Builder::new()
                 .name(format!("neiro-base-analysis-{index}"))
                 .spawn(move || {
-                    analysis::run(rx, cache, state, events, version, in_flight, registry);
+                    analysis::run(analysis::Worker {
+                        requests: rx,
+                        cache,
+                        state,
+                        events,
+                        version,
+                        in_flight,
+                        registry,
+                        batches,
+                    });
                 }) {
                 Ok(thread) => analysis_threads.push(thread),
                 Err(e) => {

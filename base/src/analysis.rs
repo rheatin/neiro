@@ -60,6 +60,63 @@ pub(crate) struct Registry {
 
 pub(crate) type CancelRegistry = Arc<Mutex<Registry>>;
 
+/// How far a pre-analysis batch has got.
+///
+/// Separate from the request stream because a batch is a set of paths with an
+/// outcome each, and the outcomes are not all decodes: a path already in the
+/// cache finishes without one, a path another worker is already decoding
+/// finishes when that worker publishes, and a path that cannot be opened
+/// finishes with an error. Counting `analysis_ready` events would undercount
+/// every one of those.
+#[derive(Default)]
+pub(crate) struct Batch {
+    /// Paths still to be accounted for.
+    pending: HashSet<PathBuf>,
+    total: usize,
+}
+
+impl Batch {
+    /// A batch of `paths`. Duplicates collapse, because the same file requested
+    /// twice is one decode and one outcome -- counting it twice would leave the
+    /// progress bar short of its own total.
+    pub fn new(paths: Vec<PathBuf>) -> Self {
+        let pending: HashSet<PathBuf> = paths.into_iter().collect();
+        Self {
+            total: pending.len(),
+            pending,
+        }
+    }
+}
+
+pub(crate) type Batches = Arc<Mutex<Vec<Batch>>>;
+
+pub(crate) fn new_batches() -> Batches {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Account for one path finishing. Emits progress when it belongs to a batch.
+fn finish(batches: &Batches, path: &Path, events: &EventBus) {
+    let mut guard = batches.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(batch) = guard.iter_mut().find(|b| b.pending.contains(path)) else {
+        return;
+    };
+    batch.pending.remove(path);
+    let done = batch.total - batch.pending.len();
+    let total = batch.total;
+    let complete = batch.pending.is_empty();
+    // The batch is dropped outside the loop below, so the borrow ends first.
+    let finished = complete;
+    if finished {
+        guard.retain(|b| !b.pending.is_empty());
+    }
+    drop(guard);
+    events.emit(Event::PreanalysisProgress {
+        done,
+        total,
+        complete,
+    });
+}
+
 pub(crate) fn new_registry() -> CancelRegistry {
     Arc::new(Mutex::new(Registry {
         keep: HashSet::new(),
@@ -102,15 +159,29 @@ pub(crate) struct Request {
     pub explicit: bool,
 }
 
-pub(crate) fn run(
-    requests: Arc<Mutex<Receiver<Request>>>,
-    cache: Arc<Mutex<Cache>>,
-    state: Arc<Mutex<Snapshot>>,
-    events: EventBus,
-    version: u32,
-    in_flight: InFlight,
-    registry: CancelRegistry,
-) {
+/// Everything an analysis worker is handed at start.
+pub(crate) struct Worker {
+    pub requests: Arc<Mutex<Receiver<Request>>>,
+    pub cache: Arc<Mutex<Cache>>,
+    pub state: Arc<Mutex<Snapshot>>,
+    pub events: EventBus,
+    pub version: u32,
+    pub in_flight: InFlight,
+    pub registry: CancelRegistry,
+    pub batches: Batches,
+}
+
+pub(crate) fn run(worker: Worker) {
+    let Worker {
+        requests,
+        cache,
+        state,
+        events,
+        version,
+        in_flight,
+        registry,
+        batches,
+    } = worker;
     loop {
         // The lock is held only while waiting for the next path, never while
         // decoding: a worker that held it through a decode would serialise every
@@ -134,6 +205,7 @@ pub(crate) fn run(
                 .keep
                 .contains(&path);
             if !wanted {
+                finish(&batches, &path, &events);
                 continue;
             }
         }
@@ -142,6 +214,7 @@ pub(crate) fn run(
 
         if let Some(cached) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             publish(&path, cached, true, &state, &events);
+            finish(&batches, &path, &events);
             continue;
         }
 
@@ -152,6 +225,8 @@ pub(crate) fn run(
             .unwrap_or_else(|e| e.into_inner())
             .insert(key.clone())
         {
+            // Another worker owns this path and will finish it; accounting for
+            // it here too would count it twice.
             continue;
         }
 
@@ -161,6 +236,7 @@ pub(crate) fn run(
             // The cancel may have been raised between the check above and here;
             // publishing the token after it would start a decode nothing stops.
             if !request.explicit && !inner.keep.contains(&path) {
+                finish(&batches, &path, &events);
                 continue;
             }
             inner.running.insert(path.clone(), token.clone());
@@ -182,6 +258,10 @@ pub(crate) fn run(
         // nor published. The request that cancelled it has already asked for
         // something else, or Base is shutting down.
         if analysis.error == neiro_audio::ffi::NAE_ERR_CANCELLED {
+            // Cancelled paths are still finished as far as the batch is
+            // concerned: the batch asked for them and will not ask again, so
+            // leaving them pending would hold the progress bar at 99% forever.
+            finish(&batches, &path, &events);
             continue;
         }
         if analysis.error == 0 {
@@ -191,6 +271,7 @@ pub(crate) fn run(
                 .put(key, analysis.clone());
         }
         publish(&path, analysis, false, &state, &events);
+        finish(&batches, &path, &events);
     }
 }
 

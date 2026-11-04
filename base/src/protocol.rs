@@ -375,6 +375,18 @@ pub enum Command {
     ListMostPlayed {
         limit: usize,
     },
+    /// Analyze a batch of paths ahead of playback.
+    ///
+    /// Base does not scan directories: the host supplies the paths, which keeps
+    /// this layer from growing into a media library. Each path is decoded once
+    /// and cached; results arrive as the usual `analysis_ready` events, and
+    /// `preanalysis_progress` reports how far the batch has got.
+    ///
+    /// The batch is also what sizes the cache: a 5000-track scan against a
+    /// 256-entry cache would evict its own early results.
+    Preanalyze {
+        paths: Vec<PathBuf>,
+    },
     /// Stop playback, close the stream and end both workers.
     Shutdown,
 }
@@ -447,6 +459,19 @@ pub enum Event {
     /// stable across launches.
     MostPlayedChanged {
         tracks: Vec<PlayedTrack>,
+    },
+    /// How far a `preanalyze` batch has got.
+    ///
+    /// Reported rather than inferred from `analysis_ready` counts, because a
+    /// path can fail and a path can already be cached -- neither of which
+    /// produces a decode. `done` counts every path the batch has finished with,
+    /// whatever the outcome.
+    PreanalysisProgress {
+        done: usize,
+        total: usize,
+        /// Set on the last event, so a UI knows the batch ended rather than
+        /// paused.
+        complete: bool,
     },
     /// A path's analysis is available. `cached` is true when this came from the
     /// Base cache rather than a fresh decode.

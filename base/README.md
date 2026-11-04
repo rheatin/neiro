@@ -58,7 +58,7 @@ Commands: `play`, `enqueue`, `pause`, `resume`, `stop`, `seek`, `next`,
 `set_favourite`, `list_favourites`, `create_playlist`, `rename_playlist`,
 `delete_playlist`, `list_playlists`, `add_to_playlist`, `remove_from_playlist`,
 `list_playlist_entries`, `list_playlists_containing`, `record_play`,
-`list_most_played`.
+`list_most_played`, `preanalyze`.
 
 `play` replaces the queue by design: it is the "start this track" command.
 Choosing an endpoint is `set_device`, which deliberately does not touch the
@@ -286,8 +286,13 @@ runtime plugin ABI that only works on desktop.
   and reopening when the engine refuses the seam -- an empty queue, or a next
   track whose rate or channel count differs from the current one, which is
   exactly the condition gapless requires.
-- The cache is bounded LRU (256 entries); there is no pre-analysis of a whole
-  library yet.
+- The cache is a bounded LRU that starts at 256 entries and grows to hold a
+  pre-analysis batch, never shrinking. A scan of 5000 tracks against a 256-entry
+  cache would evict its own early results as it produced them.
+- Pre-analysis takes an explicit path list: Base does not scan directories, so a
+  host that wants to analyze a library supplies the paths (from its own index, or
+  from favourites and playlists). Progress arrives as `preanalysis_progress`
+  with `done`/`total`, and `complete` on the last event.
 - Cancellation is between decoded blocks, so a decode stops within one packet
   rather than instantly. It is not offered to the C ABI yet: a Swift host gets
   the behaviour (Base cancels on a track change) but cannot cancel a decode it

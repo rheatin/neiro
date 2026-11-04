@@ -15,6 +15,7 @@ use neiro_audio::{
 };
 
 use crate::analysis::{self, CancelRegistry};
+use crate::cache::Cache;
 use crate::library::Library;
 use crate::protocol::{
     DeviceInfo, Event, OutputRatePolicy, PlaybackPolicy, PlaybackState, RenderPath,
@@ -37,6 +38,8 @@ pub(crate) struct Start {
     pub version: u32,
     pub policy: PlaybackPolicy,
     pub registry: CancelRegistry,
+    pub batches: crate::analysis::Batches,
+    pub cache: Arc<Mutex<Cache>>,
     pub library: Option<Library>,
 }
 
@@ -49,6 +52,8 @@ pub(crate) fn run(start: Start) {
         version,
         policy,
         registry,
+        batches,
+        cache,
         library,
     } = start;
     let mut control = Control {
@@ -63,6 +68,8 @@ pub(crate) fn run(start: Start) {
         device_id: None,
         policy,
         registry,
+        batches,
+        cache,
         devices: Vec::new(),
         library,
         most_played_limit: 20,
@@ -92,6 +99,9 @@ struct Control {
     device_id: Option<String>,
     policy: PlaybackPolicy,
     registry: CancelRegistry,
+    batches: crate::analysis::Batches,
+    /// The analysis cache, so a batch can grow it before the workers start.
+    cache: Arc<Mutex<Cache>>,
     devices: Vec<DeviceInfo>,
     /// The favourites, playlists and play counts. `None` when Base was started
     /// without a library location -- the rest of Base works, and every library
@@ -232,6 +242,7 @@ impl Control {
             Command::ListPlaylistEntries { id } => self.publish_playlist_entries(id),
             Command::ListPlaylistsContaining { path } => self.publish_playlists_containing(path),
             Command::RecordPlay { path, at_ms } => self.record_play(path, at_ms),
+            Command::Preanalyze { paths } => self.preanalyze(paths),
             Command::ListMostPlayed { limit } => self.publish_most_played(limit),
             Command::Shutdown => {
                 analysis::cancel_all(&self.registry);
@@ -575,6 +586,45 @@ impl Control {
             None => return,
         };
         self.events.emit(Event::PlaylistsContainingChanged { path, playlists });
+    }
+
+    /// Start analyzing a batch the host supplied.
+    ///
+    /// The cache is grown to hold the batch before anything is queued: a scan
+    /// against a 256-entry cache would evict its own early results as it
+    /// produced them, and the ten minutes it cost would leave a fortieth of it
+    /// behind.
+    ///
+    /// Every path is requested as explicit, so the wanted-set rule that cancels
+    /// a stale prefetch does not drop half a library scan when the track changes.
+    fn preanalyze(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let total = paths.len();
+        {
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.reserve(total);
+        }
+        {
+            let mut batches = self.batches.lock().unwrap_or_else(|e| e.into_inner());
+            batches.push(crate::analysis::Batch::new(paths.clone()));
+        }
+        for path in &paths {
+            let _ = self.analysis.send(crate::analysis::Request {
+                path: path.clone(),
+                explicit: true,
+            });
+        }
+        // A batch of one that is already cached finishes synchronously inside
+        // the worker before this event is built, so the first progress event
+        // can arrive before this one -- which is fine, they are ordered by the
+        // bus and a UI that paints from either lands on the same number.
+        self.events.emit(Event::PreanalysisProgress {
+            done: 0,
+            total,
+            complete: false,
+        });
     }
 
     fn record_play(&mut self, path: PathBuf, at_ms: i64) {
