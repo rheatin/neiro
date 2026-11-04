@@ -319,6 +319,12 @@ runtime plugin ABI that only works on desktop.
 - The transport is Windows-only and single-client by design: the control thread
   owns the session, and two clients issuing commands would be two owners of one
   queue.
+- The transport's reads are bounded to what the pipe already holds, so a client
+  that sends bytes without a newline cannot stall the server; a line past 4 KiB
+  is dropped and reported once rather than buffered; more than 256 queued
+  commands are dropped with an error rather than growing without limit; and
+  `Transport::stop` returns while a client is connected, because the serve loop
+  checks the flag instead of waiting for a disconnect.
 - `set_policy` reopens the stream, which costs one device close and open. There
   is no crossfade or click suppression across that boundary; a UI should
   debounce a slider rather than send every intermediate value.

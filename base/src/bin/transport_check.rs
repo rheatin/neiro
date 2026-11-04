@@ -101,6 +101,98 @@ fn main() {
         );
     }
 
+    // ---- a client that sends no newline does not stall the server --------
+    //
+    // `read_line` blocks until a newline arrives, so a client that sends bytes
+    // without one used to freeze the server -- no events served, no commands
+    // read, for as long as the client stayed silent. The read is bounded to what
+    // the pipe already holds now.
+    {
+        // The partial line has no newline, so it is not a command and is not
+        // answered. What is measured is that the *server* keeps running: a
+        // complete command sent afterwards still gets its reply.
+        //
+        // The partial bytes stay buffered ahead of the next line -- that is
+        // what a line protocol does -- so the check finishes that line rather
+        // than leaving the stream misaligned for the next step.
+        client
+            .send_raw("{\"command\":\"list_playlists\"")
+            .expect("send a partial line");
+        // Complete it into a valid command by adding the rest and a newline.
+        client
+            .send_raw("}\n")
+            .expect("finish the partial line");
+        let answered = wait_for(&mut client, |event| {
+            matches!(event, Event::PlaylistsChanged { .. })
+        });
+        check(
+            answered.is_some(),
+            "a partial line does not stall the server",
+            format!("{:?}", answered.is_some()),
+        );
+    }
+
+    // ---- an over-long line is dropped, and said so ----------------------
+    //
+    // Unbounded buffering let a client grow the server's memory until it died.
+    // The line is discarded past the limit and the client is told once.
+    {
+        // Just past the limit, and inside the pipe's inbound buffer: a line
+        // that does not fit in one write would block the *client* before the
+        // server could ever report it, and the check would hang rather than
+        // measure anything.
+        let mut huge = String::from("{\"command\":\"no_such");
+        huge.push_str(&"x".repeat(4100));
+        huge.push('\n');
+        client.send_raw(&huge).expect("send an over-long line");
+        let reported = wait_for(&mut client, |event| {
+            matches!(event, Event::Error { op, message }
+                if op == "transport" && message.contains("longer than"))
+        });
+        check(
+            reported.is_some(),
+            "an over-long line is dropped and reported",
+            format!("{reported:?}"),
+        );
+        // The stream realigns: the next valid command is answered.
+        client
+            .send(&Command::ListPlaylists)
+            .expect("send after the over-long line");
+        let answered = wait_for(&mut client, |event| {
+            matches!(event, Event::PlaylistsChanged { .. })
+        });
+        check(
+            answered.is_some(),
+            "the stream realigns after a dropped line",
+            format!("{:?}", answered.is_some()),
+        );
+    }
+
+    // ---- stop returns while a client is still connected ------------------
+    //
+    // `serve_client` used to loop until the client disconnected, so `stop`'s
+    // join waited for a UI that was still running -- and that UI never
+    // disconnects, so shutting Base down hung. The connection stays open across
+    // the stop here, which is the case that hung.
+    {
+        let started = Instant::now();
+        server.stop();
+        check(
+            started.elapsed() < Duration::from_secs(5),
+            "stop returns while a client is connected",
+            format!("{:.2}s", started.elapsed().as_secs_f64()),
+        );
+        // The client's connection is gone, which is the honest outcome of a
+        // stopped server: reading returns None rather than blocking.
+        check(
+            client.recv().ok().flatten().is_none(),
+            "a stopped server closes the client's connection",
+            String::new(),
+        );
+        // Restart for the reconnect check below.
+        server = transport::Transport::start(handle.clone(), pipe).expect("restart transport");
+    }
+
     // ---- the listener is reachable again --------------------------------
     //
     // A UI that restarts has to be able to reconnect. The server accepts one

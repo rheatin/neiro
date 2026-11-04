@@ -171,7 +171,7 @@ fn serve(handle: BaseHandle, pipe_name: &str, stop: Arc<Mutex<bool>>) {
         // `ConnectNamedPipe` returns 0 when a client connects after the call
         // began; the error is ERROR_PIPE_CONNECTED in that case and the
         // connection is real. Either way, serve it and see what happens.
-        serve_client(&handle, pipe);
+        serve_client(&handle, pipe, &stop);
         unsafe {
             DisconnectNamedPipe(pipe);
             CloseHandle(pipe);
@@ -186,23 +186,77 @@ fn serve(handle: BaseHandle, pipe_name: &str, stop: Arc<Mutex<bool>>) {
 /// threads on one pipe is a race the pipe does not arbitrate, and the client's
 /// first command was consumed by whichever got there first -- which is why the
 /// check hung after connecting.
-fn serve_client(handle: &BaseHandle, pipe: HANDLE) {
+fn serve_client(handle: &BaseHandle, pipe: HANDLE, stop: &Arc<Mutex<bool>>) {
     let (ticket, events) = handle.subscribe();
     let mut reader = BufReader::new(PipeRead(pipe));
     let mut writer = PipeWrite(pipe);
-    let mut pending: Vec<String> = Vec::new();
+    let mut buffer = LineBuffer {
+        bytes: Vec::new(),
+        overlong: false,
+    };
+    // Bounded, and a VecDeque so taking the front is O(1): a `Vec` with
+    // `remove(0)` made a burst O(n^2), which is how a client sending faster than
+    // the control thread consumes turns into a stall rather than a slow reply.
+    let mut pending: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut overflowed = false;
 
     loop {
+        // `Transport::stop` has to be able to end this loop while a client is
+        // connected. Without the check the join in `stop` waited for the client
+        // to disconnect, which never happens for a UI that is still running --
+        // so shutting Base down hung.
+        if stop.lock().map(|g| *g).unwrap_or(true) {
+            let _ = handle.unsubscribe(ticket);
+            return;
+        }
         // Whatever the client has sent, without blocking.
         loop {
-            let mut line = String::new();
-            match read_line_if_ready(&mut reader, &mut line) {
-                Ok(true) => {
+            match poll_line(&mut reader, &mut buffer) {
+                Ok(Some(line)) => {
+                    if line.is_empty() && buffer.overlong {
+                        continue;
+                    }
+                    if line.is_empty() {
+                        // An overlong line was discarded. Tell the client once
+                        // per burst rather than once per line: a flood of them
+                        // would otherwise be answered with a flood of errors.
+                        if !overflowed {
+                            overflowed = true;
+                            let event = Event::Error {
+                                op: "transport".into(),
+                                message: format!(
+                                    "a command line longer than {MAX_LINE_BYTES} bytes was dropped"
+                                ),
+                            };
+                            if write_event(&mut writer, &event).is_err() {
+                                let _ = handle.unsubscribe(ticket);
+                                return;
+                            }
+                        }
+                        continue;
+                    }
+                    if pending.len() >= MAX_PENDING_COMMANDS {
+                        // The client is outrunning the control thread, which
+                        // consumes one command per poll. Dropping the newest is
+                        // the same rule the event bus uses: the oldest is the
+                        // one already in flight.
+                        let event = Event::Error {
+                            op: "transport".into(),
+                            message: format!(
+                                "more than {MAX_PENDING_COMMANDS} commands are queued; dropping the newest"
+                            ),
+                        };
+                        if write_event(&mut writer, &event).is_err() {
+                            let _ = handle.unsubscribe(ticket);
+                            return;
+                        }
+                        continue;
+                    }
                     if !line.trim().is_empty() {
-                        pending.push(line);
+                        pending.push_back(line);
                     }
                 }
-                Ok(false) => break,
+                Ok(None) => break,
                 // The client is gone.
                 Err(_) => {
                     let _ = handle.unsubscribe(ticket);
@@ -212,8 +266,7 @@ fn serve_client(handle: &BaseHandle, pipe: HANDLE) {
         }
 
         // Commands first: a client that sent one is waiting for its effect.
-        while let Some(line) = pending.first().cloned() {
-            pending.remove(0);
+        while let Some(line) = pending.pop_front() {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -263,15 +316,42 @@ fn serve_client(handle: &BaseHandle, pipe: HANDLE) {
     }
 }
 
-/// Read one line only if the pipe already holds something.
+/// How much a client may send before it is told to slow down.
 ///
-/// `PeekNamedPipe` reports how many bytes are waiting; reading without checking
-/// blocks, and a blocking read in this loop would stop the server writing events
-/// while it waited for a command.
-fn read_line_if_ready(
+/// A command is a JSON object of a few hundred bytes; 4 KiB is generous. The
+/// limit matters because the alternative is unbounded: a client that sends
+/// without ever ending a line would otherwise accumulate bytes until the process
+/// runs out of memory, and a client that sends faster than the control thread
+/// consumes would grow `pending` and the command channel without limit.
+const MAX_LINE_BYTES: usize = 4096;
+
+/// How many commands may be waiting for the control thread.
+///
+/// The control thread consumes one command per poll (30 ms), so this is roughly
+/// ten seconds of burst. Beyond it the client is not a UI sending clicks, and
+/// buffering further would only delay the reply it is waiting for.
+const MAX_PENDING_COMMANDS: usize = 256;
+
+/// A partial command: bytes read so far, and whether they overflowed the limit.
+struct LineBuffer {
+    bytes: Vec<u8>,
+    overlong: bool,
+}
+
+/// Read whatever the pipe holds, up to a newline, without blocking.
+///
+/// Returns a completed line when one arrives. `PeekNamedPipe` reports how many
+/// bytes are waiting, and only that many are read -- a `read_line` would block
+/// on a client that sent bytes without a newline, and during that block the
+/// single-client loop would serve no events at all.
+///
+/// A line longer than `MAX_LINE_BYTES` is dropped rather than buffered: the
+/// client is told once, and its bytes are discarded until the newline so the
+/// stream stays aligned.
+fn poll_line(
     reader: &mut BufReader<PipeRead>,
-    line: &mut String,
-) -> std::io::Result<bool> {
+    buffer: &mut LineBuffer,
+) -> std::io::Result<Option<String>> {
     use windows_sys::Win32::System::Pipes::PeekNamedPipe;
     let mut available: u32 = 0;
     let ok = unsafe {
@@ -288,10 +368,37 @@ fn read_line_if_ready(
         return Err(std::io::Error::last_os_error());
     }
     if available == 0 {
-        return Ok(false);
+        return Ok(None);
     }
-    reader.read_line(line)?;
-    Ok(true)
+
+    // Read exactly what is there, no more: `fill_buf` on a `BufReader` would
+    // try to refill and block once the available bytes are consumed.
+    let take = (available as usize).min(MAX_LINE_BYTES * 4);
+    let mut chunk = vec![0u8; take];
+    let read = std::io::Read::read(reader.get_mut(), &mut chunk)?;
+    chunk.truncate(read);
+
+    for &byte in &chunk {
+        if byte == b'\n' {
+            let line = String::from_utf8_lossy(&buffer.bytes).into_owned();
+            buffer.bytes.clear();
+            let overlong = buffer.overlong;
+            buffer.overlong = false;
+            // An overlong line yields nothing: the client is told once, and the
+            // bytes up to the newline are discarded so the stream realigns.
+            return Ok(if overlong { Some(String::new()) } else { Some(line) });
+        }
+        if buffer.overlong {
+            continue;
+        }
+        if buffer.bytes.len() >= MAX_LINE_BYTES {
+            buffer.overlong = true;
+            buffer.bytes.clear();
+            continue;
+        }
+        buffer.bytes.push(byte);
+    }
+    Ok(None)
 }
 
 fn write_event(writer: &mut PipeWrite, event: &Event) -> std::io::Result<()> {
