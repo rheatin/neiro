@@ -7,6 +7,7 @@ and it does not own a device, a clock, a sample or a measurement.
 UI / remote client
     ↕  commands + events (serializable)
 Base (Rust)
+    ├─ library: favourites, playlists, play counts (SQLite)
     ├─ transport: play/pause/seek/stop, queue, endpoint choice
     ├─ output policy: rate mode, resampler quality, share mode
     ├─ analysis scheduler + LRU cache
@@ -79,6 +80,35 @@ Events: `state`, `track_changed`, `position`, `analysis_ready`,
 snapshot is the whole. `Snapshot.resolved` is the engine's actual resolved path
 and diagnostics JSON for the current track; it is refreshed on open and on a
 gapless track change, not derived by Base.
+
+## Library
+
+Favourites, playlists and play counts live here rather than in a host. A host
+that kept its own copy would eventually disagree with the queue -- a UI showing
+"20 in this playlist" while the engine plays from a three-entry queue is two
+answers to one question, which is what AGENTS.md rule 1 is about.
+
+What this does not do: it does not scan directories, watch them for changes or
+own a file. A path is a fact the host supplies; the library remembers what the
+listener said about it.
+
+Storage is SQLite, compiled into the crate (`bundled`). A playlist is a
+many-to-many relation with an order, and "which playlists contain this track" is
+asked on every selection -- that is a join, not a scan. A JSON file would rewrite
+the whole library on every favourite toggle, which is fine at a hundred tracks
+and not at ten thousand.
+
+| Operation | Notes |
+|---|---|
+| `set_favourite` / `is_favourite` / `favourites` | returns whether it changed, so a UI can skip an event nobody needs |
+| `record_play` / `play_count` / `most_played` | the clock is the host's; Base does not own one |
+| `create_playlist` / `rename_playlist` / `delete_playlist` / `playlists` | names are unique case-insensitively, enforced by the schema's index rather than by a check in front of it |
+| `add_to_playlist` / `remove_from_playlist` / `playlist_entries` | adding a track twice is a no-op; a removal closes the position gap |
+| `playlists_containing` | the reverse query a UI asks on selection |
+
+Positions inside a playlist stay dense: the UI addresses entries by index, and a
+hole would make `entry[3]` and `position 3` disagree. Deleting a playlist takes
+its entries with it through the schema's cascade.
 
 ## Output policy
 
@@ -159,7 +189,16 @@ cd base
 $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
 cargo run --bin base_probe
 cargo run --bin base_capi_check
+cargo run --bin library_check
 ```
+
+The library layer pulls in `rusqlite` with the `bundled` feature, so cc-rs
+compiles SQLite from source. cc-rs looks for `gcc` by name and this machine's
+MinGW ships `cc`/`c++` only, so `base/.cargo/config.toml` names them -- that file
+holds absolute paths and is therefore **not committed**. A machine with `gcc`
+on PATH needs nothing; otherwise set `CC` and `CXX` in the environment. The CRT
+matters: `nae.dll` is built with `-mcrtdll=ucrt`, and a bundled SQLite on a
+different runtime would be two allocators in one process.
 
 `NEIRO_BASE_DEVICE=<endpoint id>` selects an endpoint; `NEIRO_BASE_SHARE=shared`
 chooses shared output for that probe. Both are explicit test inputs, not
@@ -239,6 +278,9 @@ runtime plugin ABI that only works on desktop.
   started through `analyze`.
 - The analysis worker count is fixed at start; there is no way to resize the pool
   while Base is running.
+- The library is not reachable through the command/event protocol yet: it is a
+  Rust API (`neiro_base::library`). Wiring it to `Command`/`Event` and the C ABI
+  is the next step, and until it is done a Swift or Android host cannot use it.
 - No plugin loader and no out-of-process UI transport yet; both boundaries are
   represented by serializable protocol types.
 - `set_policy` reopens the stream, which costs one device close and open. There

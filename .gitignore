@@ -28,6 +28,12 @@ Thumbs.db
 desktop.ini
 .DS_Store
 
+# Cargo config is machine-specific: the compiler paths are absolute.
+.cargo/config.toml
+.cargo/config
+# The directory itself, so a stray file does not appear as untracked.
+**/.cargo/*
+
 # Local overrides. The CMake toolchain path is machine-specific and the file
 # most likely to be edited by accident.
 *.local

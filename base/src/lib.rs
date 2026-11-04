@@ -32,6 +32,7 @@ use neiro_audio::{
 
 mod analysis;
 mod cache;
+pub mod library;
 pub mod capi;
 mod control;
 pub mod protocol;
