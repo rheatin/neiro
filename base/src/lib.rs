@@ -216,6 +216,12 @@ impl BaseHandle {
         self.dispatch(Command::ClearQueue)
     }
 
+    /// Move one queue entry to a different position. The playing entry keeps
+    /// playing and its index follows it.
+    pub fn move_in_queue(&self, from: usize, to: usize) -> Result<(), BaseError> {
+        self.dispatch(Command::MoveInQueue { from, to })
+    }
+
     pub fn pause(&self) -> Result<(), BaseError> {
         self.dispatch(Command::Pause)
     }

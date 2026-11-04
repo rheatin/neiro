@@ -741,6 +741,98 @@ fn main() {
         let _ = std::fs::remove_file(&e);
     }
 
+    // ---- queue reordering -------------------------------------------------
+    //
+    // A move is a remove plus an insert, and both shift positions. The case that
+    // matters is moving an entry across the one playing: the index has to follow
+    // the playing entry, not stay where it was.
+    {
+        let r = dir.join("base_probe_r.wav");
+        write_click(&r, 0.04);
+        handle.play(&a, None).expect("play A for reorder");
+        handle.enqueue(vec![b.clone(), r.clone()]).expect("enqueue B and R");
+        let snap = wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(20),
+            |s| s.queue.len() == 3 && s.queue_index == Some(0),
+            "three queued for reorder",
+        );
+        check(
+            snap.queue == vec![a.clone(), b.clone(), r.clone()],
+            "the queue starts in insertion order",
+            format!("{:?}", snap.queue),
+        );
+
+        // Move the playing entry from the head to the end. It must still be
+        // playing, and the index must now point at the end.
+        handle.move_in_queue(0, 2).expect("move A to the end");
+        let snap = wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(5),
+            |s| s.queue == vec![b.clone(), r.clone(), a.clone()],
+            "A moved to the end",
+        );
+        check(
+            snap.queue_index == Some(2),
+            "the index follows the playing entry",
+            format!("{:?}", snap.queue_index),
+        );
+        check(
+            snap.path.as_deref() == Some(a.as_path()),
+            "the playing track did not change",
+            format!("{:?}", snap.path),
+        );
+
+        // Move a later entry in front of the playing one: the playing entry
+        // shifts one place down and stays playing.
+        handle.move_in_queue(0, 2).expect("move B to the end");
+        let snap = wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(5),
+            |s| s.queue == vec![r.clone(), a.clone(), b.clone()],
+            "B moved past A",
+        );
+        check(
+            snap.queue_index == Some(1),
+            "the index shifted with the playing entry",
+            format!("{:?}", snap.queue_index),
+        );
+        check(
+            snap.path.as_deref() == Some(a.as_path()),
+            "the playing track survived the crossing move",
+            format!("{:?}", snap.path),
+        );
+
+        // Out of range is refused rather than clamped: a silent clamp would move
+        // an entry the caller did not name.
+        handle.move_in_queue(0, 5).expect("out of range");
+        let mut refused = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match events.recv_timeout(Duration::from_millis(20)) {
+                Ok(Event::Error { op, message }) => {
+                    if op == "queue" && message.contains("position") {
+                        refused = true;
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        check(refused, "a move past the end is refused", String::new());
+        check(
+            handle.snapshot().queue == vec![r.clone(), a.clone(), b.clone()],
+            "the refused move left the queue alone",
+            format!("{:?}", handle.snapshot().queue),
+        );
+        let _ = std::fs::remove_file(&r);
+    }
+
     // ---- whole-library pre-analysis ---------------------------------------
     //
     // The host supplies the paths; Base does not scan directories. What has to

@@ -72,7 +72,7 @@ pub(crate) fn run(start: Start) {
         cache,
         devices: Vec::new(),
         library,
-        most_played_limit: 20,
+        most_played_watched: None,
         settings: None,
         last_serial: None,
         last_phase: None,
@@ -107,9 +107,13 @@ struct Control {
     /// without a library location -- the rest of Base works, and every library
     /// command reports that instead of pretending the answer is empty.
     library: Option<Library>,
-    /// The limit the last most-played request used, so a play can refresh the
-    /// list the UI is actually watching.
-    most_played_limit: usize,
+    /// The limit of the list the UI is currently watching, or `None` when it
+    /// has never asked for one.
+    ///
+    /// `None` is what stops a play from publishing a list nobody requested: an
+    /// event with no subscriber is work the UI cannot use, and the default of
+    /// 20 made every play emit one.
+    most_played_watched: Option<usize>,
     settings: Option<SessionSettings>,
     last_serial: Option<u64>,
     last_phase: Option<SessionPhase>,
@@ -152,6 +156,7 @@ impl Control {
             Command::ListDevices => self.list_devices(),
             Command::SetDevice { device_id } => self.set_device(device_id),
             Command::RemoveFromQueue { index } => self.remove_from_queue(index),
+            Command::MoveInQueue { from, to } => self.move_in_queue(from, to),
             Command::ClearQueue => self.clear_queue(),
             Command::Enqueue { paths } => {
                 if paths.is_empty() {
@@ -636,15 +641,16 @@ impl Control {
             }
             None => return,
         }
-        // The count changed, so a list that is showing it is now stale. The
-        // limit is the one the last request used, so a UI watching the list sees
-        // it move rather than silently disagreeing with the store.
-        let limit = self.most_played_limit;
-        self.publish_most_played(limit);
+        // The count changed, so a list that is showing it is now stale -- but
+        // only if one is showing it. Refreshing a list nobody asked for costs a
+        // query and an event that no subscriber can use.
+        if let Some(limit) = self.most_played_watched {
+            self.publish_most_played(limit);
+        }
     }
 
     fn publish_most_played(&mut self, limit: usize) {
-        self.most_played_limit = limit;
+        self.most_played_watched = Some(limit);
         let tracks = match self.library("most played") {
             Some(library) => match library.most_played(limit) {
                 Ok(list) => list,
@@ -708,6 +714,40 @@ impl Control {
                 self.index = Some(current - 1);
             }
         }
+        self.rebuild_engine_queue();
+        self.publish_queue();
+    }
+
+    /// Move a queue entry, keeping the playing one playing.
+    ///
+    /// The index has to be recomputed rather than incremented: moving an entry
+    /// across the playing one changes its position, and a UI that then read
+    /// `queue_index` would point at a different file than the one playing.
+    fn move_in_queue(&mut self, from: usize, to: usize) {
+        if from >= self.queue.len() {
+            self.emit_error("queue", "no such queue entry");
+            return;
+        }
+        if to >= self.queue.len() {
+            self.emit_error("queue", "no such queue position");
+            return;
+        }
+        if from == to {
+            return;
+        }
+        let Some(current) = self.index else {
+            self.emit_error("queue", "nothing is playing");
+            return;
+        };
+
+        let entry = self.queue.remove(from);
+        self.queue.insert(to, entry);
+
+        // Where the playing entry ended up. It is identified by the position it
+        // held, not by the path: two queue entries can name the same file, and
+        // following a path would jump to the wrong one.
+        self.index = Some(reindex(current, from, to));
+
         self.rebuild_engine_queue();
         self.publish_queue();
     }
@@ -1074,4 +1114,63 @@ fn to_engine(policy: PlaybackPolicy) -> (OutputMode, Quality, ShareKind) {
         ShareMode::Shared => ShareKind::Shared,
     };
     (mode, quality, share)
+}
+
+/// Where a position ends up after one entry is moved from `from` to `to`.
+///
+/// A move is a remove followed by an insert, and both shift positions:
+///
+/// * the moved entry itself lands on `to`;
+/// * an entry strictly between `from` and `to` shifts one step towards `from`;
+/// * everything else keeps its position.
+fn reindex(position: usize, from: usize, to: usize) -> usize {
+    if position == from {
+        return to;
+    }
+    if from < to && position > from && position <= to {
+        return position - 1;
+    }
+    if to < from && position >= to && position < from {
+        return position + 1;
+    }
+    position
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reindex;
+
+    /// A move is a remove followed by an insert, and both shift positions. The
+    /// four cases are covered because they are the four ways a position can
+    /// relate to a move, and three of them are easy to get wrong in the same
+    /// direction.
+    #[test]
+    fn moving_an_entry_reindexes_every_position() {
+        // Moving 0 to 3: [a b c d] -> [b c d a]
+        //   0 -> 3 (the moved one), 1..=3 shift down, 4 stays.
+        assert_eq!(reindex(0, 0, 3), 3);
+        assert_eq!(reindex(1, 0, 3), 0);
+        assert_eq!(reindex(2, 0, 3), 1);
+        assert_eq!(reindex(3, 0, 3), 2);
+        assert_eq!(reindex(4, 0, 3), 4);
+
+        // Moving 3 to 0: [a b c d] -> [d a b c]
+        //   3 -> 0 (the moved one), 0..3 shift up, 4 stays.
+        assert_eq!(reindex(3, 3, 0), 0);
+        assert_eq!(reindex(0, 3, 0), 1);
+        assert_eq!(reindex(1, 3, 0), 2);
+        assert_eq!(reindex(2, 3, 0), 3);
+        assert_eq!(reindex(4, 3, 0), 4);
+    }
+
+    /// A position outside the span is untouched, which is the case a naive
+    /// `if from < to { position - 1 }` gets wrong for everything after `to`.
+    #[test]
+    fn positions_outside_the_move_do_not_change() {
+        assert_eq!(reindex(0, 2, 4), 0);
+        assert_eq!(reindex(1, 2, 4), 1);
+        assert_eq!(reindex(5, 2, 4), 5);
+        assert_eq!(reindex(0, 4, 2), 0);
+        assert_eq!(reindex(5, 4, 2), 5);
+    }
 }

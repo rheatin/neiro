@@ -221,6 +221,55 @@ fn main() {
     //
     // The count is the host's clock and Base's storage. Recording twice must
     // show up as two, and the list must be ordered rather than merely non-empty.
+    // A play must not publish a list nobody asked for: that is an event with no
+    // subscriber, and the work behind it is wasted. Recording one play before
+    // any list has been requested, and asserting that nothing arrives, is the
+    // only way to see that rule.
+    //
+    // The log is cleared first: earlier sections have already produced events,
+    // and reading an accumulated log would find one of those and report the
+    // opposite of what this check is for.
+    {
+        let events = LIBRARY_EVENTS.get_or_init(|| Mutex::new(Vec::new()));
+        events.lock().unwrap().clear();
+    }
+    assert_eq!(
+        send(
+            base,
+            r#"{"command":"record_play","path":"/music/c.flac","at_ms":1700000000050}"#
+        ),
+        0
+    );
+    // The command is a message, so the control thread has to have handled it
+    // before its silence means anything. The wait is bounded and short: it is
+    // the time a `record_play` takes, not a guess at when the event would
+    // arrive if one were coming.
+    let settle = Instant::now() + Duration::from_millis(300);
+    let mut quiet = false;
+    while Instant::now() < settle {
+        std::thread::sleep(Duration::from_millis(10));
+        quiet = LIBRARY_EVENTS
+            .get()
+            .map(|events| {
+                let guard = events.lock().unwrap();
+                guard.iter().any(|v| v["event"] == "most_played_changed")
+            })
+            .unwrap_or(false);
+        if quiet {
+            break;
+        }
+    }
+    assert!(
+        !quiet,
+        "a play with no watched list published one anyway"
+    );
+
+    // Ask for the list first: a play must not publish a list nobody asked for,
+    // so the refresh only happens once a list is being watched. Requesting it
+    // after the plays would instead mask a play that stored nothing.
+    assert_eq!(send(base, r#"{"command":"list_most_played","limit":10}"#), 0);
+    let _ = wait_for_event("most_played_changed");
+
     assert_eq!(
         send(
             base,
@@ -242,21 +291,18 @@ fn main() {
         ),
         0
     );
-    // No explicit `list_most_played` here: `record_play` republishes the list,
-    // and issuing the list command afterwards would mask a play that stored
-    // nothing -- the check would read the list the command produced and pass.
-    // That is the same mistake the favourite check had, caught the same way.
-    //
     // The condition is the final count, not the length: the first event carrying
     // two entries is a state where only one of the two plays has landed.
     let played = wait_for_event_where("most_played_changed", |v| {
-        v["tracks"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|t| t["play_count"] == 2))
+        v["tracks"].as_array().is_some_and(|a| {
+            a.len() == 3 && a.iter().any(|t| t["play_count"] == 2)
+        })
     });
     assert_eq!(played["tracks"][0]["path"], "/music/a.flac", "{played}");
     assert_eq!(played["tracks"][0]["play_count"], 2, "{played}");
-    assert_eq!(played["tracks"][1]["play_count"], 1, "{played}");
+    // Two tracks have one play each, and ties sort by path, so b comes before c.
+    assert_eq!(played["tracks"][1]["path"], "/music/b.flac", "{played}");
+    assert_eq!(played["tracks"][2]["path"], "/music/c.flac", "{played}");
 
     // ---- unsubscribe ------------------------------------------------------
     //

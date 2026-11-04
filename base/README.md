@@ -108,6 +108,7 @@ and not at ten thousand.
 | `record_play` / `play_count` / `most_played` | the clock is the host's; Base does not own one |
 | `create_playlist` / `rename_playlist` / `delete_playlist` / `playlists` | names are unique case-insensitively, enforced by the schema's index rather than by a check in front of it |
 | `add_to_playlist` / `remove_from_playlist` / `playlist_entries` | adding a track twice is a no-op; a removal closes the position gap |
+| `move_in_queue` | a move is a remove plus an insert; the index follows the playing entry |
 | `playlists_containing` | the reverse query a UI asks on selection |
 | `record_play` / `list_most_played` | the clock is the host's; a play republishes the list the UI last asked for |
 
@@ -299,9 +300,10 @@ runtime plugin ABI that only works on desktop.
   started through `analyze`.
 - The analysis worker count is fixed at start; there is no way to resize the pool
   while Base is running.
-- The most-played limit used by the automatic refresh is whatever the last
-  `list_most_played` asked for, defaulting to 20. A host that wants a different
-  window for the refresh and for the list has to re-issue the list.
+- The most-played list is refreshed after a play only if one is being watched,
+  and at the limit of the last `list_most_played`. A host that never asked for
+  one gets no event, which is the point: an event nobody subscribed to is work
+  the UI cannot use.
 - No plugin loader and no out-of-process UI transport yet; both boundaries are
   represented by serializable protocol types.
 - `set_policy` reopens the stream, which costs one device close and open. There
@@ -313,7 +315,7 @@ runtime plugin ABI that only works on desktop.
   regardless. What is checked is that the queue survives and that playback
   continues; the engine's own `deviceId` in the resolved report is the field a
   future check should read once the publication order is fixed.
-- Queue editing is remove and clear only; there is no reorder. Removing an entry
+- Queue editing is move, remove and clear. Removing an entry
   rebuilds the engine's queue from the current index forward, so the engine seams
   to what the UI shows. The entry that is playing cannot be removed -- `Stop` first.
 - The queue rebuild is not covered by a failing check. Removing the entry the

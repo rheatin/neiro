@@ -27,7 +27,7 @@ extern "C" {
  * Library commands: set_favourite, list_favourites, create_playlist,
  * rename_playlist, delete_playlist, list_playlists, add_to_playlist,
  * remove_from_playlist, list_playlist_entries, list_playlists_containing,
- * record_play, list_most_played, preanalyze.
+ * record_play, list_most_played, preanalyze, move_in_queue.
  *
  * Library events: favourites_changed, playlists_changed,
  * playlist_entries_changed, playlists_containing_changed, most_played_changed,

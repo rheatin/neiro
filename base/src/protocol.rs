@@ -273,6 +273,15 @@ pub enum Command {
     RemoveFromQueue {
         index: usize,
     },
+    /// Move one queue entry to a different position.
+    ///
+    /// The entry that is playing can be moved: it keeps playing, and the index
+    /// follows it. Moving an entry across the playing one shifts the playing
+    /// entry's position, which is why the engine's queue is rebuilt afterwards.
+    MoveInQueue {
+        from: usize,
+        to: usize,
+    },
     /// Drop every queued entry except the one playing. The current track keeps
     /// playing and its index becomes 0.
     ClearQueue,
