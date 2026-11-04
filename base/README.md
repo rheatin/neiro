@@ -53,7 +53,7 @@ socket.
 Commands: `play`, `enqueue`, `pause`, `resume`, `stop`, `seek`, `next`,
 `analyze`, `set_volume`, `set_eq`, `set_crossfeed`, `set_replay_gain`,
 `set_convolver`, `set_crossfade`, `set_policy`, `list_devices`, `set_device`,
-`shutdown`.
+`remove_from_queue`, `clear_queue`, `shutdown`.
 
 `play` replaces the queue by design: it is the "start this track" command.
 Choosing an endpoint is `set_device`, which deliberately does not touch the
@@ -250,8 +250,14 @@ runtime plugin ABI that only works on desktop.
   regardless. What is checked is that the queue survives and that playback
   continues; the engine's own `deviceId` in the resolved report is the field a
   future check should read once the publication order is fixed.
-- Queue editing is append-only. There is no remove, no reorder and no clear, so
-  a UI cannot take an entry back out once it is in.
+- Queue editing is remove and clear only; there is no reorder. Removing an entry
+  rebuilds the engine's queue from the current index forward, so the engine seams
+  to what the UI shows. The entry that is playing cannot be removed -- `Stop` first.
+- The queue rebuild is not covered by a failing check. Removing the entry the
+  engine had preloaded should make a skip land past it, and the behaviour is
+  correct by observation, but the same assertion passed with the rebuild
+  disabled: the engine re-preloads from its own queue state, so the two paths
+  agree whether or not Base rebuilds.
 - The C ABI has one subscription and no unsubscribe; shutdown is the lifetime
   boundary.
 - iOS is not built or verified here. `nae.dll` is Windows-only; an iOS build

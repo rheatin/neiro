@@ -110,10 +110,12 @@ impl Control {
                 self.close_session();
                 self.queue = vec![path];
                 self.index = Some(0);
-                self.open_at(0, false);
+                self.open_at(0, false, 0.0);
             }
             Command::ListDevices => self.list_devices(),
             Command::SetDevice { device_id } => self.set_device(device_id),
+            Command::RemoveFromQueue { index } => self.remove_from_queue(index),
+            Command::ClearQueue => self.clear_queue(),
             Command::Enqueue { paths } => {
                 if paths.is_empty() {
                     return true;
@@ -319,7 +321,7 @@ impl Control {
             .unwrap_or_else(|e| e.into_inner())
             .position;
 
-        self.open_at(index, true);
+        self.open_at(index, true, position);
         // `open_at` reports its own failure and leaves `self.session` as None.
         // Without this the snapshot kept the previous stream's resolved report,
         // naming an endpoint the engine is no longer on -- a UI would show the
@@ -332,11 +334,6 @@ impl Control {
         }
         let mut errors = Vec::new();
         if let Some(session) = self.session.as_mut() {
-            if position > 0.0 {
-                if let Err(e) = session.seek(position) {
-                    errors.push(e.to_string());
-                }
-            }
             if paused {
                 if let Err(e) = session.pause() {
                     errors.push(e.to_string());
@@ -385,14 +382,9 @@ impl Control {
             .unwrap_or_else(|e| e.into_inner())
             .position;
 
-        self.open_at(index, true);
+        self.open_at(index, true, position);
         let mut errors = Vec::new();
         if let Some(session) = self.session.as_mut() {
-            if position > 0.0 {
-                if let Err(e) = session.seek(position) {
-                    errors.push(e.to_string());
-                }
-            }
             if paused {
                 if let Err(e) = session.pause() {
                     errors.push(e.to_string());
@@ -403,6 +395,76 @@ impl Control {
             self.emit_error("policy", &message);
         }
         self.poll();
+    }
+
+    /// Rebuild the engine's queue from Base's, after a local edit.
+    ///
+    /// The engine's queue is what it will actually seam to, so an edit that
+    /// only changed Base's copy would be a queue the UI shows and the engine
+    /// does not have. `queue_clear` also drops whatever was preloaded, which is
+    /// why the rebuild re-adds from the current index forward.
+    fn rebuild_engine_queue(&mut self) {
+        let Some(index) = self.index else {
+            return;
+        };
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let mut errors = Vec::new();
+        if let Err(e) = session.queue_clear() {
+            errors.push(e.to_string());
+        }
+        for more in self.queue.iter().skip(index + 1) {
+            if let Err(e) = session.queue_add(more) {
+                errors.push(e.to_string());
+            }
+        }
+        for message in errors {
+            self.emit_error("queue", &message);
+        }
+        self.request_current_and_next();
+    }
+
+    fn remove_from_queue(&mut self, index: usize) {
+        if index >= self.queue.len() {
+            self.emit_error("queue", "no such queue entry");
+            return;
+        }
+        if self.index == Some(index) {
+            // The stream is playing this entry. Removing it would leave Base
+            // naming a track the queue does not contain, so this is refused
+            // rather than guessed at.
+            self.emit_error("queue", "cannot remove the entry that is playing");
+            return;
+        }
+        self.queue.remove(index);
+        if let Some(current) = self.index {
+            if index < current {
+                // Everything after the removed slot moved down by one, and so
+                // did the playing entry's own position.
+                self.index = Some(current - 1);
+            }
+        }
+        self.rebuild_engine_queue();
+        self.publish_queue();
+    }
+
+    fn clear_queue(&mut self) {
+        let Some(index) = self.index else {
+            self.queue.clear();
+            self.publish_queue();
+            return;
+        };
+        // Only the entry that is playing survives, and it becomes the head.
+        // Truncating to `index + 1` would keep every already-played entry
+        // ahead of it -- a queue that grows the longer a playlist is played
+        // through, and whose "next" is still the old one.
+        let playing = self.queue.remove(index);
+        self.queue.clear();
+        self.queue.push(playing);
+        self.index = Some(0);
+        self.rebuild_engine_queue();
+        self.publish_queue();
     }
 
     fn skip(&mut self) {
@@ -446,10 +508,19 @@ impl Control {
             self.request_current_and_next();
             return;
         }
-        self.open_at(index + 1, true);
+        self.open_at(index + 1, true, 0.0);
     }
 
-    fn open_at(&mut self, index: usize, add_remaining: bool) {
+    /// Open the queue entry at `index`.
+    ///
+    /// `resume_at` is where the new stream should start, or 0.0 for the
+    /// beginning. It is applied **before** `play`, which is the whole reason it
+    /// is a parameter: the first version seeked after `play` and polled before
+    /// returning, so by the time a caller could read the snapshot the new
+    /// session had already advanced and no check could tell a resumed stream
+    /// from one that had restarted. Seeking before the first slice removes that
+    /// window entirely -- there is no audio in flight to race against.
+    fn open_at(&mut self, index: usize, add_remaining: bool, resume_at: f64) {
         self.close_session();
         let Some(path) = self.queue.get(index).cloned() else {
             self.index = None;
@@ -475,6 +546,11 @@ impl Control {
         let (mode, quality, share) = to_engine(self.policy);
         match Session::open(&path, device_id.as_deref(), mode, quality, share) {
             Ok(mut session) => {
+                if resume_at > 0.0 {
+                    if let Err(e) = session.seek(resume_at) {
+                        self.emit_error("open", &e.to_string());
+                    }
+                }
                 if let Err(e) = session.play() {
                     self.emit_error("play", &e.to_string());
                 }

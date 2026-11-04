@@ -142,6 +142,18 @@ impl BaseHandle {
         self.dispatch(Command::Enqueue { paths })
     }
 
+    /// Take one entry out of the queue by position. The entry that is playing
+    /// cannot be removed; the engine would keep playing a track the queue no
+    /// longer names.
+    pub fn remove_from_queue(&self, index: usize) -> Result<(), BaseError> {
+        self.dispatch(Command::RemoveFromQueue { index })
+    }
+
+    /// Drop every queued entry except the one playing.
+    pub fn clear_queue(&self) -> Result<(), BaseError> {
+        self.dispatch(Command::ClearQueue)
+    }
+
     pub fn pause(&self) -> Result<(), BaseError> {
         self.dispatch(Command::Pause)
     }

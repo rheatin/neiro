@@ -253,6 +253,22 @@ pub enum Command {
     Enqueue {
         paths: Vec<PathBuf>,
     },
+    /// Take one entry out of the queue by position.
+    ///
+    /// The entry that is currently playing cannot be removed this way: doing so
+    /// would leave the stream playing a track the queue no longer names, and
+    /// every path-derived fact would describe a file that is not there. `Stop`
+    /// followed by `RemoveFromQueue` is the way to drop the current track.
+    ///
+    /// Removing an entry *before* the current index shifts both the index and
+    /// the playing track's place in the queue; the engine's queue is rebuilt so
+    /// the two stay in step.
+    RemoveFromQueue {
+        index: usize,
+    },
+    /// Drop every queued entry except the one playing. The current track keeps
+    /// playing and its index becomes 0.
+    ClearQueue,
     Pause,
     Resume,
     Stop,

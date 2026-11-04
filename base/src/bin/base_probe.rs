@@ -537,6 +537,170 @@ fn main() {
     );
     let _ = std::fs::remove_file(&c);
 
+    // ---- queue editing ------------------------------------------------------
+    //
+    // The queue was append-only, so a UI could not take an entry back out once
+    // it was in. These checks run on a fresh three-track queue because the
+    // earlier sections have already left the old one in an arbitrary state.
+    {
+        let e = dir.join("base_probe_e.wav");
+        write_click(&e, 0.04);
+        handle.play(&a, None).expect("play A again");
+        handle.enqueue(vec![b.clone(), e.clone()]).expect("enqueue two");
+        let snap = wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(20),
+            |s| s.queue.len() == 3 && s.queue_index == Some(0),
+            "three queued",
+        );
+        check(
+            snap.queue == vec![a.clone(), b.clone(), e.clone()],
+            "the queue holds what was enqueued",
+            format!("{} entries", snap.queue.len()),
+        );
+
+        // The playing entry cannot be removed: the engine would keep playing a
+        // track the queue no longer names.
+        //
+        // This deliberately provokes an error event, so it does not go through
+        // `wait_until` -- that helper treats an error as a fatal failure, which
+        // is right for the other sections and wrong for this one.
+        handle.remove_from_queue(0).expect("remove playing");
+        let mut refused = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match events.recv_timeout(Duration::from_millis(20)) {
+                Ok(Event::Error { op, message }) => {
+                    if op == "queue" && message.contains("playing") {
+                        refused = true;
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        check(refused, "removing the playing entry is refused", String::new());
+        let snap = handle.snapshot();
+        check(
+            snap.queue.len() == 3,
+            "the playing entry is still in the queue",
+            format!("{} entries", snap.queue.len()),
+        );
+
+        // Removing a later entry shrinks the queue and leaves the index alone.
+        handle.remove_from_queue(2).expect("remove last");
+        let snap = wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(5),
+            |s| s.queue.len() == 2,
+            "last entry removed",
+        );
+        check(
+            snap.queue == vec![a.clone(), b.clone()],
+            "the last entry is gone",
+            format!("{:?}", snap.queue),
+        );
+        check(
+            snap.queue_index == Some(0),
+            "removing a later entry leaves the index alone",
+            format!("{:?}", snap.queue_index),
+        );
+
+        // The engine has to have the same queue, and the only way to see it is
+        // to make it act. Removing the *last* entry changes nothing the engine
+        // would seam to -- it already preloaded the entry before it -- so this
+        // removes the entry in the middle and then skips. If the engine still
+        // held it, the seam would land on E, a track the queue no longer names.
+        let before = handle.snapshot();
+        let playing = before.path.clone();
+        handle.enqueue(vec![e.clone()]).expect("enqueue E again");
+        let snap = wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(5),
+            |s| s.queue.len() == before.queue.len() + 1,
+            "E queued again",
+        );
+        check(
+            snap.path == playing,
+            "enqueueing does not change the track",
+            format!("{:?}", snap.path),
+        );
+
+        // Remove the entry immediately after the one playing. That is the entry
+        // the engine preloaded, so a rebuild bug shows up as a seam to a track
+        // the queue no longer names.
+        let current = snap.queue_index.expect("an index while playing");
+        let victim = current + 1;
+        let victim_path = snap.queue[victim].clone();
+        handle.remove_from_queue(victim).expect("remove the preloaded entry");
+        let snap = wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(5),
+            |s| s.queue.len() == before.queue.len(),
+            "the preloaded entry removed",
+        );
+        check(
+            !snap.queue.contains(&victim_path),
+            "the removed entry is gone from the queue",
+            format!("{:?}", victim_path),
+        );
+        check(
+            snap.path == playing,
+            "removing the preloaded entry keeps the playing track",
+            format!("{:?}", snap.path),
+        );
+
+        handle.next().expect("next");
+        let snap = wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(10),
+            |s| s.state == PlaybackState::Playing && s.path.as_deref() != playing.as_deref(),
+            "the next track after the edit",
+        );
+        check(
+            snap.path.as_deref() != playing.as_deref(),
+            "a skip moves past the edited head",
+            format!("{:?} -> {:?}", playing, snap.path),
+        );
+
+        // Clearing drops what is behind the current entry and leaves the
+        // current one playing.
+        handle.enqueue(vec![e.clone()]).expect("enqueue E for the clear");
+        wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(5),
+            |s| s.queue.len() == 2,
+            "E queued again",
+        );
+        handle.clear_queue().expect("clear queue");
+        let snap = wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(5),
+            |s| s.queue.len() == 1,
+            "queue cleared",
+        );
+        check(
+            snap.queue.len() == 1 && snap.queue_index == Some(0),
+            "clearing keeps only the playing entry",
+            format!("{} entries, index {:?}", snap.queue.len(), snap.queue_index),
+        );
+        check(
+            snap.path.as_deref() == Some(e.as_path()),
+            "clearing does not change the track",
+            format!("{:?}", snap.path),
+        );
+        let _ = std::fs::remove_file(&e);
+    }
+
     // ---- device list and selection -----------------------------------------
     //
     // This runs last, on its own track, because a device change reopens the
@@ -553,12 +717,18 @@ fn main() {
     write_click(&d, 0.06);
     handle.play(&d, None).expect("play D");
     handle.enqueue(vec![b.clone()]).expect("enqueue B again");
+    // Past a second, so the resume position is a number a restarted stream
+    // could not reach inside the check's own wait.
     wait_until(
         &events,
         || handle.snapshot(),
         Duration::from_secs(20),
-        |s| s.state == PlaybackState::Playing && s.path.as_deref() == Some(d.as_path()),
-        "D playing",
+        |s| {
+            s.state == PlaybackState::Playing
+                && s.path.as_deref() == Some(d.as_path())
+                && s.position > 1.5
+        },
+        "D playing past 1.5 s",
     );
 
     handle.list_devices().expect("list devices");
@@ -592,26 +762,47 @@ fn main() {
         }
     };
     let different = Some(&chosen) != current.as_ref();
+    let position_before_device = handle.snapshot().position;
     handle.set_device(Some(&chosen)).expect("set device");
-    let snap = wait_until(
-        &events,
-        || handle.snapshot(),
-        Duration::from_secs(20),
-        |s| s.device_id.as_deref() == Some(chosen.as_str()),
-        "device chosen",
-    );
+    // The wait is for the reopen to land at the old position, not merely for
+    // the id to change: `set_device` publishes the id before it opens, so an
+    // id-only wait reads the state the previous stream left behind.
+    //
+    // The window is bounded on purpose. A stream that restarted at zero has to
+    // play its way up to `position_before_device`, which takes about 1.5 s
+    // here; this deadline is shorter and the tolerance is small, so reaching
+    // the target by playing is not possible. The earlier version waited up to
+    // 20 s and compared against a 0.5 s tolerance, and it passed with the seek
+    // removed.
+    let deadline = Instant::now() + Duration::from_millis(1_000);
+    let mut snap = handle.snapshot();
+    while Instant::now() < deadline {
+        snap = handle.snapshot();
+        if snap.device_id.as_deref() == Some(chosen.as_str())
+            && (snap.position - position_before_device).abs() < 0.30
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
     check(
         snap.queue == queue_before && snap.queue_index == index_before,
         "choosing a device leaves the queue alone",
         format!("{} entries, index {:?}", snap.queue.len(), snap.queue_index),
     );
     if different {
-        // What can be asserted without racing the reopen: the state still
-        // reports playback and the track is unchanged. The engine's own
-        // resolved report is NOT asserted here -- `open_at` reopens and the
-        // resolved event lands on its own schedule, and a check that waits for
-        // it either races or cannot fail. It is listed as unverified in
-        // README.md rather than covered by a check that means nothing.
+        // NOT asserted: that the reopen resumed at the old position.
+        //
+        // Four attempts to measure it all passed with the seek removed, and the
+        // reason is structural rather than a matter of tolerance: `set_device`
+        // publishes the new id before it reopens, `open_at` polls before it
+        // returns, and the snapshot a caller can read is therefore always
+        // either the old stream or a new one that has already advanced. A
+        // check written against it measures the wait, not the reopen.
+        //
+        // What is assertable is that the change did not disturb the queue or
+        // the track, which the two checks below cover. README lists the
+        // resume behaviour as unverified so nobody reads this as coverage.
         check(
             snap.state == PlaybackState::Playing,
             "changing the endpoint keeps playing",
