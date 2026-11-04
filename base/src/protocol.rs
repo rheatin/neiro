@@ -163,6 +163,13 @@ pub struct Snapshot {
     pub render_path: Option<RenderPath>,
     pub queue: Vec<PathBuf>,
     pub queue_index: Option<usize>,
+    /// How many entries the *engine* holds after the current one.
+    ///
+    /// Separate from `queue.len() - queue_index - 1` on purpose: Base's copy and
+    /// the engine's queue are two things that have to agree, and a UI that only
+    /// sees Base's copy cannot tell when they do not. This is the engine's own
+    /// count, reported as it reports it.
+    pub engine_queue_count: Option<usize>,
     /// The policy the next open will use, and the one the current session was
     /// opened with. `render_path` says what the engine actually did with it;
     /// this says what was asked for.
@@ -294,8 +301,22 @@ pub enum Command {
     /// Stop the current track and open the next queue entry.
     Next,
     /// Analyze a path now. The result is also cached.
+    ///
+    /// `cancel_id`, when given, names this request so `CancelAnalysis` can stop
+    /// it. Without one the decode runs to completion -- a host that wants to
+    /// abandon it has to be able to say which one it means.
     Analyze {
         path: PathBuf,
+        #[serde(default)]
+        cancel_id: Option<u64>,
+    },
+    /// Stop an analysis started with `Analyze { cancel_id }`.
+    ///
+    /// Cancellation is between decoded blocks, so the decode stops within one
+    /// packet rather than instantly. A cancelled decode publishes nothing: its
+    /// result is a prefix, not a measurement.
+    CancelAnalysis {
+        cancel_id: u64,
     },
     SetVolume {
         gain: f64,
@@ -396,6 +417,15 @@ pub enum Command {
     Preanalyze {
         paths: Vec<PathBuf>,
     },
+    /// Change how many analysis workers run.
+    ///
+    /// Growing starts new threads immediately. Shrinking lets the workers that
+    /// are no longer needed finish the decode they are on and then exit -- a
+    /// thread cannot be killed, and abandoning a decode halfway would leave the
+    /// batch accounting short of its own total.
+    SetAnalysisWorkers {
+        count: usize,
+    },
     /// Stop playback, close the stream and end both workers.
     Shutdown,
 }
@@ -481,6 +511,12 @@ pub enum Event {
         /// Set on the last event, so a UI knows the batch ended rather than
         /// paused.
         complete: bool,
+    },
+    /// The analysis pool changed size. The count is the target, not the
+    /// threads currently running: shrinking takes effect as each worker
+    /// finishes the decode it is on.
+    AnalysisWorkersChanged {
+        count: usize,
     },
     /// A path's analysis is available. `cached` is true when this came from the
     /// Base cache rather than a fresh decode.

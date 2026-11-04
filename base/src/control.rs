@@ -41,6 +41,9 @@ pub(crate) struct Start {
     pub batches: crate::analysis::Batches,
     pub cache: Arc<Mutex<Cache>>,
     pub library: Option<Library>,
+    /// The pool's target size, and the means to grow it.
+    pub target: crate::analysis::Target,
+    pub spawn: crate::analysis::Spawner,
 }
 
 pub(crate) fn run(start: Start) {
@@ -55,6 +58,8 @@ pub(crate) fn run(start: Start) {
         batches,
         cache,
         library,
+        target,
+        spawn,
     } = start;
     let mut control = Control {
         commands,
@@ -70,6 +75,8 @@ pub(crate) fn run(start: Start) {
         registry,
         batches,
         cache,
+        target,
+        spawn,
         devices: Vec::new(),
         library,
         most_played_watched: None,
@@ -102,6 +109,8 @@ struct Control {
     batches: crate::analysis::Batches,
     /// The analysis cache, so a batch can grow it before the workers start.
     cache: Arc<Mutex<Cache>>,
+    target: analysis::Target,
+    spawn: analysis::Spawner,
     devices: Vec<DeviceInfo>,
     /// The favourites, playlists and play counts. `None` when Base was started
     /// without a library location -- the rest of Base works, and every library
@@ -216,11 +225,24 @@ impl Control {
             }
             Command::Next => self.skip(),
             Command::SetPolicy { policy } => self.set_policy(policy),
-            Command::Analyze { path } => {
+            Command::Analyze { path, cancel_id } => {
                 let _ = self.analysis.send(analysis::Request {
                     path,
                     explicit: true,
+                    cancel_id,
                 });
+            }
+            Command::CancelAnalysis { cancel_id } => {
+                let stopped = analysis::cancel_id(&self.registry, cancel_id);
+                if !stopped {
+                    // Not an error: the decode may already have finished, and a
+                    // host that cancels late is doing the right thing rather
+                    // than making a mistake.
+                    self.events.emit(Event::Error {
+                        op: "cancel".into(),
+                        message: format!("no analysis with id {cancel_id} is running"),
+                    });
+                }
             }
             Command::SetVolume { gain } => self.apply("volume", |session| session.set_volume(gain)),
             Command::SetEq { params } => self.apply("eq", |session| session.set_eq(&params)),
@@ -248,6 +270,7 @@ impl Control {
             Command::ListPlaylistsContaining { path } => self.publish_playlists_containing(path),
             Command::RecordPlay { path, at_ms } => self.record_play(path, at_ms),
             Command::Preanalyze { paths } => self.preanalyze(paths),
+            Command::SetAnalysisWorkers { count } => self.set_analysis_workers(count),
             Command::ListMostPlayed { limit } => self.publish_most_played(limit),
             Command::Shutdown => {
                 analysis::cancel_all(&self.registry);
@@ -619,6 +642,7 @@ impl Control {
             let _ = self.analysis.send(crate::analysis::Request {
                 path: path.clone(),
                 explicit: true,
+                cancel_id: None,
             });
         }
         // A batch of one that is already cached finishes synchronously inside
@@ -629,6 +653,36 @@ impl Control {
             done: 0,
             total,
             complete: false,
+        });
+    }
+
+    /// Resize the analysis pool.
+    ///
+    /// Growing spawns immediately. Shrinking only moves the target: the workers
+    /// past it exit after the decode they are on, because a thread cannot be
+    /// killed and abandoning a decode halfway would leave the batch accounting
+    /// short of its own total.
+    ///
+    /// The count is clamped to the same bound the startup default uses, so a
+    /// host cannot ask for more decode threads than the machine should run.
+    fn set_analysis_workers(&mut self, count: usize) {
+        let count = count.clamp(1, crate::MAX_ANALYSIS_WORKERS);
+        let before = self.target.get();
+        if count == before {
+            return;
+        }
+        self.target.set(count);
+        if count > before {
+            for index in before..count {
+                // The handle is dropped here: the control thread does not join
+                // analysis workers, `Base::stop_workers` does, and a worker
+                // started by a resize joins the same shutdown path by exiting
+                // when the request channel closes.
+                drop((self.spawn)(index));
+            }
+        }
+        self.events.emit(Event::AnalysisWorkersChanged {
+            count: self.target.get(),
         });
     }
 
@@ -853,13 +907,50 @@ impl Control {
                     if let Err(e) = session.seek(resume_at) {
                         self.emit_error("open", &e.to_string());
                     }
-                }
-                if let Err(e) = session.play() {
-                    self.emit_error("play", &e.to_string());
+                    // A seek is a message to the session thread, so the position
+                    // is not `resume_at` the moment the call returns. Publishing
+                    // straight away reported 0.000 and looked like a reopen that
+                    // had restarted -- the fact and the request are two things,
+                    // and the fact is what gets published.
+                    //
+                    // Bounded, and bounded short: the seek is applied on the
+                    // session thread within a slice or two. A timeout is not an
+                    // error here -- the reopen still happened, and the position
+                    // it reached is reported as whatever the session says.
+                    let deadline = Instant::now() + Duration::from_millis(500);
+                    while Instant::now() < deadline {
+                        match session.state() {
+                            Ok(state) if (state.position - resume_at).abs() < 0.10 => break,
+                            Ok(_) => std::thread::sleep(Duration::from_millis(2)),
+                            Err(_) => break,
+                        }
+                    }
                 }
                 let serial = session.state().ok().map(|s| s.track_serial);
                 self.last_serial = serial;
                 self.session = Some(session);
+
+                // Publish before `play`, not after.
+                //
+                // `play` starts the render thread, so the moment it returns the
+                // position has already moved past whatever it was asked to
+                // resume at. A snapshot taken after it therefore describes a
+                // stream that has been playing, and a caller could never tell a
+                // reopen that resumed at the right place from one that restarted
+                // at zero -- four different checks were written against that
+                // window and all of them passed with the seek removed.
+                //
+                // Publishing the ready state here makes the reopen observable:
+                // the position in this snapshot is exactly `resume_at`.
+                self.publish_phase(PlaybackState::from(SessionPhase::Ready), self.render_path());
+                self.refresh_settings();
+                self.refresh_resolved();
+
+                if let Some(session) = self.session.as_mut() {
+                    if let Err(e) = session.play() {
+                        self.emit_error("play", &e.to_string());
+                    }
+                }
                 if add_remaining {
                     let mut errors = Vec::new();
                     if let Some(session) = self.session.as_mut() {
@@ -874,8 +965,6 @@ impl Control {
                     }
                 }
                 self.last_position_emit = Instant::now();
-                self.refresh_settings();
-                self.refresh_resolved();
                 self.request_current_and_next();
                 self.poll();
             }
@@ -931,6 +1020,11 @@ impl Control {
                 },
             );
         }
+        // Read while `session` is still borrowed immutably. `refresh_resolved`
+        // below takes `&mut self`, which ends this borrow -- so the count has to
+        // be taken before it, not after.
+        let engine_queue = session.queue_count().ok().map(|n| n.max(0) as usize);
+
         self.last_phase = Some(phase);
         if track_changed {
             self.refresh_resolved();
@@ -958,6 +1052,7 @@ impl Control {
         guard.resolved = self.resolved.clone();
         guard.queue = self.queue.clone();
         guard.queue_index = self.index;
+        guard.engine_queue_count = engine_queue;
         guard.policy = self.policy;
         guard.analyzer_version = self.version;
         if path_changed {
@@ -1023,6 +1118,7 @@ impl Control {
             let _ = self.analysis.send(analysis::Request {
                 path,
                 explicit: false,
+                cancel_id: None,
             });
         }
     }
@@ -1034,6 +1130,7 @@ impl Control {
             let _ = self.analysis.send(analysis::Request {
                 path: path.clone(),
                 explicit: true,
+                cancel_id: None,
             });
         }
     }
@@ -1082,6 +1179,20 @@ impl Control {
             guard.path = self.current_path();
             guard.device_id = self.device_id.clone();
             guard.devices = self.devices.clone();
+            // The position and the duration come from the live session, not from
+            // whatever the guard held. `publish_phase` used to leave both alone,
+            // so a snapshot published right after a reopen carried the *previous*
+            // stream's position -- a state that described a stream that no longer
+            // existed, and which hid a reopen that had resumed at the wrong place.
+            if let Some(session) = self.session.as_ref() {
+                if let Ok(live) = session.state() {
+                    guard.position = live.position;
+                    guard.duration = live.duration;
+                    guard.track_serial = live.track_serial;
+                }
+                guard.engine_queue_count =
+                    session.queue_count().ok().map(|n| n.max(0) as usize);
+            }
             guard.render_path = render;
             guard.settings = self.settings.clone();
             guard.resolved = self.resolved.clone();

@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
@@ -56,6 +56,11 @@ pub(crate) fn new_in_flight() -> InFlight {
 pub(crate) struct Registry {
     keep: HashSet<PathBuf>,
     running: HashMap<PathBuf, Arc<AtomicI32>>,
+    /// Host-issued ids for decodes in flight. Separate from `running` because a
+    /// cancel names a request, and two requests for the same path are the same
+    /// decode -- cancelling one has to stop the decode only if nothing else
+    /// wants it, which is what `keep` already answers.
+    by_id: HashMap<u64, Arc<AtomicI32>>,
 }
 
 pub(crate) type CancelRegistry = Arc<Mutex<Registry>>;
@@ -121,6 +126,7 @@ pub(crate) fn new_registry() -> CancelRegistry {
     Arc::new(Mutex::new(Registry {
         keep: HashSet::new(),
         running: HashMap::new(),
+        by_id: HashMap::new(),
     }))
 }
 
@@ -140,6 +146,18 @@ pub(crate) fn wanted(registry: &CancelRegistry, keep: Vec<PathBuf>) {
     inner.keep = keep;
 }
 
+/// Stop the decode a host named. Returns whether that id was running.
+pub(crate) fn cancel_id(registry: &CancelRegistry, id: u64) -> bool {
+    let mut inner = registry.lock().unwrap_or_else(|e| e.into_inner());
+    match inner.by_id.remove(&id) {
+        Some(token) => {
+            token.store(1, Ordering::Release);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Stop everything. Used on shutdown so the workers join promptly instead of
 /// finishing a decode nobody will read.
 pub(crate) fn cancel_all(registry: &CancelRegistry) {
@@ -147,6 +165,7 @@ pub(crate) fn cancel_all(registry: &CancelRegistry) {
     for token in inner.running.values() {
         token.store(1, Ordering::Release);
     }
+    inner.by_id.clear();
     inner.keep.clear();
 }
 
@@ -157,11 +176,56 @@ pub(crate) struct Request {
     /// An explicit `analyze` or `enqueue`. It is answered even when the path is
     /// not in the wanted set, because the caller asked for it by name.
     pub explicit: bool,
+    /// The host's ticket for this request, if it gave one. A `CancelAnalysis`
+    /// for this id stops the decode.
+    pub cancel_id: Option<u64>,
 }
+
+/// How many workers should be running.
+///
+/// A worker reads this after every request and exits when its own index is past
+/// the target. That is the only safe way to shrink a pool: a thread cannot be
+/// killed, and one that is mid-decode has to finish it before it can notice
+/// anything. Growing is handled by the control thread spawning new ones.
+#[derive(Clone)]
+pub(crate) struct Target {
+    desired: Arc<AtomicUsize>,
+}
+
+impl Target {
+    pub fn new(n: usize) -> Self {
+        Self {
+            desired: Arc::new(AtomicUsize::new(n)),
+        }
+    }
+    pub fn get(&self) -> usize {
+        self.desired.load(Ordering::Acquire)
+    }
+    pub fn set(&self, n: usize) {
+        self.desired.store(n, Ordering::Release);
+    }
+    /// Whether a worker at `index` should keep running.
+    pub fn wants(&self, index: usize) -> bool {
+        index < self.get()
+    }
+}
+
+/// Starts a worker and returns its handle.
+///
+/// The handle matters: `Base::stop_workers` joins every analysis thread, and a
+/// spawner that dropped them would leave shutdown returning while a decode was
+/// still running -- the process could exit mid-decode with the decoder's buffers
+/// unreleased.
+pub(crate) type Spawner =
+    Arc<dyn Fn(usize) -> Option<std::thread::JoinHandle<()>> + Send + Sync>;
 
 /// Everything an analysis worker is handed at start.
 pub(crate) struct Worker {
     pub requests: Arc<Mutex<Receiver<Request>>>,
+    /// This worker's slot. A worker whose slot is past the target exits after
+    /// the request it is on.
+    pub index: usize,
+    pub target: Target,
     pub cache: Arc<Mutex<Cache>>,
     pub state: Arc<Mutex<Snapshot>>,
     pub events: EventBus,
@@ -174,6 +238,8 @@ pub(crate) struct Worker {
 pub(crate) fn run(worker: Worker) {
     let Worker {
         requests,
+        index,
+        target,
         cache,
         state,
         events,
@@ -183,15 +249,25 @@ pub(crate) fn run(worker: Worker) {
         batches,
     } = worker;
     loop {
-        // The lock is held only while waiting for the next path, never while
-        // decoding: a worker that held it through a decode would serialise every
-        // other worker.
+        // A worker only exits while it is *idle*. Checking after taking a
+        // request is what broke this: the worker had already removed it from
+        // the channel, so returning lost it -- a batch sat at `done = total - 1`
+        // forever, and an `analyze` was answered by nobody. The first version
+        // did exactly that, and eight paths on a one-worker pool never finished.
+        //
+        // The check therefore comes before the wait, and the wait is bounded so
+        // a worker parked on the channel notices a shrink within a poll.
+        if !target.wants(index) {
+            return;
+        }
         let request = {
             let receiver = requests.lock().unwrap_or_else(|e| e.into_inner());
-            match receiver.recv() {
+            match receiver.recv_timeout(std::time::Duration::from_millis(200)) {
                 Ok(request) => request,
+                // Nothing to do: re-check the target and wait again.
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 // Every sender is gone: Base is shutting down.
-                Err(_) => return,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
         };
         let path = request.path;
@@ -240,15 +316,20 @@ pub(crate) fn run(worker: Worker) {
                 continue;
             }
             inner.running.insert(path.clone(), token.clone());
+            if let Some(id) = request.cancel_id {
+                inner.by_id.insert(id, token.clone());
+            }
         }
 
         let analysis = neiro_audio::analyze_file_cancellable(&path, BUCKETS, Some(&token));
 
-        registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .running
-            .remove(&path);
+        {
+            let mut inner = registry.lock().unwrap_or_else(|e| e.into_inner());
+            inner.running.remove(&path);
+            if let Some(id) = request.cancel_id {
+                inner.by_id.remove(&id);
+            }
+        }
         in_flight
             .lock()
             .unwrap_or_else(|e| e.into_inner())

@@ -36,6 +36,8 @@ pub mod library;
 pub mod capi;
 mod control;
 pub mod protocol;
+#[cfg(windows)]
+pub mod transport;
 
 use cache::Cache;
 use protocol::{Command, Event, PlaybackPolicy, Snapshot};
@@ -243,7 +245,33 @@ impl BaseHandle {
     }
 
     pub fn analyze(&self, path: impl Into<PathBuf>) -> Result<(), BaseError> {
-        self.dispatch(Command::Analyze { path: path.into() })
+        self.dispatch(Command::Analyze {
+            path: path.into(),
+            cancel_id: None,
+        })
+    }
+
+    /// Analyze a path under an id a later `cancel_analysis` can name.
+    pub fn analyze_with_id(
+        &self,
+        path: impl Into<PathBuf>,
+        cancel_id: u64,
+    ) -> Result<(), BaseError> {
+        self.dispatch(Command::Analyze {
+            path: path.into(),
+            cancel_id: Some(cancel_id),
+        })
+    }
+
+    /// Stop an analysis started with [`analyze_with_id`](Self::analyze_with_id).
+    pub fn cancel_analysis(&self, cancel_id: u64) -> Result<(), BaseError> {
+        self.dispatch(Command::CancelAnalysis { cancel_id })
+    }
+
+    /// Resize the analysis pool. Growing starts threads immediately; shrinking
+    /// takes effect as each worker finishes the decode it is on.
+    pub fn set_analysis_workers(&self, count: usize) -> Result<(), BaseError> {
+        self.dispatch(Command::SetAnalysisWorkers { count })
     }
     pub fn set_volume(&self, gain: f64) -> Result<(), BaseError> {
         self.dispatch(Command::SetVolume { gain })
@@ -479,11 +507,61 @@ impl Base {
         let registry = analysis::new_registry();
         let batches = analysis::new_batches();
 
+        // The pool's wiring has to exist before the control thread, because the
+        // control thread owns the spawner a resize uses.
+        let analysis_rx = Arc::new(Mutex::new(analysis_rx));
+        let in_flight = analysis::new_in_flight();
+        let workers = analysis_workers();
+        let target = analysis::Target::new(workers);
+
+        // One spawn closure, used both at start and by a later resize. A resize
+        // that spawned its own threads would be a second copy of this wiring,
+        // and the copies would drift.
+        let spawner: analysis::Spawner = {
+            let analysis_rx = analysis_rx.clone();
+            let cache = cache.clone();
+            let events = events.clone();
+            let state = state.clone();
+            let in_flight = in_flight.clone();
+            let registry = registry.clone();
+            let batches = batches.clone();
+            let target = target.clone();
+            Arc::new(move |index: usize| {
+                let rx = analysis_rx.clone();
+                let cache = cache.clone();
+                let events = events.clone();
+                let state = state.clone();
+                let in_flight = in_flight.clone();
+                let registry = registry.clone();
+                let batches = batches.clone();
+                let target = target.clone();
+                thread::Builder::new()
+                    .name(format!("neiro-base-analysis-{index}"))
+                    .spawn(move || {
+                        analysis::run(analysis::Worker {
+                            requests: rx,
+                            index,
+                            target,
+                            cache,
+                            state,
+                            events,
+                            version,
+                            in_flight,
+                            registry,
+                            batches,
+                        });
+                    })
+                    .ok()
+            })
+        };
+
         let audio_events = events.clone();
         let audio_state = state.clone();
         let registry_for_control = registry.clone();
         let batches_for_control = batches.clone();
         let cache_for_control = cache.clone();
+        let target_for_control = target.clone();
+        let spawn_for_control = spawner.clone();
         let control_thread = thread::Builder::new()
             .name("neiro-base-control".into())
             .spawn(move || {
@@ -498,46 +576,19 @@ impl Base {
                     batches: batches_for_control,
                     cache: cache_for_control,
                     library,
+                    target: target_for_control,
+                    spawn: spawn_for_control,
                 });
             })
             .map_err(|e| BaseError::Spawn(e.to_string()))?;
 
-        let analysis_rx = Arc::new(Mutex::new(analysis_rx));
-        let in_flight = analysis::new_in_flight();
-        let workers = analysis_workers();
         let mut analysis_threads = Vec::with_capacity(workers);
         for index in 0..workers {
-            let rx = analysis_rx.clone();
-            let cache = cache.clone();
-            let events = events.clone();
-            let state = state.clone();
-            let in_flight = in_flight.clone();
-            let registry = registry.clone();
-            let batches = batches.clone();
-            match thread::Builder::new()
-                .name(format!("neiro-base-analysis-{index}"))
-                .spawn(move || {
-                    analysis::run(analysis::Worker {
-                        requests: rx,
-                        cache,
-                        state,
-                        events,
-                        version,
-                        in_flight,
-                        registry,
-                        batches,
-                    });
-                }) {
-                Ok(thread) => analysis_threads.push(thread),
-                Err(e) => {
-                    // The control worker is already alive and would wait forever.
-                    let _ = command_tx.send(Command::Shutdown);
-                    let _ = control_thread.join();
-                    for thread in analysis_threads {
-                        let _ = thread.join();
-                    }
-                    return Err(BaseError::Spawn(e.to_string()));
-                }
+            // A worker that failed to start is not fatal: the pool is smaller
+            // than intended, and the first request simply waits for a free slot.
+            // The handle is kept so shutdown can join it.
+            if let Some(thread) = spawner(index) {
+                analysis_threads.push(thread);
             }
         }
 

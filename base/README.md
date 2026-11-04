@@ -295,17 +295,24 @@ runtime plugin ABI that only works on desktop.
   from favourites and playlists). Progress arrives as `preanalysis_progress`
   with `done`/`total`, and `complete` on the last event.
 - Cancellation is between decoded blocks, so a decode stops within one packet
-  rather than instantly. It is not offered to the C ABI yet: a Swift host gets
-  the behaviour (Base cancels on a track change) but cannot cancel a decode it
-  started through `analyze`.
-- The analysis worker count is fixed at start; there is no way to resize the pool
-  while Base is running.
+  rather than instantly. It is on the wire: `analyze` takes an optional
+  `cancel_id`, and `cancel_analysis` stops the decode that carries it. A
+  cancelled decode publishes nothing.
+- The analysis pool can be resized at runtime with `set_analysis_workers`.
+  Growing starts threads immediately; shrinking moves the target and each
+  worker past it exits when it next becomes idle -- a worker never exits while
+  holding a request, because the request is already off the channel and would
+  be lost.
 - The most-played list is refreshed after a play only if one is being watched,
   and at the limit of the last `list_most_played`. A host that never asked for
   one gets no event, which is the point: an event nobody subscribed to is work
   the UI cannot use.
-- No plugin loader and no out-of-process UI transport yet; both boundaries are
-  represented by serializable protocol types.
+- No plugin loader. The out-of-process transport exists:
+  `neiro_base::transport` serves one client at a time over a named pipe, one
+  JSON object per line, commands in and events out on the same connection.
+- The transport is Windows-only and single-client by design: the control thread
+  owns the session, and two clients issuing commands would be two owners of one
+  queue.
 - `set_policy` reopens the stream, which costs one device close and open. There
   is no crossfade or click suppression across that boundary; a UI should
   debounce a slider rather than send every intermediate value.

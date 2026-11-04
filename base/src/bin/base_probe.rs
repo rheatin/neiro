@@ -224,11 +224,16 @@ fn main() {
         || handle.snapshot(),
         Duration::from_secs(20),
         |s| {
-            s.render_path
-                .as_ref()
-                .is_some_and(|r| r.sample_rate == 96_000)
+            // Both conditions, because the reopen publishes `Ready` before it
+            // starts the new stream: waiting for the rate alone reads the
+            // snapshot taken before `play`, which is a real intermediate state
+            // and not a failure.
+            s.state == PlaybackState::Playing
+                && s.render_path
+                    .as_ref()
+                    .is_some_and(|r| r.sample_rate == 96_000)
         },
-        "policy reopens at 96 kHz",
+        "policy reopens at 96 kHz and plays",
     );
     check(
         snap.render_path.as_ref().map(|r| r.sample_rate) == Some(96_000),
@@ -690,6 +695,19 @@ fn main() {
             "the removed entry is gone from the queue",
             format!("{:?}", victim_path),
         );
+        // The engine has to have the same number behind the current entry.
+        // Base's copy alone cannot show a rebuild that did not happen, and the
+        // engine re-preloads from its own state -- so the only way to tell the
+        // two apart is to ask the engine what it holds.
+        let expected_engine = snap.queue.len() - snap.queue_index.unwrap_or(0) - 1;
+        check(
+            snap.engine_queue_count == Some(expected_engine),
+            "the engine holds the edited queue",
+            format!(
+                "engine {:?}, expected {expected_engine}",
+                snap.engine_queue_count
+            ),
+        );
         check(
             snap.path == playing,
             "removing the preloaded entry keeps the playing track",
@@ -739,6 +757,77 @@ fn main() {
             format!("{:?}", snap.path),
         );
         let _ = std::fs::remove_file(&e);
+    }
+
+    // ---- resizing the analysis pool ---------------------------------------
+    //
+    // The measurable consequence of growing is that a batch finishes faster;
+    // of shrinking, that it still finishes. Both are checked against the
+    // target the event reports, and the shrink is checked by watching a batch
+    // complete after the pool was cut to one.
+    {
+        let paths: Vec<std::path::PathBuf> = (0..8)
+            .map(|i| dir.join(format!("resize_{i}.wav")))
+            .collect();
+        for path in &paths {
+            write_click_short(path);
+        }
+
+        handle.set_analysis_workers(1).expect("shrink to one");
+        let snap = wait_until(
+            &events,
+            || handle.snapshot(),
+            Duration::from_secs(5),
+            |_| true,
+            "after shrink",
+        );
+        let _ = snap;
+        let mut shrunk = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !shrunk {
+            if let Ok(Event::AnalysisWorkersChanged { count }) =
+                events.recv_timeout(Duration::from_millis(20))
+            {
+                shrunk = count == 1;
+            }
+        }
+        check(shrunk, "the pool shrinks to one worker", String::new());
+
+        // A batch still completes on one worker: shrinking must not stall the
+        // queue, only slow it.
+        handle.preanalyze(paths.clone()).expect("preanalyze on one worker");
+        let mut complete = false;
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while Instant::now() < deadline && !complete {
+            if let Ok(Event::PreanalysisProgress {
+                complete: done, ..
+            }) = events.recv_timeout(Duration::from_millis(50))
+            {
+                complete = done;
+            }
+        }
+        check(
+            complete,
+            "a batch completes on a one-worker pool",
+            format!("{} paths", paths.len()),
+        );
+
+        // And growing back works: the target moves without the pool stalling.
+        handle.set_analysis_workers(3).expect("grow to three");
+        let mut grown = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !grown {
+            if let Ok(Event::AnalysisWorkersChanged { count }) =
+                events.recv_timeout(Duration::from_millis(20))
+            {
+                grown = count == 3;
+            }
+        }
+        check(grown, "the pool grows back to three", String::new());
+
+        for path in &paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     // ---- queue reordering -------------------------------------------------
@@ -970,45 +1059,57 @@ fn main() {
     let different = Some(&chosen) != current.as_ref();
     let position_before_device = handle.snapshot().position;
     handle.set_device(Some(&chosen)).expect("set device");
-    // The wait is for the reopen to land at the old position, not merely for
-    // the id to change: `set_device` publishes the id before it opens, so an
-    // id-only wait reads the state the previous stream left behind.
+    // The reopen publishes `Ready` at the resumed position before it starts the
+    // new stream, so the reading that matters is the one carrying the position
+    // it was asked for -- not one the stream has since advanced past.
     //
-    // The window is bounded on purpose. A stream that restarted at zero has to
-    // play its way up to `position_before_device`, which takes about 1.5 s
-    // here; this deadline is shorter and the tolerance is small, so reaching
-    // the target by playing is not possible. The earlier version waited up to
-    // 20 s and compared against a 0.5 s tolerance, and it passed with the seek
-    // removed.
-    let deadline = Instant::now() + Duration::from_millis(1_000);
-    let mut snap = handle.snapshot();
-    while Instant::now() < deadline {
-        snap = handle.snapshot();
-        if snap.device_id.as_deref() == Some(chosen.as_str())
-            && (snap.position - position_before_device).abs() < 0.30
-        {
-            break;
+    // Bounded on purpose: a stream that restarted at zero would have to play its
+    // way up to `position_before_device`, which takes about 2 s here. The
+    // deadline is shorter than that, so reaching the target by playing is not
+    // possible.
+    // The `Ready` snapshot has to be taken from the event stream, not from
+    // `handle.snapshot()`: the reopen publishes it and then `poll()` replaces
+    // the snapshot with a later state, so the stored copy has already moved on
+    // by the time this could read it. The event is the record of the moment
+    // that matters, and the earlier versions of this check kept reading the
+    // stored copy and kept concluding that the seek had worked.
+    let mut resumed: Option<f64> = None;
+    let deadline = Instant::now() + Duration::from_millis(1_200);
+    while Instant::now() < deadline && resumed.is_none() {
+        match events.recv_timeout(Duration::from_millis(10)) {
+            Ok(Event::State(state)) => {
+                if state.device_id.as_deref() == Some(chosen.as_str())
+                    && state.state == PlaybackState::Ready
+                {
+                    resumed = Some(state.position);
+                }
+            }
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        std::thread::sleep(Duration::from_millis(5));
     }
+    // Then wait for the stream to be playing again, which is the state the
+    // other assertions below describe.
+    let snap = wait_until(
+        &events,
+        || handle.snapshot(),
+        Duration::from_secs(10),
+        |s| s.device_id.as_deref() == Some(chosen.as_str()) && s.state == PlaybackState::Playing,
+        "the new stream is playing",
+    );
+    let resumed = resumed.unwrap_or(snap.position);
     check(
         snap.queue == queue_before && snap.queue_index == index_before,
         "choosing a device leaves the queue alone",
         format!("{} entries, index {:?}", snap.queue.len(), snap.queue_index),
     );
     if different {
-        // NOT asserted: that the reopen resumed at the old position.
-        //
-        // Four attempts to measure it all passed with the seek removed, and the
-        // reason is structural rather than a matter of tolerance: `set_device`
-        // publishes the new id before it reopens, `open_at` polls before it
-        // returns, and the snapshot a caller can read is therefore always
-        // either the old stream or a new one that has already advanced. A
-        // check written against it measures the wait, not the reopen.
-        //
-        // What is assertable is that the change did not disturb the queue or
-        // the track, which the two checks below cover. README lists the
-        // resume behaviour as unverified so nobody reads this as coverage.
+        check(
+            (resumed - position_before_device).abs() < 0.10,
+            "changing the endpoint resumes at the position",
+            format!("{:.3}s -> {:.3}s", position_before_device, resumed),
+        );
         check(
             snap.state == PlaybackState::Playing,
             "changing the endpoint keeps playing",

@@ -73,6 +73,33 @@ extern "C" fn on_event(json: *const c_char, _user: *mut c_void) {
     EVENTS.fetch_add(1, Ordering::SeqCst);
 }
 
+/// A long WAV, so a decode is still running when the cancel arrives. A short
+/// file would finish first and the check would be measuring nothing.
+fn write_long_wav(path: &std::path::Path, seconds: u32) {
+    const RATE: u32 = 44_100;
+    let frames = RATE * seconds;
+    let mut wav = Vec::with_capacity(44 + (frames as usize) * 4);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + frames * 4).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * 4).to_le_bytes());
+    wav.extend_from_slice(&4u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(frames * 4).to_le_bytes());
+    for i in 0..frames {
+        let t = i as f64 / RATE as f64;
+        let s = ((2.0 * std::f64::consts::PI * 440.0 * t).sin() * 8000.0) as i16;
+        wav.extend_from_slice(&s.to_le_bytes());
+        wav.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, wav).expect("write long wav");
+}
+
 fn main() {
     let base = NAE_BaseStart();
     assert!(!base.is_null(), "Base starts");
@@ -303,6 +330,81 @@ fn main() {
     // Two tracks have one play each, and ties sort by path, so b comes before c.
     assert_eq!(played["tracks"][1]["path"], "/music/b.flac", "{played}");
     assert_eq!(played["tracks"][2]["path"], "/music/c.flac", "{played}");
+
+    // ---- cancelling an analysis by id -------------------------------------
+    //
+    // A Swift host that starts a decode and then decides it does not want it
+    // must be able to stop it. The id is how it says which one it means; the
+    // decode stops between blocks, so the check has to start one on a file
+    // large enough that it is still running when the cancel arrives.
+    {
+        let big = dir.join("big.wav");
+        write_long_wav(&big, 300);
+        let big_text = big.to_str().expect("UTF-8");
+        assert_eq!(
+            send(
+                base,
+                &format!(
+                    r#"{{"command":"analyze","path":{big_text:?},"cancel_id":7}}"#
+                )
+            ),
+            0
+        );
+        // Give the worker time to start, then cancel. A cancel that arrives
+        // before the decode began is answered by the wanted-set check instead,
+        // which is a different path.
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(
+            send(base, r#"{"command":"cancel_analysis","cancel_id":7}"#),
+            0
+        );
+        // A cancelled decode publishes nothing: its result is a prefix of a
+        // measurement, not a measurement.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut published = false;
+        while Instant::now() < deadline {
+            if let Some(events) = LIBRARY_EVENTS.get() {
+                let guard = events.lock().unwrap();
+                if guard
+                    .iter()
+                    .any(|v| v["event"] == "analysis_ready" && v["path"].as_str() == Some(big_text))
+                {
+                    published = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!published, "a cancelled decode published an analysis");
+        let _ = std::fs::remove_file(&big);
+    }
+
+    // ---- resizing the analysis pool ---------------------------------------
+    //
+    // The pool is fixed at start today; a host that wants to trade decode
+    // parallelism for CPU while a track plays has no way to say so. The event
+    // reports the target, not the threads running, because shrinking is
+    // gradual.
+    assert_eq!(
+        send(base, r#"{"command":"set_analysis_workers","count":1}"#),
+        0
+    );
+    let shrunk = wait_for_event("analysis_workers_changed");
+    assert_eq!(shrunk["count"], 1, "{shrunk}");
+    assert_eq!(
+        send(base, r#"{"command":"set_analysis_workers","count":3}"#),
+        0
+    );
+    let grown = wait_for_event("analysis_workers_changed");
+    assert_eq!(grown["count"], 3, "{grown}");
+    // Out of range is clamped rather than refused: a host that asks for 0 gets
+    // one worker, because a pool with no workers never finishes a request.
+    assert_eq!(
+        send(base, r#"{"command":"set_analysis_workers","count":0}"#),
+        0
+    );
+    let clamped = wait_for_event("analysis_workers_changed");
+    assert_eq!(clamped["count"], 1, "{clamped}");
 
     // ---- unsubscribe ------------------------------------------------------
     //
