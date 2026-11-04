@@ -136,8 +136,11 @@ mangled at that layer looks like an unreadable file.
   deeper than that -- a 32-bit integer WAV, say -- is reported as *not*
   bit-perfect with reason `NAE_REASON_SOURCE_PRECISION`, because the low bits are
   gone before the device sees them, whatever the endpoint accepts.
-- The FFmpeg build is GPL. That is fine for development and not fine to
-  distribute; an LGPL build is a link-time change.
+- The FFmpeg build is GPLv3, which makes `nae.dll` GPL and not distributable.
+  The engine now **reports** this: `NAE_GetEngineCapabilities` carries
+  `ffmpegLicense`, read from `avutil_license()` on the library actually linked,
+  so a host can ask the loaded DLL instead of trusting a note. Switching to an
+  LGPL build is `-DNEIRO_FFMPEG_ROOT=<prefix>` and nothing above it moves.
 
 ## Verification
 

@@ -24,6 +24,16 @@
 #include <thread>
 #include <vector>
 
+// Only for `avutil_license`: the capabilities string reports the licence of the
+// FFmpeg that is actually linked, rather than one copied from a document.
+#ifdef NEIRO_HAVE_FFMPEG
+// `avutil.h` does not wrap its declarations in `extern "C"`, so a C++ include
+// produces a mangled reference to `avutil_license` and the link fails on a
+// symbol that is present in the DLL under its plain C name. The declaration is
+// repeated here with C linkage rather than patched into a vendored header.
+extern "C" const char* avutil_license(void);
+#endif
+
 #include "wasapi_compat.hpp"
 #include "dither.h"
 #include "routing.h"
@@ -1295,8 +1305,25 @@ const char* NAE_GetEngineCapabilities(void) NAE_NOEXCEPT {
             modes += kOpenableShareModes[i].entryPoint;
             modes += "\"}";
         }
-        return std::string("{\"backend\":\"wasapi\",\"shareModes\":[") + modes +
-               "],\"rawStream\":false,\"version\":\"0.1.0-spike\"}";
+        // The FFmpeg licence, read from the library that is actually linked
+        // rather than restated from a document. This build has been GPL before
+        // and will be LGPL later; a host deciding whether it may distribute
+        // nae.dll needs the answer for the binary in front of it, not for the
+        // one the README was written against.
+        //
+        // `avutil_license` reports the most restrictive licence the build
+        // enables ("GPL v3", "LGPL version 2.1 or later", ...). It is compiled
+        // out when FFmpeg is absent, so the field says "none" there.
+#ifdef NEIRO_HAVE_FFMPEG
+        const char* ffmpegLicense = avutil_license();
+#else
+        const char* ffmpegLicense = "none";
+#endif
+        std::string json = std::string("{\"backend\":\"wasapi\",\"shareModes\":[") + modes +
+                           "],\"rawStream\":false,\"ffmpegLicense\":\"" +
+                           (ffmpegLicense ? ffmpegLicense : "unknown") +
+                           "\",\"version\":\"0.1.0-spike\"}";
+        return json;
     }();
     return json.c_str();
 }

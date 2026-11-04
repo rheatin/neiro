@@ -101,6 +101,7 @@ endif()
 if(EXISTS "${NEIRO_FFMPEG_ROOT}/include/libavcodec/avcodec.h")
   set(NEIRO_HAVE_FFMPEG ON)
   message(STATUS "FFmpeg headers found in ${NEIRO_FFMPEG_ROOT}")
+
 else()
   set(NEIRO_HAVE_FFMPEG OFF)
   message(WARNING

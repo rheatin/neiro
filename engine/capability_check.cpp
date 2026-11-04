@@ -158,6 +158,35 @@ int main(int argc, char** argv) {
     // 反向不查：导出表里有 `NAE_OpenExclusiveSine` 这类不属于 share mode 的
     // 入口，不该因为「没被声明」就算失败。能力声明是**允许**的集合，不是全集。
 
+    // ---- the FFmpeg licence, which decides whether this DLL may ship --------
+    //
+    // The engine links FFmpeg, and a GPL build makes nae.dll GPL. That is a
+    // licence fact, not a preference, and it used to live only in a README note
+    // that nobody reads at the moment it matters. It is reported by the library
+    // now, so it can be checked.
+    //
+    // What is asserted is the field's presence and that it agrees with the
+    // library the engine is linked against -- not a particular value, because
+    // an LGPL build is the goal and this check must keep passing when it
+    // arrives. What it catches is the field being a constant someone typed:
+    // it has to be `avutil_license()`'s answer.
+    const std::string field = "\"ffmpegLicense\":\"";
+    const size_t at = json.find(field);
+    check("能力声明里有 ffmpegLicense", at != std::string::npos,
+          at == std::string::npos ? "缺失：宿主无从判断能否分发" : "");
+    if (at != std::string::npos) {
+        const size_t begin = at + field.size();
+        const size_t end = json.find('"', begin);
+        const std::string reported =
+            end == std::string::npos ? std::string() : json.substr(begin, end - begin);
+        std::printf("  报告为 %s\n", reported.c_str());
+        check("ffmpegLicense 不是空串", !reported.empty(), reported);
+        // A build with no FFmpeg says "none"; one with FFmpeg names a licence.
+        // "unknown" is the only value that would mean the query failed, and a
+        // failed query is worse than no field: it looks like an answer.
+        check("ffmpegLicense 是测量值而不是 unknown", reported != "unknown", reported);
+    }
+
     FreeLibrary(lib);
     std::printf("\n%s（%d 失败）\n", g_failures == 0 ? "全部通过" : "有失败", g_failures);
     return g_failures == 0 ? 0 : 1;

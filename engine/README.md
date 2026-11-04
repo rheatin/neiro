@@ -46,8 +46,15 @@ decoding is compiled out and the test tone still works.
 
 ### Licensing — read this before shipping
 
-The current FFmpeg build (`ffmpeg-shared`, `full_build`) is **GPL**. Linking it
-makes `nae.dll` GPL. That is fine for development and **not fine to distribute**.
+The current FFmpeg build (`ffmpeg-shared`, `full_build`) is **GPLv3** —
+`--enable-gpl --enable-version3`. Linking it makes `nae.dll` GPL. That is fine
+for development and **not fine to distribute**.
+
+The engine does not ask you to take its word for it:
+`NAE_GetEngineCapabilities` includes `ffmpegLicense`, which is
+`avutil_license()`'s answer from the library that is actually linked.
+`capability_check` asserts the field exists and is not `unknown`, so a build
+whose query fails cannot pass as a build that answered.
 
 An LGPL build differs only in which optional components are compiled in, and this
 player needs none of the GPL ones — no x264, no xvid. The swap is a link-time
