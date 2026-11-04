@@ -26,10 +26,11 @@ extern "C" {
  *
  * Library commands: set_favourite, list_favourites, create_playlist,
  * rename_playlist, delete_playlist, list_playlists, add_to_playlist,
- * remove_from_playlist, list_playlist_entries, list_playlists_containing.
+ * remove_from_playlist, list_playlist_entries, list_playlists_containing,
+ * record_play, list_most_played.
  *
  * Library events: favourites_changed, playlists_changed,
- * playlist_entries_changed, playlists_containing_changed.
+ * playlist_entries_changed, playlists_containing_changed, most_played_changed.
  *
  * `set_policy` is a request. The engine reports the rate it actually granted in
  * the snapshot's `render_path`; `policy` is what was asked for and may differ.
@@ -74,6 +75,15 @@ int32_t NAE_BaseCommand(NAE_Base *base, const char *json);
 
 /* Subscribe once. The callback and `user` must stay valid until shutdown. */
 int32_t NAE_BaseSubscribe(NAE_Base *base, NAE_BaseEventCallback callback, void *user);
+
+/*
+ * Drop the subscription and let its thread exit. The callback is not invoked
+ * again once this returns. Returns 0 on success, -1 for a bad pointer, -4 when
+ * there is no subscription to drop.
+ *
+ * Without this a host that closes a window has to shut Base down entirely.
+ */
+int32_t NAE_BaseUnsubscribe(NAE_Base *base);
 
 /* Current snapshot as JSON; NULL on failure. Free with NAE_BaseFreeString. */
 char *NAE_BaseSnapshot(NAE_Base *base);

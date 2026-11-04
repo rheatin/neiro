@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use neiro_base::capi::{
     NAE_Base, NAE_BaseCommand, NAE_BaseFreeString, NAE_BaseShutdown, NAE_BaseSnapshot,
-    NAE_BaseStart, NAE_BaseStartWithLibrary, NAE_BaseSubscribe,
+    NAE_BaseStart, NAE_BaseStartWithLibrary, NAE_BaseSubscribe, NAE_BaseUnsubscribe,
 };
 
 static EVENTS: AtomicUsize = AtomicUsize::new(0);
@@ -216,6 +216,66 @@ fn main() {
         favourites["paths"][0], "/music/a.flac",
         "the favourite survived the restart: {favourites}"
     );
+
+    // ---- play counts ------------------------------------------------------
+    //
+    // The count is the host's clock and Base's storage. Recording twice must
+    // show up as two, and the list must be ordered rather than merely non-empty.
+    assert_eq!(
+        send(
+            base,
+            r#"{"command":"record_play","path":"/music/a.flac","at_ms":1700000000000}"#
+        ),
+        0
+    );
+    assert_eq!(
+        send(
+            base,
+            r#"{"command":"record_play","path":"/music/b.flac","at_ms":1700000000100}"#
+        ),
+        0
+    );
+    assert_eq!(
+        send(
+            base,
+            r#"{"command":"record_play","path":"/music/a.flac","at_ms":1700000000200}"#
+        ),
+        0
+    );
+    // No explicit `list_most_played` here: `record_play` republishes the list,
+    // and issuing the list command afterwards would mask a play that stored
+    // nothing -- the check would read the list the command produced and pass.
+    // That is the same mistake the favourite check had, caught the same way.
+    //
+    // The condition is the final count, not the length: the first event carrying
+    // two entries is a state where only one of the two plays has landed.
+    let played = wait_for_event_where("most_played_changed", |v| {
+        v["tracks"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|t| t["play_count"] == 2))
+    });
+    assert_eq!(played["tracks"][0]["path"], "/music/a.flac", "{played}");
+    assert_eq!(played["tracks"][0]["play_count"], 2, "{played}");
+    assert_eq!(played["tracks"][1]["play_count"], 1, "{played}");
+
+    // ---- unsubscribe ------------------------------------------------------
+    //
+    // A host with two windows closes one without shutting Base down. The
+    // callback must stop, and the same handle must be subscribable again.
+    assert_eq!(NAE_BaseUnsubscribe(base), 0, "unsubscribe succeeds");
+    assert_eq!(
+        NAE_BaseUnsubscribe(base),
+        -4,
+        "a second unsubscribe reports there was nothing to drop"
+    );
+    {
+        let events = LIBRARY_EVENTS.get_or_init(|| Mutex::new(Vec::new()));
+        events.lock().unwrap().clear();
+    }
+    assert_eq!(NAE_BaseSubscribe(base, Some(on_library_event), std::ptr::null_mut()), 0);
+    assert_eq!(send(base, r#"{"command":"list_favourites"}"#), 0);
+    let favourites = wait_for_event("favourites_changed");
+    assert_eq!(favourites["paths"][0], "/music/a.flac", "{favourites}");
 
     NAE_BaseShutdown(base);
     let _ = std::fs::remove_dir_all(&dir);

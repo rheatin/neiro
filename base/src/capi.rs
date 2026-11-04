@@ -37,6 +37,8 @@ pub struct NAE_Base {
     base: Option<Base>,
     forward: Option<JoinHandle<()>>,
     forward_stop: Option<Arc<AtomicBool>>,
+    /// The ticket for the current subscription, so it can be given back.
+    ticket: Option<crate::SubscriptionId>,
 }
 
 const NAE_BASE_OK: i32 = 0;
@@ -111,6 +113,7 @@ fn start(
             base: Some(base),
             forward: None,
             forward_stop: None,
+            ticket: None,
         })),
         _ => std::ptr::null_mut(),
     }
@@ -171,7 +174,7 @@ pub extern "C" fn NAE_BaseSubscribe(
         let Some(inner) = base.base.as_ref() else {
             return NAE_BASE_ERR_CLOSED;
         };
-        let receiver = inner.handle().subscribe();
+        let (ticket, receiver) = inner.handle().subscribe();
         let callback = callback.expect("checked above");
         let user = user as usize;
         let stop = Arc::new(AtomicBool::new(false));
@@ -200,6 +203,7 @@ pub extern "C" fn NAE_BaseSubscribe(
         };
         base.forward = Some(handle);
         base.forward_stop = Some(stop);
+        base.ticket = Some(ticket);
         NAE_BASE_OK
     }))
     .unwrap_or(NAE_BASE_ERR_ARGUMENT)
@@ -241,6 +245,40 @@ pub extern "C" fn NAE_BaseFreeString(text: *mut c_char) {
     }
 }
 
+/// Drop the current subscription and let its thread exit.
+///
+/// Without this a host that closes a window has to shut Base down entirely, and
+/// a host with two windows cannot close one. Returns 0 on success and -4 when
+/// there is no subscription to drop.
+///
+/// The callback is not invoked again once this returns; the forward thread
+/// stops on the next event or immediately, whichever comes first.
+#[no_mangle]
+pub extern "C" fn NAE_BaseUnsubscribe(base: *mut NAE_Base) -> i32 {
+    if base.is_null() {
+        return NAE_BASE_ERR_ARGUMENT;
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        let Some(base) = (unsafe { base.as_mut() }) else {
+            return NAE_BASE_ERR_ARGUMENT;
+        };
+        let Some(ticket) = base.ticket.take() else {
+            return NAE_BASE_ERR_ALREADY;
+        };
+        if let Some(inner) = base.base.as_ref() {
+            inner.handle().unsubscribe(ticket);
+        }
+        if let Some(stop) = base.forward_stop.take() {
+            stop.store(true, Ordering::Release);
+        }
+        if let Some(thread) = base.forward.take() {
+            let _ = thread.join();
+        }
+        NAE_BASE_OK
+    }))
+    .unwrap_or(NAE_BASE_ERR_ARGUMENT)
+}
+
 /// Stop playback, join the workers and release Base. Safe on null.
 #[no_mangle]
 pub extern "C" fn NAE_BaseShutdown(base: *mut NAE_Base) {
@@ -248,6 +286,11 @@ pub extern "C" fn NAE_BaseShutdown(base: *mut NAE_Base) {
         return;
     }
     let mut wrapper = unsafe { Box::from_raw(base) };
+    if let Some(ticket) = wrapper.ticket.take() {
+        if let Some(inner) = wrapper.base.as_ref() {
+            inner.handle().unsubscribe(ticket);
+        }
+    }
     if let Some(stop) = wrapper.forward_stop.take() {
         stop.store(true, Ordering::Release);
     }

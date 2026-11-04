@@ -44,6 +44,13 @@ impl From<SessionPhase> for PlaybackState {
     }
 }
 
+/// A track and how many times it has been played.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayedTrack {
+    pub path: PathBuf,
+    pub play_count: i64,
+}
+
 /// One output endpoint, as the engine enumerated it.
 ///
 /// Copied from the engine verbatim. Base does not cache a format and present it
@@ -358,6 +365,16 @@ pub enum Command {
     ListPlaylistsContaining {
         path: PathBuf,
     },
+    /// Record that a track was played. `at_ms` is the host's clock: Base does
+    /// not own one and does not invent one.
+    RecordPlay {
+        path: PathBuf,
+        at_ms: i64,
+    },
+    /// Ask for the most-played tracks, most first.
+    ListMostPlayed {
+        limit: usize,
+    },
     /// Stop playback, close the stream and end both workers.
     Shutdown,
 }
@@ -425,6 +442,11 @@ pub enum Event {
     PlaylistsContainingChanged {
         path: PathBuf,
         playlists: Vec<crate::library::Playlist>,
+    },
+    /// The most-played tracks, most first. Ties sort by path, so the order is
+    /// stable across launches.
+    MostPlayedChanged {
+        tracks: Vec<PlayedTrack>,
     },
     /// A path's analysis is available. `cached` is true when this came from the
     /// Base cache rather than a fresh decode.

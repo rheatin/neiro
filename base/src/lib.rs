@@ -87,32 +87,93 @@ impl From<neiro_audio::EngineError> for BaseError {
 /// Unbounded channels were the earlier shape: a subscriber that stopped
 /// draining accumulated every position event for as long as it lived, on the
 /// thread that also drives playback.
+/// A subscriber's ticket. Handed out by `subscribe` and given back by
+/// `unsubscribe`; a ticket that was already used is not an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SubscriptionId(pub u64);
+
 #[derive(Clone, Default)]
 pub(crate) struct EventBus {
-    subscribers: Arc<Mutex<Vec<SyncSender<Event>>>>,
+    inner: Arc<Mutex<Subscribers>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsubscribe_frees_the_slot_and_stops_events() {
+        let bus = EventBus::default();
+        let (first, first_rx) = bus.subscribe();
+        let (_second, second_rx) = bus.subscribe();
+        assert_eq!(bus.len(), 2);
+
+        assert!(bus.unsubscribe(first));
+        assert_eq!(bus.len(), 1, "the slot came back");
+
+        // The dropped subscriber sees the channel close rather than another
+        // event: a UI that closed its window must not keep receiving.
+        bus.emit(Event::Shutdown);
+        assert!(
+            first_rx.recv().is_err(),
+            "a cancelled subscription receives nothing"
+        );
+        assert!(matches!(second_rx.recv(), Ok(Event::Shutdown)));
+
+        // A ticket that was already used is not an error the caller has to
+        // special-case; it just reports false.
+        assert!(!bus.unsubscribe(first));
+    }
+}
+
+#[derive(Default)]
+struct Subscribers {
+    next_id: u64,
+    list: Vec<(SubscriptionId, SyncSender<Event>)>,
 }
 
 /// Deep enough for a burst of control events, shallow enough to be a bound.
 const SUBSCRIBER_DEPTH: usize = 64;
 
 impl EventBus {
-    pub fn subscribe(&self) -> Receiver<Event> {
+    /// A new event stream, and the ticket that cancels it.
+    ///
+    /// The ticket exists because a receiver that is simply dropped looks the
+    /// same as one that is slow: the bus only notices when a send fails. A UI
+    /// that closes a window wants its slot back now, not on the next event.
+    pub fn subscribe(&self) -> (SubscriptionId, Receiver<Event>) {
         let (tx, rx) = mpsc::sync_channel(SUBSCRIBER_DEPTH);
-        let mut subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
-        subs.push(tx);
-        rx
+        let mut subs = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let id = SubscriptionId(subs.next_id);
+        subs.next_id += 1;
+        subs.list.push((id, tx));
+        (id, rx)
+    }
+
+    /// Drop a subscriber. Returns whether the ticket was still live.
+    pub fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        let mut subs = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let before = subs.list.len();
+        subs.list.retain(|(ticket, _)| *ticket != id);
+        subs.list.len() != before
     }
 
     pub fn emit(&self, event: Event) {
-        let mut subs = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut subs = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let is_position = matches!(event, Event::Position { .. });
-        subs.retain(|tx| match tx.try_send(event.clone()) {
+        subs.list.retain(|(_, tx)| match tx.try_send(event.clone()) {
             Ok(()) => true,
             // A full queue drops the newest position; the next one is 100 ms
             // away and carries a later reading.
             Err(std::sync::mpsc::TrySendError::Full(_)) => is_position,
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
         });
+    }
+
+    /// Live subscribers, for a check that needs to see a slot come back.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).list.len()
     }
 }
 
@@ -284,15 +345,35 @@ impl BaseHandle {
         self.dispatch(Command::ListPlaylistsContaining { path: path.into() })
     }
 
+    /// Record that a track was played. `at_ms` is the host's clock.
+    pub fn record_play(&self, path: impl Into<PathBuf>, at_ms: i64) -> Result<(), BaseError> {
+        self.dispatch(Command::RecordPlay {
+            path: path.into(),
+            at_ms,
+        })
+    }
+
+    /// Ask for the most-played tracks, most first.
+    pub fn list_most_played(&self, limit: usize) -> Result<(), BaseError> {
+        self.dispatch(Command::ListMostPlayed { limit })
+    }
+
     /// Ask the workers to stop. `Base`'s `Drop` also does this and joins.
     pub fn shutdown(&self) -> Result<(), BaseError> {
         self.dispatch(Command::Shutdown)
     }
 
-    /// A new event stream. Events emitted before subscription are not replayed;
-    /// call [`snapshot`](Self::snapshot) first for the current state.
-    pub fn subscribe(&self) -> Receiver<Event> {
+    /// A new event stream, with the ticket that cancels it. Events emitted
+    /// before subscription are not replayed; call [`snapshot`](Self::snapshot)
+    /// first for the current state.
+    pub fn subscribe(&self) -> (SubscriptionId, Receiver<Event>) {
         self.events.subscribe()
+    }
+
+    /// Drop a subscriber. Safe to call twice and safe after shutdown; returns
+    /// whether the ticket was still live.
+    pub fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        self.events.unsubscribe(id)
     }
 
     /// The latest state. This is a copy owned by Base, not a second source of

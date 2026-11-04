@@ -57,7 +57,8 @@ Commands: `play`, `enqueue`, `pause`, `resume`, `stop`, `seek`, `next`,
 `remove_from_queue`, `clear_queue`, `shutdown`, and the library commands
 `set_favourite`, `list_favourites`, `create_playlist`, `rename_playlist`,
 `delete_playlist`, `list_playlists`, `add_to_playlist`, `remove_from_playlist`,
-`list_playlist_entries`, `list_playlists_containing`.
+`list_playlist_entries`, `list_playlists_containing`, `record_play`,
+`list_most_played`.
 
 `play` replaces the queue by design: it is the "start this track" command.
 Choosing an endpoint is `set_device`, which deliberately does not touch the
@@ -108,6 +109,7 @@ and not at ten thousand.
 | `create_playlist` / `rename_playlist` / `delete_playlist` / `playlists` | names are unique case-insensitively, enforced by the schema's index rather than by a check in front of it |
 | `add_to_playlist` / `remove_from_playlist` / `playlist_entries` | adding a track twice is a no-op; a removal closes the position gap |
 | `playlists_containing` | the reverse query a UI asks on selection |
+| `record_play` / `list_most_played` | the clock is the host's; a play republishes the list the UI last asked for |
 
 Every one of these is on the wire as a command, and answers as an event
 (`favourites_changed`, `playlists_changed`, `playlist_entries_changed`,
@@ -292,9 +294,9 @@ runtime plugin ABI that only works on desktop.
   started through `analyze`.
 - The analysis worker count is fixed at start; there is no way to resize the pool
   while Base is running.
-- The library has no `most_played` command: the query exists in
-  `neiro_base::library` and is not on the wire yet, because no event shape was
-  agreed for it.
+- The most-played limit used by the automatic refresh is whatever the last
+  `list_most_played` asked for, defaulting to 20. A host that wants a different
+  window for the refresh and for the list has to re-issue the list.
 - No plugin loader and no out-of-process UI transport yet; both boundaries are
   represented by serializable protocol types.
 - `set_policy` reopens the stream, which costs one device close and open. There
@@ -314,7 +316,8 @@ runtime plugin ABI that only works on desktop.
   correct by observation, but the same assertion passed with the rebuild
   disabled: the engine re-preloads from its own queue state, so the two paths
   agree whether or not Base rebuilds.
-- The C ABI has one subscription and no unsubscribe; shutdown is the lifetime
-  boundary.
+- The C ABI has one subscription at a time per `NAE_Base`; `NAE_BaseUnsubscribe`
+  drops it and lets the same handle subscribe again, which is what a host with
+  several windows needs. Two simultaneous subscribers still require two handles.
 - iOS is not built or verified here. `nae.dll` is Windows-only; an iOS build
   needs the engine's CoreAudio backend and a static link first.

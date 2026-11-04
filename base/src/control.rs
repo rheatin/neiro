@@ -65,6 +65,7 @@ pub(crate) fn run(start: Start) {
         registry,
         devices: Vec::new(),
         library,
+        most_played_limit: 20,
         settings: None,
         last_serial: None,
         last_phase: None,
@@ -96,6 +97,9 @@ struct Control {
     /// without a library location -- the rest of Base works, and every library
     /// command reports that instead of pretending the answer is empty.
     library: Option<Library>,
+    /// The limit the last most-played request used, so a play can refresh the
+    /// list the UI is actually watching.
+    most_played_limit: usize,
     settings: Option<SessionSettings>,
     last_serial: Option<u64>,
     last_phase: Option<SessionPhase>,
@@ -227,6 +231,8 @@ impl Control {
             Command::RemoveFromPlaylist { id, path } => self.remove_from_playlist(id, path),
             Command::ListPlaylistEntries { id } => self.publish_playlist_entries(id),
             Command::ListPlaylistsContaining { path } => self.publish_playlists_containing(path),
+            Command::RecordPlay { path, at_ms } => self.record_play(path, at_ms),
+            Command::ListMostPlayed { limit } => self.publish_most_played(limit),
             Command::Shutdown => {
                 analysis::cancel_all(&self.registry);
                 self.close_session();
@@ -569,6 +575,39 @@ impl Control {
             None => return,
         };
         self.events.emit(Event::PlaylistsContainingChanged { path, playlists });
+    }
+
+    fn record_play(&mut self, path: PathBuf, at_ms: i64) {
+        match self.library("play") {
+            Some(library) => {
+                if let Err(e) = library.record_play(&path, at_ms) {
+                    return self.emit_error("play", &e.to_string());
+                }
+            }
+            None => return,
+        }
+        // The count changed, so a list that is showing it is now stale. The
+        // limit is the one the last request used, so a UI watching the list sees
+        // it move rather than silently disagreeing with the store.
+        let limit = self.most_played_limit;
+        self.publish_most_played(limit);
+    }
+
+    fn publish_most_played(&mut self, limit: usize) {
+        self.most_played_limit = limit;
+        let tracks = match self.library("most played") {
+            Some(library) => match library.most_played(limit) {
+                Ok(list) => list,
+                Err(e) => return self.emit_error("most played", &e.to_string()),
+            },
+            None => return,
+        };
+        self.events.emit(Event::MostPlayedChanged {
+            tracks: tracks
+                .into_iter()
+                .map(|(path, play_count)| crate::protocol::PlayedTrack { path, play_count })
+                .collect(),
+        });
     }
 
     /// Rebuild the engine's queue from Base's, after a local edit.

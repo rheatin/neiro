@@ -114,7 +114,7 @@ fn main() {
     };
     let base = Base::start_with_share(share).expect("start Base");
     let handle = base.handle();
-    let events = handle.subscribe();
+    let (_ticket, events) = handle.subscribe();
 
     let device = std::env::var("NEIRO_BASE_DEVICE").ok();
     handle
