@@ -269,6 +269,74 @@ impl Session {
         Ok(rc)
     }
 
+    /// The output spectrum tap, as the session thread last published it.
+    ///
+    /// The handle-level `Stream::spectrum` cannot be used here: the handle
+    /// belongs to the session thread. This reads the copy that thread publishes
+    /// after every slice, which is why it is on `Session` rather than on
+    /// `Stream`.
+    pub fn spectrum(&self) -> Result<crate::engine::Spectrum> {
+        let mut info = ffi::NAE_SpectrumInfo {
+            struct_size: std::mem::size_of::<ffi::NAE_SpectrumInfo>() as u32,
+            ..Default::default()
+        };
+        let mut bins = vec![0.0f32; 4096];
+        // SAFETY: `info` is a live, correctly-sized struct; `bins` has exactly
+        // the capacity passed, and the engine writes no more than that.
+        let rc = unsafe {
+            ffi::NAE_SessionQuerySpectrum(
+                self.raw,
+                &mut info,
+                bins.as_mut_ptr(),
+                bins.len() as i32,
+            )
+        };
+        if rc != ffi::NAE_OK {
+            return Err(session_error(self.raw, rc));
+        }
+        bins.truncate(info.bin_count as usize);
+        Ok(crate::engine::Spectrum {
+            bins,
+            fft_size: info.fft_size,
+            sample_rate: info.sample_rate,
+            valid_bits: info.valid_bits,
+            peak: info.peak,
+            rms: info.rms,
+            frames_fed: info.frames_fed,
+            complete: true,
+        })
+    }
+
+    /// The time-domain envelope, as the session thread last published it.
+    pub fn envelope(&self) -> Result<crate::engine::Envelope> {
+        let mut info = ffi::NAE_EnvelopeInfo {
+            struct_size: std::mem::size_of::<ffi::NAE_EnvelopeInfo>() as u32,
+            ..Default::default()
+        };
+        let mut frames = vec![0.0f32; 4096];
+        // SAFETY: as above.
+        let rc = unsafe {
+            ffi::NAE_SessionQueryEnvelope(
+                self.raw,
+                &mut info,
+                frames.as_mut_ptr(),
+                frames.len() as i32,
+            )
+        };
+        if rc != ffi::NAE_OK {
+            return Err(session_error(self.raw, rc));
+        }
+        frames.truncate(info.frame_valid as usize);
+        Ok(crate::engine::Envelope {
+            frames,
+            frame_hop_ms: info.frame_hop_ms,
+            sample_rate: info.sample_rate,
+            frames_fed: info.frames_fed,
+            window_ms: f64::from(info.frame_count) * info.frame_hop_ms,
+            complete: true,
+        })
+    }
+
     /// The engine's actual resolved path for the current track, as JSON.
     /// `None` before the session is ready or if the engine did not produce it.
     pub fn resolved_json(&self) -> Option<serde_json::Value> {

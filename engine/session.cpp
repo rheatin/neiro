@@ -90,6 +90,28 @@ struct NAE_Session {
     // was not.
     std::atomic<bool> nextPreloaded{false};
 
+    // The visualiser taps, copied by the session thread into this buffer.
+    //
+    // `NAE_QuerySpectrum` and `NAE_QueryEnvelope` take a handle, and the handle
+    // belongs to the session thread -- reading it from the host's thread is the
+    // same use-after-free window the peaks path was fixed for. So the session
+    // thread publishes a copy and the exports read that.
+    //
+    // A copy rather than a queue: the visualiser wants the *latest* window, and
+    // a host that reads slower than the tap produces should skip frames rather
+    // than fall behind by seconds.
+    std::mutex tapMutex;
+    std::vector<float> tapBins;
+    std::vector<float> tapEnvelope;
+    uint32_t tapFftSize = 0;
+    uint32_t tapSampleRate = 0;
+    uint32_t tapValidBits = 0;
+    double tapPeak = 0.0;
+    double tapRms = 0.0;
+    uint64_t tapFramesFed = 0;
+    double tapEnvelopeHopMs = 0.0;
+    uint64_t tapGeneration = 0;
+
     std::atomic<double> position{0.0};
     std::atomic<double> duration{0.0};
     std::atomic<int32_t> sampleRate{0};
@@ -663,6 +685,48 @@ bool preloadNext(NAE_Session* s) {
     return true;
 }
 
+/// Copy the engine's taps into the session's snapshot.
+///
+/// Runs on the session thread, which is the only thread that may touch the
+/// handle. The exports read the copy under `tapMutex`.
+///
+/// Only while playing: a paused stream has no new audio, and re-reading the
+/// same window would make a spectrum view look alive when it is not.
+static void publishTaps(NAE_Session* s) {
+    if (!s->handle) return;
+    NAE_SpectrumInfo info{};
+    info.struct_size = sizeof(info);
+    std::vector<float> bins(2048, 0.0f);
+    if (NAE_QuerySpectrum(s->handle, &info, bins.data(),
+                          static_cast<int32_t>(bins.size())) != NAE_OK) {
+        return;
+    }
+    const uint32_t count = std::min<uint32_t>(info.binCount, bins.size());
+    bins.resize(count);
+
+    NAE_EnvelopeInfo env{};
+    env.struct_size = sizeof(env);
+    std::vector<float> frames(4096, 0.0f);
+    if (NAE_QueryEnvelope(s->handle, &env, frames.data(),
+                          static_cast<int32_t>(frames.size())) != NAE_OK) {
+        return;
+    }
+    const uint32_t valid = std::min<uint32_t>(env.frame_valid, frames.size());
+    frames.resize(valid);
+
+    std::lock_guard<std::mutex> lock(s->tapMutex);
+    s->tapBins = std::move(bins);
+    s->tapEnvelope = std::move(frames);
+    s->tapFftSize = info.fftSize;
+    s->tapSampleRate = info.sampleRate;
+    s->tapValidBits = info.validBits;
+    s->tapPeak = info.peak;
+    s->tapRms = info.rms;
+    s->tapFramesFed = info.framesFed;
+    s->tapEnvelopeHopMs = env.frame_hop_ms;
+    ++s->tapGeneration;
+}
+
 void sessionThread(NAE_Session* s) {
     NAE_Handle* handle = nullptr;
     int32_t rate = 0, sourceRate = 0, channels = 0, bits = 0, valid = 0, isFloat = 0;
@@ -999,6 +1063,10 @@ void sessionThread(NAE_Session* s) {
                                              : NAE_Play(s->handle, s->sliceMs);
             const double now = NAE_Position(s->handle);
             s->position = now;
+            // The visualiser taps, published from the thread that owns the
+            // handle. Every slice while playing, so a host polling at 30 Hz
+            // finds a fresh window rather than the one it already drew.
+            if (st == NAE_SESSION_PLAYING) publishTaps(s);
             const uint64_t serial = NAE_GetTrackSerial(s->handle);
             if (serial != s->trackSerial.load()) {
                 s->trackSerial = serial;
@@ -1710,6 +1778,70 @@ int32_t NAE_SessionGetResolvedSignalPath(NAE_Session* session,
     std::lock_guard<std::mutex> lock(session->resolvedMutex);
     if (!session->resolvedValid) return NAE_ERR_NOT_OPEN;
     *out = session->resolved;
+    return NAE_OK;
+}
+
+int32_t NAE_SessionQuerySpectrum(NAE_Session* session, NAE_SpectrumInfo* info,
+                                float* bins, int32_t capacity) NAE_NOEXCEPT {
+    if (!session || !info) return NAE_ERR_INVALID_ARGUMENT;
+    if (!bins && capacity > 0) return NAE_ERR_INVALID_ARGUMENT;
+
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_SpectrumInfo));
+    const uint32_t declared = info->struct_size;
+    NAE_SpectrumInfo local{};
+    local.struct_size = full;
+
+    {
+        std::lock_guard<std::mutex> lock(session->tapMutex);
+        if (session->tapBins.empty()) {
+            // Nothing has been published yet. Reporting zeroed bins would draw
+            // a flat line, which reads as "the music is silent" rather than
+            // "there is no reading" -- so the call says so instead.
+            return NAE_ERR_NOT_OPEN;
+        }
+        local.fftSize = session->tapFftSize;
+        local.sampleRate = session->tapSampleRate;
+        local.validBits = session->tapValidBits;
+        local.peak = session->tapPeak;
+        local.rms = session->tapRms;
+        local.framesFed = session->tapFramesFed;
+        local.binCount = static_cast<uint32_t>(session->tapBins.size());
+        const int32_t give =
+            std::min<int32_t>(capacity, static_cast<int32_t>(session->tapBins.size()));
+        for (int32_t i = 0; i < give; ++i) bins[i] = session->tapBins[i];
+    }
+
+    const uint32_t limit = declared == 0 ? full : std::min(declared, full);
+    std::memcpy(info, &local, limit);
+    *reinterpret_cast<uint32_t*>(info) = limit;
+    return NAE_OK;
+}
+
+int32_t NAE_SessionQueryEnvelope(NAE_Session* session, NAE_EnvelopeInfo* info,
+                                 float* frames, int32_t capacity) NAE_NOEXCEPT {
+    if (!session || !info) return NAE_ERR_INVALID_ARGUMENT;
+    if (!frames && capacity > 0) return NAE_ERR_INVALID_ARGUMENT;
+
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_EnvelopeInfo));
+    const uint32_t declared = info->struct_size;
+    NAE_EnvelopeInfo local{};
+    local.struct_size = full;
+
+    {
+        std::lock_guard<std::mutex> lock(session->tapMutex);
+        if (session->tapEnvelope.empty()) return NAE_ERR_NOT_OPEN;
+        local.frame_count = 4096;
+        local.frame_valid = static_cast<uint32_t>(session->tapEnvelope.size());
+        local.frame_hop_ms = session->tapEnvelopeHopMs;
+        local.sample_rate = session->tapSampleRate;
+        const int32_t give =
+            std::min<int32_t>(capacity, static_cast<int32_t>(session->tapEnvelope.size()));
+        for (int32_t i = 0; i < give; ++i) frames[i] = session->tapEnvelope[i];
+    }
+
+    const uint32_t limit = declared == 0 ? full : std::min(declared, full);
+    std::memcpy(info, &local, limit);
+    *reinterpret_cast<uint32_t*>(info) = limit;
     return NAE_OK;
 }
 

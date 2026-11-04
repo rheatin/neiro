@@ -830,6 +830,76 @@ fn main() {
         }
     }
 
+    // ---- the visualiser stream -------------------------------------------
+    //
+    // The spectrum is the main display and the envelope is the time axis, so
+    // both arrive in one frame: two events at different rates would let a UI
+    // draw a spectrum against a waveform from a different moment.
+    //
+    // What is measured is that frames arrive while playing, that they carry
+    // bins, and that they stop when the host stops asking -- a stream nobody
+    // watches should cost nothing.
+    {
+        handle.set_visualiser(Some(30)).expect("start visualiser");
+        let mut frames = 0usize;
+        let mut nonempty = 0usize;
+        let mut saw_envelope = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && frames < 3 {
+            match events.recv_timeout(Duration::from_millis(50)) {
+                Ok(Event::VisualFrame { frame }) => {
+                    frames += 1;
+                    if !frame.bins.is_empty() {
+                        nonempty += 1;
+                    }
+                    if !frame.envelope.is_empty() {
+                        saw_envelope = true;
+                    }
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        check(
+            frames >= 3,
+            "visualiser frames arrive while playing",
+            format!("{frames} frames"),
+        );
+        check(
+            nonempty == frames,
+            "every frame carries spectrum bins",
+            format!("{nonempty}/{frames}"),
+        );
+        check(
+            saw_envelope,
+            "a frame carries the waveform envelope",
+            String::new(),
+        );
+
+        // Stop, and confirm the stream actually stops rather than being merely
+        // ignored by the check.
+        handle.set_visualiser(None).expect("stop visualiser");
+        let quiet = std::sync::atomic::AtomicBool::new(true);
+        let deadline = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < deadline {
+            match events.recv_timeout(Duration::from_millis(30)) {
+                Ok(Event::VisualFrame { .. }) => {
+                    quiet.store(false, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        check(
+            quiet.load(std::sync::atomic::Ordering::Relaxed),
+            "frames stop when the host stops asking",
+            String::new(),
+        );
+    }
+
     // ---- queue reordering -------------------------------------------------
     //
     // A move is a remove plus an insert, and both shift positions. The case that

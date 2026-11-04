@@ -114,6 +114,8 @@ NAE_QueryDecodePath
     NAE_SessionSkipToNext
     NAE_SessionQueueClear
     NAE_SessionQueueCount
+    NAE_SessionQuerySpectrum
+    NAE_SessionQueryEnvelope
     NAE_ParamCount
     NAE_ParamAt
     NAE_SessionParamGet

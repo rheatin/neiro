@@ -1560,6 +1560,19 @@ extern "C" {
         out: *mut NAE_CrossfadeParams,
     ) -> i32;
 
+    pub fn NAE_SessionQuerySpectrum(
+        session: *mut NAE_Session,
+        info: *mut NAE_SpectrumInfo,
+        bins: *mut f32,
+        capacity: i32,
+    ) -> i32;
+    pub fn NAE_SessionQueryEnvelope(
+        session: *mut NAE_Session,
+        info: *mut NAE_EnvelopeInfo,
+        frames: *mut f32,
+        capacity: i32,
+    ) -> i32;
+
     // ---- the parameter registry -------------------------------------------
     //
     // The discoverable view of every setting: the typed structs are the

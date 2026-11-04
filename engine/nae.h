@@ -1920,6 +1920,27 @@ int32_t NAE_SessionQueueCount(NAE_Session* session) NAE_NOEXCEPT;
 int32_t NAE_SessionLastError(NAE_Session* session, char* buf, int32_t bufLen) NAE_NOEXCEPT;
 
 /** The actual path for the current track; per-track, not a settings dump. */
+/**
+ * Read the visualiser taps through the session.
+ *
+ * `NAE_QuerySpectrum` and `NAE_QueryEnvelope` take a handle, and the handle
+ * belongs to the session thread -- a host reading it from its own thread is the
+ * use-after-free window `NAE_QueryPeaks` was changed to a path for. The session
+ * thread publishes a copy of both taps after every slice it renders, and these
+ * read that copy.
+ *
+ * Returns NAE_ERR_NOT_OPEN when nothing has been published yet, rather than
+ * zeroed bins: a flat line reads as "the music is silent", which is a statement
+ * about the track, and the truth is that there is no reading.
+ *
+ * The same struct-size rule as every other query: the caller's declared size is
+ * honoured and the bytes actually written are reported.
+ */
+int32_t NAE_SessionQuerySpectrum(NAE_Session* session, NAE_SpectrumInfo* info,
+                                float* bins, int32_t capacity) NAE_NOEXCEPT;
+int32_t NAE_SessionQueryEnvelope(NAE_Session* session, NAE_EnvelopeInfo* info,
+                                 float* frames, int32_t capacity) NAE_NOEXCEPT;
+
 int32_t NAE_SessionGetResolvedSignalPath(NAE_Session* session,
                                           NAE_ResolvedSignalPath* out) NAE_NOEXCEPT;
 

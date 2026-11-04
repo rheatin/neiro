@@ -83,6 +83,8 @@ pub(crate) fn run(start: Start) {
         devices: Vec::new(),
         library,
         most_played_watched: None,
+        visual_interval: None,
+        last_visual_emit: Instant::now(),
         settings: None,
         last_serial: None,
         last_phase: None,
@@ -123,6 +125,12 @@ struct Control {
     /// without a library location -- the rest of Base works, and every library
     /// command reports that instead of pretending the answer is empty.
     library: Option<Library>,
+    /// How often to publish a visualiser frame, or `None` when nothing is
+    /// watching. `None` is the default: forwarding a spectrum costs a copy per
+    /// frame, and a UI that has no spectrum view should not pay for it.
+    visual_interval: Option<Duration>,
+    last_visual_emit: Instant,
+
     /// The limit of the list the UI is currently watching, or `None` when it
     /// has never asked for one.
     ///
@@ -277,6 +285,7 @@ impl Control {
             Command::ListPlaylistsContaining { path } => self.publish_playlists_containing(path),
             Command::RecordPlay { path, at_ms } => self.record_play(path, at_ms),
             Command::Preanalyze { paths } => self.preanalyze(paths),
+            Command::SetVisualiser { interval_ms } => self.set_visualiser(interval_ms),
             Command::SetAnalysisWorkers { count } => self.set_analysis_workers(count),
             Command::ListMostPlayed { limit } => self.publish_most_played(limit),
             Command::Shutdown => {
@@ -702,6 +711,58 @@ impl Control {
         });
     }
 
+    /// Start or stop the visualiser stream.
+    ///
+    /// The interval is what the host can draw, not what the engine produces: the
+    /// session publishes a tap snapshot every slice, and this decides how often
+    /// one is forwarded. A UI drawing at 60 Hz asks for 16 ms; one drawing at
+    /// 30 Hz asks for 33 and pays half the copies.
+    fn set_visualiser(&mut self, interval_ms: Option<u32>) {
+        self.visual_interval = interval_ms.map(|ms| Duration::from_millis(u64::from(ms.max(1))));
+        // A new interval starts a fresh window, so a UI that just opened its
+        // spectrum view does not wait out the previous interval.
+        self.last_visual_emit = Instant::now();
+        if self.visual_interval.is_some() {
+            self.poll();
+        }
+    }
+
+    /// Forward one frame if the interval has elapsed and something is watching.
+    ///
+    /// Reading the taps is a copy of two vectors; it happens here rather than in
+    /// `poll`'s hot path so a host with no spectrum view pays nothing.
+    fn maybe_emit_visual(&mut self) {
+        let Some(interval) = self.visual_interval else {
+            return;
+        };
+        if self.last_visual_emit.elapsed() < interval {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let (spectrum, envelope) = match (session.spectrum(), session.envelope()) {
+            (Ok(s), Ok(e)) => (s, e),
+            // Nothing published yet, or the session is between tracks. Saying
+            // nothing is right: a zeroed frame would draw a flat line, which
+            // reads as silence rather than as "no reading".
+            _ => return,
+        };
+        self.last_visual_emit = Instant::now();
+        self.events.emit(Event::VisualFrame {
+            frame: crate::protocol::VisualFrame {
+                bins: spectrum.bins,
+                fft_size: spectrum.fft_size,
+                sample_rate: spectrum.sample_rate,
+                peak: spectrum.peak,
+                rms: spectrum.rms,
+                frames_fed: spectrum.frames_fed,
+                envelope: envelope.frames,
+                envelope_hop_ms: envelope.frame_hop_ms,
+            },
+        });
+    }
+
     fn record_play(&mut self, path: PathBuf, at_ms: i64) {
         match self.library("play") {
             Some(library) => {
@@ -1100,6 +1161,9 @@ impl Control {
             self.emit_position();
             self.last_position_emit = Instant::now();
         }
+        // After the state, so a UI that redraws on `State` already has the new
+        // position when the first frame arrives.
+        self.maybe_emit_visual();
     }
 
     fn close_session(&mut self) {

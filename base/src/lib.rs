@@ -392,6 +392,14 @@ impl BaseHandle {
         self.dispatch(Command::ListMostPlayed { limit })
     }
 
+    /// Start or stop forwarding visualiser frames. `None` stops.
+    ///
+    /// The interval is what the host can draw: 16 ms for a 60 Hz view, 33 for
+    /// 30 Hz. Frames are only produced while playing and only while this is set.
+    pub fn set_visualiser(&self, interval_ms: Option<u32>) -> Result<(), BaseError> {
+        self.dispatch(Command::SetVisualiser { interval_ms })
+    }
+
     /// Analyze a batch of paths ahead of playback.
     ///
     /// Base does not scan directories: the host supplies the paths. Results

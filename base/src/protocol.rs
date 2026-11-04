@@ -44,6 +44,30 @@ impl From<SessionPhase> for PlaybackState {
     }
 }
 
+/// One frame of the visualiser: the spectrum, and the waveform strip.
+///
+/// The spectrum is the main display and the envelope is the time axis, so both
+/// travel together: two events at different rates would let a UI draw a
+/// spectrum against a waveform from a different moment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisualFrame {
+    /// Linear magnitudes, `fft_size / 2` of them. A full-scale sine reads about
+    /// 1.0 in its own bin.
+    pub bins: Vec<f32>,
+    pub fft_size: u32,
+    /// The device rate the window was captured at.
+    pub sample_rate: u32,
+    pub peak: f64,
+    pub rms: f64,
+    /// Total frames the tap has been fed. A UI compares this with the previous
+    /// frame to know whether it is looking at new audio.
+    pub frames_fed: u64,
+    /// The time-domain envelope, oldest first. Its length is what has been
+    /// written, not the ring's capacity.
+    pub envelope: Vec<f32>,
+    pub envelope_hop_ms: f64,
+}
+
 /// A track and how many times it has been played.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayedTrack {
@@ -405,6 +429,14 @@ pub enum Command {
     ListMostPlayed {
         limit: usize,
     },
+    /// Start or stop forwarding visualiser frames.
+    ///
+    /// `None` stops. The interval is what the host can draw: a 60 Hz view asks
+    /// for 16 ms, and a phone showing the spectrum only in a full-screen mode
+    /// asks for it while that mode is open.
+    SetVisualiser {
+        interval_ms: Option<u32>,
+    },
     /// Analyze a batch of paths ahead of playback.
     ///
     /// Base does not scan directories: the host supplies the paths, which keeps
@@ -511,6 +543,15 @@ pub enum Event {
         /// Set on the last event, so a UI knows the batch ended rather than
         /// paused.
         complete: bool,
+    },
+    /// One visualiser frame, at the rate the host asked for.
+    ///
+    /// Only emitted while playing and only when a host has subscribed: the taps
+    /// are read from the session thread every slice, and forwarding them costs a
+    /// copy. A UI that closes the spectrum view stops asking, and the events
+    /// stop.
+    VisualFrame {
+        frame: VisualFrame,
     },
     /// The analysis pool changed size. The count is the target, not the
     /// threads currently running: shrinking takes effect as each worker
