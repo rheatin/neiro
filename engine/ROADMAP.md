@@ -156,16 +156,15 @@ lost and do not get mixed into the platform refactor.
 
 These are known and not part of the current platform push:
 
-- IIR Hilbert
-- Session/Base policy application; dither Off/TPDF/Rectangular/NoiseShaped is
-  exposed coefficients.
-- `NAE_QueryDeviceCaps` on Windows/macOS/Android.
-- Base diagnostics/resolved-path integration.
-- Session policy application (resolver exists; session still opens with its
-  legacy config).
-- `NAE_Session` path/queue index observability (track path, preload status).
-- FFmpeg GPL/LGPL packaging.
+- `NAE_Session` path/queue index observability: the queue count and the
+  preloaded flag are exposed, but not the queue's contents.
 - Platform-specific DSD native paths (vendor SDK/driver constraints).
+
+Resolved since this list was written: IIR Hilbert is implemented and is the
+LtRt default; `NAE_QueryDeviceCaps` is exported and probed; Base carries the
+resolved path and diagnostics; the session applies policy; and the FFmpeg
+licence is reported by the engine and `scripts/build-lgpl.ps1` builds and
+verifies the LGPL variant.
 
 ## Definition of done for P0
 

@@ -317,19 +317,17 @@ runtime plugin ABI that only works on desktop.
   is no crossfade or click suppression across that boundary; a UI should
   debounce a slider rather than send every intermediate value.
 - `set_device` on a live stream reopens on the new endpoint at the current
-  position. The reopen itself is not covered by a check: `open_at` publishes
-  before it returns, so any assertion either races the reopen or passes
-  regardless. What is checked is that the queue survives and that playback
-  continues; the engine's own `deviceId` in the resolved report is the field a
-  future check should read once the publication order is fixed.
+  position. The reopen publishes `Ready` at the resumed position before it
+  starts the new stream, which is what makes the resume assertable: the check
+  compares against the position it left, within 0.10 s, and fails with
+  `1.539s -> 0.000s` when the seek is removed.
 - Queue editing is move, remove and clear. Removing an entry
   rebuilds the engine's queue from the current index forward, so the engine seams
   to what the UI shows. The entry that is playing cannot be removed -- `Stop` first.
-- The queue rebuild is not covered by a failing check. Removing the entry the
-  engine had preloaded should make a skip land past it, and the behaviour is
-  correct by observation, but the same assertion passed with the rebuild
-  disabled: the engine re-preloads from its own queue state, so the two paths
-  agree whether or not Base rebuilds.
+- The queue rebuild is checked against the engine's own count, not Base's copy:
+  `engine_queue_count` in the snapshot is what the session reports holding, and
+  it is compared with the edited queue. Dropping the rebuild reports
+  `engine Some(3), expected 1`.
 - The C ABI has one subscription at a time per `NAE_Base`; `NAE_BaseUnsubscribe`
   drops it and lets the same handle subscribe again, which is what a host with
   several windows needs. Two simultaneous subscribers still require two handles.
