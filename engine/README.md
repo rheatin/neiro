@@ -56,6 +56,23 @@ The engine does not ask you to take its word for it:
 `capability_check` asserts the field exists and is not `unknown`, so a build
 whose query fails cannot pass as a build that answered.
 
+### Building the LGPL variant
+
+```powershell
+.\scriptsuild-lgpl.ps1
+```
+
+Downloads a shared LGPL build (BtbN; the gyan.dev builds are all GPL), refuses
+it if its configuration still enables `--enable-gpl` or `--enable-nonfree`,
+configures `engine/build-lgpl` against it, builds, and asserts that the DLL now
+reports an LGPL licence.
+
+Verified on this machine: the same sources, the same checks, the only difference
+being the linked FFmpeg, went from `"ffmpegLicense":"GPL version 3 or later"` to
+`"ffmpegLicense":"LGPL version 3 or later"`, and all 63 checks passed on the LGPL
+build. Nothing above the link moved -- which is what "a link-time change" means,
+and it is now measured rather than asserted.
+
 An LGPL build differs only in which optional components are compiled in, and this
 player needs none of the GPL ones — no x264, no xvid. The swap is a link-time
 change and nothing above it moves. `soxr` is vended and LGPL 2.1.

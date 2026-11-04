@@ -137,10 +137,11 @@ mangled at that layer looks like an unreadable file.
   bit-perfect with reason `NAE_REASON_SOURCE_PRECISION`, because the low bits are
   gone before the device sees them, whatever the endpoint accepts.
 - The FFmpeg build is GPLv3, which makes `nae.dll` GPL and not distributable.
-  The engine now **reports** this: `NAE_GetEngineCapabilities` carries
+  The engine **reports** this: `NAE_GetEngineCapabilities` carries
   `ffmpegLicense`, read from `avutil_license()` on the library actually linked,
-  so a host can ask the loaded DLL instead of trusting a note. Switching to an
-  LGPL build is `-DNEIRO_FFMPEG_ROOT=<prefix>` and nothing above it moves.
+  so a host can ask the loaded DLL instead of trusting a note.
+  `scripts/build-lgpl.ps1` builds and verifies the LGPL variant end to end; on
+  this machine it reports `LGPL version 3 or later` and all checks pass.
 
 ## Verification
 

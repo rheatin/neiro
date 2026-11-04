@@ -131,6 +131,13 @@ the first test program; anything set inside `CMakeLists.txt` arrives after that
 check has already failed. Configure with `cmake --preset windows`, or pass
 `-DCMAKE_TOOLCHAIN_FILE=cmake/mingw-ucrt.cmake` by hand.
 
+### LGPL build
+
+`scripts/build-lgpl.ps1` builds against a shared LGPL FFmpeg and asserts the
+DLL reports one. The engine only uses decoding APIs, so nothing above the link
+changes; the script refuses a build whose configuration still enables
+`--enable-gpl` or `--enable-nonfree`.
+
 A function is only reachable if it is in all three export lists. The DLL is
 loaded by name; an ordinal-only DLL cannot be used by the Rust binding.
 
