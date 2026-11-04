@@ -224,6 +224,66 @@ impl BaseHandle {
         })
     }
 
+    // ---- library ---------------------------------------------------------
+
+    /// Star or unstar a track. Works with nothing playing.
+    pub fn set_favourite(&self, path: impl Into<PathBuf>, on: bool) -> Result<(), BaseError> {
+        self.dispatch(Command::SetFavourite {
+            path: path.into(),
+            on,
+        })
+    }
+
+    pub fn list_favourites(&self) -> Result<(), BaseError> {
+        self.dispatch(Command::ListFavourites)
+    }
+
+    pub fn create_playlist(&self, name: impl Into<String>) -> Result<(), BaseError> {
+        self.dispatch(Command::CreatePlaylist { name: name.into() })
+    }
+
+    pub fn rename_playlist(&self, id: i64, name: impl Into<String>) -> Result<(), BaseError> {
+        self.dispatch(Command::RenamePlaylist {
+            id,
+            name: name.into(),
+        })
+    }
+
+    pub fn delete_playlist(&self, id: i64) -> Result<(), BaseError> {
+        self.dispatch(Command::DeletePlaylist { id })
+    }
+
+    pub fn list_playlists(&self) -> Result<(), BaseError> {
+        self.dispatch(Command::ListPlaylists)
+    }
+
+    pub fn add_to_playlist(&self, id: i64, path: impl Into<PathBuf>) -> Result<(), BaseError> {
+        self.dispatch(Command::AddToPlaylist {
+            id,
+            path: path.into(),
+        })
+    }
+
+    pub fn remove_from_playlist(
+        &self,
+        id: i64,
+        path: impl Into<PathBuf>,
+    ) -> Result<(), BaseError> {
+        self.dispatch(Command::RemoveFromPlaylist {
+            id,
+            path: path.into(),
+        })
+    }
+
+    pub fn list_playlist_entries(&self, id: i64) -> Result<(), BaseError> {
+        self.dispatch(Command::ListPlaylistEntries { id })
+    }
+
+    /// Ask which playlists hold a track.
+    pub fn list_playlists_containing(&self, path: impl Into<PathBuf>) -> Result<(), BaseError> {
+        self.dispatch(Command::ListPlaylistsContaining { path: path.into() })
+    }
+
     /// Ask the workers to stop. `Base`'s `Drop` also does this and joins.
     pub fn shutdown(&self) -> Result<(), BaseError> {
         self.dispatch(Command::Shutdown)
@@ -291,7 +351,24 @@ impl Base {
 
     /// Start Base with an explicit output policy: rate mode, resampler quality
     /// and share mode. No device is opened here; the first `Play` chooses one.
+    ///
+    /// No library is opened either: favourites and playlists report "no library"
+    /// until [`start_with_policy_and_library`] is used. That is deliberate rather
+    /// than an empty library, because "you have no playlists" is a statement
+    /// about the listener's music and not about this process.
     pub fn start_with_policy(policy: PlaybackPolicy) -> Result<Self, BaseError> {
+        Self::start_inner(policy, None)
+    }
+
+    /// Start Base with a library file for favourites and playlists.
+    pub fn start_with_policy_and_library(
+        policy: PlaybackPolicy,
+        library: library::Library,
+    ) -> Result<Self, BaseError> {
+        Self::start_inner(policy, Some(library))
+    }
+
+    fn start_inner(policy: PlaybackPolicy, library: Option<library::Library>) -> Result<Self, BaseError> {
         let version = analyzer_version();
         let state = Arc::new(Mutex::new(Snapshot {
             analyzer_version: version,
@@ -311,15 +388,16 @@ impl Base {
         let control_thread = thread::Builder::new()
             .name("neiro-base-control".into())
             .spawn(move || {
-                control::run(
-                    command_rx,
-                    analysis_tx,
-                    audio_events,
-                    audio_state,
+                control::run(control::Start {
+                    commands: command_rx,
+                    analysis: analysis_tx,
+                    events: audio_events,
+                    state: audio_state,
                     version,
                     policy,
-                    registry_for_control,
-                );
+                    registry: registry_for_control,
+                    library,
+                });
             })
             .map_err(|e| BaseError::Spawn(e.to_string()))?;
 

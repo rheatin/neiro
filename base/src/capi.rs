@@ -45,11 +45,39 @@ const NAE_BASE_ERR_PARSE: i32 = -2;
 const NAE_BASE_ERR_CLOSED: i32 = -3;
 const NAE_BASE_ERR_ALREADY: i32 = -4;
 
-/// Start Base with exclusive output. Returns null when the workers could not
-/// be spawned.
+/// Start Base with exclusive output and no library. Returns null when the
+/// workers could not be spawned.
+///
+/// Library commands then report "no library is open" rather than an empty
+/// library: "you have no playlists" is a statement about the listener's music,
+/// not about this process.
 #[no_mangle]
 pub extern "C" fn NAE_BaseStart() -> *mut NAE_Base {
-    start(neiro_audio::ShareKind::Exclusive)
+    start(neiro_audio::ShareKind::Exclusive, None)
+}
+
+/// Start Base with a library file for favourites, playlists and play counts.
+///
+/// The file is created, with its schema, when it does not exist; parent
+/// directories are created too. Returns null when the library could not be
+/// opened or the workers could not be spawned -- the two are not distinguished
+/// here, because a host that cannot get either has nothing to do with the
+/// result.
+#[no_mangle]
+pub extern "C" fn NAE_BaseStartWithLibrary(path: *const c_char) -> *mut NAE_Base {
+    if path.is_null() {
+        return std::ptr::null_mut();
+    }
+    let library = catch_unwind(AssertUnwindSafe(|| {
+        let text = unsafe { CStr::from_ptr(path) }.to_str().ok()?;
+        crate::library::Library::open(std::path::Path::new(text)).ok()
+    }))
+    .ok()
+    .flatten();
+    let Some(library) = library else {
+        return std::ptr::null_mut();
+    };
+    start(neiro_audio::ShareKind::Exclusive, Some(library))
 }
 
 /// Start Base with an explicit share mode: 0 = exclusive, 1 = shared.
@@ -58,14 +86,27 @@ pub extern "C" fn NAE_BaseStart() -> *mut NAE_Base {
 #[no_mangle]
 pub extern "C" fn NAE_BaseStartWithShare(share: i32) -> *mut NAE_Base {
     match share {
-        0 => start(neiro_audio::ShareKind::Exclusive),
-        1 => start(neiro_audio::ShareKind::Shared),
+        0 => start(neiro_audio::ShareKind::Exclusive, None),
+        1 => start(neiro_audio::ShareKind::Shared, None),
         _ => std::ptr::null_mut(),
     }
 }
 
-fn start(share: neiro_audio::ShareKind) -> *mut NAE_Base {
-    match catch_unwind(|| Base::start_with_share(share)) {
+fn start(
+    share: neiro_audio::ShareKind,
+    library: Option<crate::library::Library>,
+) -> *mut NAE_Base {
+    let policy = match share {
+        neiro_audio::ShareKind::Shared => crate::protocol::PlaybackPolicy::shared(),
+        neiro_audio::ShareKind::Exclusive => crate::protocol::PlaybackPolicy::default(),
+    };
+    // The start call is inside the closure, not before it: a Base that panics
+    // while spawning a worker must come back as null rather than unwind into the
+    // C caller, and `catch_unwind` only catches what runs inside it.
+    match catch_unwind(AssertUnwindSafe(|| match library {
+        Some(library) => Base::start_with_policy_and_library(policy, library),
+        None => Base::start_with_policy(policy),
+    })) {
         Ok(Ok(base)) => Box::into_raw(Box::new(NAE_Base {
             base: Some(base),
             forward: None,

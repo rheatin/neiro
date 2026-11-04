@@ -318,6 +318,46 @@ pub enum Command {
     SetDevice {
         device_id: Option<String>,
     },
+    // ---- library --------------------------------------------------------
+    //
+    // Favourites, playlists and play counts. These are answered by the library
+    // file rather than by the session, so they work with nothing playing -- a
+    // listener can star a track before ever pressing play.
+    SetFavourite {
+        path: PathBuf,
+        on: bool,
+    },
+    /// Ask for the favourite list. Answered as a `favourites_changed` event.
+    ListFavourites,
+    CreatePlaylist {
+        name: String,
+    },
+    RenamePlaylist {
+        id: i64,
+        name: String,
+    },
+    DeletePlaylist {
+        id: i64,
+    },
+    /// Ask for the playlist list. Answered as a `playlists_changed` event.
+    ListPlaylists,
+    AddToPlaylist {
+        id: i64,
+        path: PathBuf,
+    },
+    RemoveFromPlaylist {
+        id: i64,
+        path: PathBuf,
+    },
+    /// Ask for the entries of one playlist, in order.
+    ListPlaylistEntries {
+        id: i64,
+    },
+    /// Ask which playlists hold a track. Answered as
+    /// `playlists_containing_changed`.
+    ListPlaylistsContaining {
+        path: PathBuf,
+    },
     /// Stop playback, close the stream and end both workers.
     Shutdown,
 }
@@ -366,6 +406,25 @@ pub enum Event {
     /// The engine re-resolved its path for a new track.
     ResolvedPathChanged {
         resolved: serde_json::Value,
+    },
+    /// The favourite list, after a change or on request.
+    FavouritesChanged {
+        paths: Vec<PathBuf>,
+    },
+    /// The playlist list, after a change or on request. `track_count` is the
+    /// size of each playlist, not the number loaded.
+    PlaylistsChanged {
+        playlists: Vec<crate::library::Playlist>,
+    },
+    /// One playlist's entries, in order.
+    PlaylistEntriesChanged {
+        id: i64,
+        entries: Vec<crate::library::PlaylistEntry>,
+    },
+    /// The playlists that hold a path.
+    PlaylistsContainingChanged {
+        path: PathBuf,
+        playlists: Vec<crate::library::Playlist>,
     },
     /// A path's analysis is available. `cached` is true when this came from the
     /// Base cache rather than a fresh decode.

@@ -20,7 +20,16 @@ extern "C" {
  *   {"command":"play","path":"...","device_id":null}
  *   {"command":"set_policy","policy":{"rate":{"mode":"fixed","rate_hz":96000},
  *    "quality":"very_high","share":"shared"}}
+ *   {"command":"set_favourite","path":"...","on":true}
+ *   {"command":"create_playlist","name":"Evening"}
  *   {"event":"state","state":"playing",...}
+ *
+ * Library commands: set_favourite, list_favourites, create_playlist,
+ * rename_playlist, delete_playlist, list_playlists, add_to_playlist,
+ * remove_from_playlist, list_playlist_entries, list_playlists_containing.
+ *
+ * Library events: favourites_changed, playlists_changed,
+ * playlist_entries_changed, playlists_containing_changed.
  *
  * `set_policy` is a request. The engine reports the rate it actually granted in
  * the snapshot's `render_path`; `policy` is what was asked for and may differ.
@@ -29,8 +38,25 @@ typedef struct NAE_Base NAE_Base;
 
 typedef void (*NAE_BaseEventCallback)(const char *json, void *user);
 
-/* Start the workers with exclusive output. NULL when they could not start. */
+/*
+ * Start the workers with exclusive output and no library.
+ *
+ * Library commands then report "no library is open" rather than an empty
+ * library: "you have no playlists" is a statement about the listener's music,
+ * not about this process.
+ *
+ * NULL when the workers could not start.
+ */
 NAE_Base *NAE_BaseStart(void);
+
+/*
+ * Start with a library file for favourites, playlists and play counts.
+ *
+ * The file and its schema are created when they do not exist, and parent
+ * directories with them. NULL when the library could not be opened or the
+ * workers could not start.
+ */
+NAE_Base *NAE_BaseStartWithLibrary(const char *path);
 
 /*
  * Start with an explicit share mode: 0 = exclusive, 1 = shared. Shared is for

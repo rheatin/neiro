@@ -15,6 +15,7 @@ use neiro_audio::{
 };
 
 use crate::analysis::{self, CancelRegistry};
+use crate::library::Library;
 use crate::protocol::{
     DeviceInfo, Event, OutputRatePolicy, PlaybackPolicy, PlaybackState, RenderPath,
     ResamplerQuality, ShareMode, Snapshot,
@@ -24,15 +25,32 @@ use crate::EventBus;
 const POLL: Duration = Duration::from_millis(30);
 const POSITION_EMIT: Duration = Duration::from_millis(100);
 
-pub(crate) fn run(
-    commands: Receiver<crate::protocol::Command>,
-    analysis: Sender<crate::analysis::Request>,
-    events: EventBus,
-    state: Arc<Mutex<Snapshot>>,
-    version: u32,
-    policy: PlaybackPolicy,
-    registry: CancelRegistry,
-) {
+/// Everything the control thread is handed at start.
+///
+/// A struct rather than eight parameters: the list had grown one field at a
+/// time, and a call site that swaps two of them compiles.
+pub(crate) struct Start {
+    pub commands: Receiver<crate::protocol::Command>,
+    pub analysis: Sender<crate::analysis::Request>,
+    pub events: EventBus,
+    pub state: Arc<Mutex<Snapshot>>,
+    pub version: u32,
+    pub policy: PlaybackPolicy,
+    pub registry: CancelRegistry,
+    pub library: Option<Library>,
+}
+
+pub(crate) fn run(start: Start) {
+    let Start {
+        commands,
+        analysis,
+        events,
+        state,
+        version,
+        policy,
+        registry,
+        library,
+    } = start;
     let mut control = Control {
         commands,
         analysis,
@@ -46,6 +64,7 @@ pub(crate) fn run(
         policy,
         registry,
         devices: Vec::new(),
+        library,
         settings: None,
         last_serial: None,
         last_phase: None,
@@ -73,6 +92,10 @@ struct Control {
     policy: PlaybackPolicy,
     registry: CancelRegistry,
     devices: Vec<DeviceInfo>,
+    /// The favourites, playlists and play counts. `None` when Base was started
+    /// without a library location -- the rest of Base works, and every library
+    /// command reports that instead of pretending the answer is empty.
+    library: Option<Library>,
     settings: Option<SessionSettings>,
     last_serial: Option<u64>,
     last_phase: Option<SessionPhase>,
@@ -194,6 +217,16 @@ impl Control {
             Command::SetCrossfade { params } => {
                 self.apply("crossfade", |session| session.set_crossfade(&params))
             }
+            Command::SetFavourite { path, on } => self.set_favourite(path, on),
+            Command::ListFavourites => self.publish_favourites(),
+            Command::CreatePlaylist { name } => self.create_playlist(name),
+            Command::RenamePlaylist { id, name } => self.rename_playlist(id, name),
+            Command::DeletePlaylist { id } => self.delete_playlist(id),
+            Command::ListPlaylists => self.publish_playlists(),
+            Command::AddToPlaylist { id, path } => self.add_to_playlist(id, path),
+            Command::RemoveFromPlaylist { id, path } => self.remove_from_playlist(id, path),
+            Command::ListPlaylistEntries { id } => self.publish_playlist_entries(id),
+            Command::ListPlaylistsContaining { path } => self.publish_playlists_containing(path),
             Command::Shutdown => {
                 analysis::cancel_all(&self.registry);
                 self.close_session();
@@ -395,6 +428,147 @@ impl Control {
             self.emit_error("policy", &message);
         }
         self.poll();
+    }
+
+    /// The library, or an error that says why there is none.
+    ///
+    /// A missing library is not an empty library: reporting "no playlists" when
+    /// the file was never opened would look like the listener has none, which is
+    /// a statement about their music rather than about this process.
+    fn library(&self, op: &str) -> Option<&Library> {
+        if self.library.is_none() {
+            self.emit_error(op, "no library is open");
+        }
+        self.library.as_ref()
+    }
+
+    fn set_favourite(&mut self, path: PathBuf, on: bool) {
+        let changed = match self.library("favourite") {
+            Some(library) => match library.set_favourite(&path, on) {
+                Ok(changed) => changed,
+                Err(e) => return self.emit_error("favourite", &e.to_string()),
+            },
+            None => return,
+        };
+        // A UI that already shows the right star does not need an event, and one
+        // that does not will get the list below.
+        if changed {
+            self.publish_favourites();
+        }
+    }
+
+    fn publish_favourites(&mut self) {
+        let paths = match self.library("favourites") {
+            Some(library) => match library.favourites() {
+                Ok(paths) => paths,
+                Err(e) => return self.emit_error("favourites", &e.to_string()),
+            },
+            None => return,
+        };
+        self.events.emit(Event::FavouritesChanged { paths });
+    }
+
+    fn create_playlist(&mut self, name: String) {
+        let id = match self.library("playlist") {
+            Some(library) => match library.create_playlist(&name) {
+                Ok(playlist) => playlist.id,
+                Err(e) => return self.emit_error("playlist", &e.to_string()),
+            },
+            None => return,
+        };
+        self.publish_playlists();
+        self.publish_playlist_entries(id);
+    }
+
+    fn rename_playlist(&mut self, id: i64, name: String) {
+        match self.library("playlist") {
+            Some(library) => {
+                if let Err(e) = library.rename_playlist(id, &name) {
+                    return self.emit_error("playlist", &e.to_string());
+                }
+            }
+            None => return,
+        }
+        self.publish_playlists();
+    }
+
+    fn delete_playlist(&mut self, id: i64) {
+        match self.library("playlist") {
+            Some(library) => {
+                if let Err(e) = library.delete_playlist(id) {
+                    return self.emit_error("playlist", &e.to_string());
+                }
+            }
+            None => return,
+        }
+        self.publish_playlists();
+        // The entries of a deleted playlist are gone, and a UI that still shows
+        // them is showing a playlist that no longer exists.
+        self.events.emit(Event::PlaylistEntriesChanged {
+            id,
+            entries: Vec::new(),
+        });
+    }
+
+    fn publish_playlists(&mut self) {
+        let playlists = match self.library("playlists") {
+            Some(library) => match library.playlists() {
+                Ok(list) => list,
+                Err(e) => return self.emit_error("playlists", &e.to_string()),
+            },
+            None => return,
+        };
+        self.events.emit(Event::PlaylistsChanged { playlists });
+    }
+
+    fn add_to_playlist(&mut self, id: i64, path: PathBuf) {
+        let changed = match self.library("playlist") {
+            Some(library) => match library.add_to_playlist(id, &path) {
+                Ok(changed) => changed,
+                Err(e) => return self.emit_error("playlist", &e.to_string()),
+            },
+            None => return,
+        };
+        if changed {
+            self.publish_playlists();
+            self.publish_playlist_entries(id);
+        }
+    }
+
+    fn remove_from_playlist(&mut self, id: i64, path: PathBuf) {
+        let changed = match self.library("playlist") {
+            Some(library) => match library.remove_from_playlist(id, &path) {
+                Ok(changed) => changed,
+                Err(e) => return self.emit_error("playlist", &e.to_string()),
+            },
+            None => return,
+        };
+        if changed {
+            self.publish_playlists();
+            self.publish_playlist_entries(id);
+        }
+    }
+
+    fn publish_playlist_entries(&mut self, id: i64) {
+        let entries = match self.library("playlist") {
+            Some(library) => match library.playlist_entries(id) {
+                Ok(entries) => entries,
+                Err(e) => return self.emit_error("playlist", &e.to_string()),
+            },
+            None => return,
+        };
+        self.events.emit(Event::PlaylistEntriesChanged { id, entries });
+    }
+
+    fn publish_playlists_containing(&mut self, path: PathBuf) {
+        let playlists = match self.library("playlist") {
+            Some(library) => match library.playlists_containing(&path) {
+                Ok(list) => list,
+                Err(e) => return self.emit_error("playlist", &e.to_string()),
+            },
+            None => return,
+        };
+        self.events.emit(Event::PlaylistsContainingChanged { path, playlists });
     }
 
     /// Rebuild the engine's queue from Base's, after a local edit.

@@ -54,7 +54,10 @@ socket.
 Commands: `play`, `enqueue`, `pause`, `resume`, `stop`, `seek`, `next`,
 `analyze`, `set_volume`, `set_eq`, `set_crossfeed`, `set_replay_gain`,
 `set_convolver`, `set_crossfade`, `set_policy`, `list_devices`, `set_device`,
-`remove_from_queue`, `clear_queue`, `shutdown`.
+`remove_from_queue`, `clear_queue`, `shutdown`, and the library commands
+`set_favourite`, `list_favourites`, `create_playlist`, `rename_playlist`,
+`delete_playlist`, `list_playlists`, `add_to_playlist`, `remove_from_playlist`,
+`list_playlist_entries`, `list_playlists_containing`.
 
 `play` replaces the queue by design: it is the "start this track" command.
 Choosing an endpoint is `set_device`, which deliberately does not touch the
@@ -105,6 +108,17 @@ and not at ten thousand.
 | `create_playlist` / `rename_playlist` / `delete_playlist` / `playlists` | names are unique case-insensitively, enforced by the schema's index rather than by a check in front of it |
 | `add_to_playlist` / `remove_from_playlist` / `playlist_entries` | adding a track twice is a no-op; a removal closes the position gap |
 | `playlists_containing` | the reverse query a UI asks on selection |
+
+Every one of these is on the wire as a command, and answers as an event
+(`favourites_changed`, `playlists_changed`, `playlist_entries_changed`,
+`playlists_containing_changed`) rather than as a return value: the C ABI is
+asynchronous, so a host that expected a synchronous answer would block a thread
+waiting for something that already arrived.
+
+A library is opened with `Base::start_with_policy_and_library` in Rust or
+`NAE_BaseStartWithLibrary` in C. Without one, every library command reports
+"no library is open" instead of returning an empty list -- "you have no playlists"
+is a statement about the listener's music, not about this process.
 
 Positions inside a playlist stay dense: the UI addresses entries by index, and a
 hole would make `entry[3]` and `position 3` disagree. Deleting a playlist takes
@@ -278,9 +292,9 @@ runtime plugin ABI that only works on desktop.
   started through `analyze`.
 - The analysis worker count is fixed at start; there is no way to resize the pool
   while Base is running.
-- The library is not reachable through the command/event protocol yet: it is a
-  Rust API (`neiro_base::library`). Wiring it to `Command`/`Event` and the C ABI
-  is the next step, and until it is done a Swift or Android host cannot use it.
+- The library has no `most_played` command: the query exists in
+  `neiro_base::library` and is not on the wire yet, because no event shape was
+  agreed for it.
 - No plugin loader and no out-of-process UI transport yet; both boundaries are
   represented by serializable protocol types.
 - `set_policy` reopens the stream, which costs one device close and open. There
