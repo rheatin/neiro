@@ -99,6 +99,19 @@ pub(crate) fn new_batches() -> Batches {
     Arc::new(Mutex::new(Vec::new()))
 }
 
+/// Release a slot taken by `in_flight.insert`.
+///
+/// One function because the exit paths are several -- a dropped request, a
+/// cancelled decode, a failed decode -- and a slot that is released on some of
+/// them blacklists the path on the others. Rule 3: two consumers of one
+/// measurement go through one function.
+fn release(in_flight: &InFlight, key: &CacheKey) {
+    in_flight
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(key);
+}
+
 /// Account for one path finishing. Emits progress when it belongs to a batch.
 fn finish(batches: &Batches, path: &Path, events: &EventBus) {
     let mut guard = batches.lock().unwrap_or_else(|e| e.into_inner());
@@ -216,12 +229,27 @@ impl Target {
 /// spawner that dropped them would leave shutdown returning while a decode was
 /// still running -- the process could exit mid-decode with the decoder's buffers
 /// unreleased.
-pub(crate) type Spawner =
-    Arc<dyn Fn(usize) -> Option<std::thread::JoinHandle<()>> + Send + Sync>;
+/// Every analysis thread that has been started, so shutdown can join them all.
+///
+/// A resize spawns workers after startup, and those threads have to be joined
+/// too: `Base::stop_workers` joining only the ones started at boot lets a
+/// resize-spawned decode outlive `Base`, and the host may free the DLL while
+/// that thread is still inside crate code.
+pub(crate) type Threads = Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>;
+
+pub(crate) fn new_threads() -> Threads {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Starts a worker and records its handle.
+pub(crate) type Spawner = Arc<dyn Fn(usize) + Send + Sync>;
 
 /// Everything an analysis worker is handed at start.
 pub(crate) struct Worker {
     pub requests: Arc<Mutex<Receiver<Request>>>,
+    /// Slots currently occupied, shared with the control thread so a shrink
+    /// followed by a grow does not start a second thread on one slot.
+    pub live: Arc<Mutex<std::collections::HashSet<usize>>>,
     /// This worker's slot. A worker whose slot is past the target exits after
     /// the request it is on.
     pub index: usize,
@@ -238,6 +266,7 @@ pub(crate) struct Worker {
 pub(crate) fn run(worker: Worker) {
     let Worker {
         requests,
+        live,
         index,
         target,
         cache,
@@ -258,6 +287,11 @@ pub(crate) fn run(worker: Worker) {
         // The check therefore comes before the wait, and the wait is bounded so
         // a worker parked on the channel notices a shrink within a poll.
         if !target.wants(index) {
+            // Free the slot before leaving: a grow that arrives while this
+            // thread is still winding down must not see it as occupied forever.
+            live.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&index);
             return;
         }
         let request = {
@@ -312,6 +346,13 @@ pub(crate) fn run(worker: Worker) {
             // The cancel may have been raised between the check above and here;
             // publishing the token after it would start a decode nothing stops.
             if !request.explicit && !inner.keep.contains(&path) {
+                // The in-flight slot was taken above; leaving it set would make
+                // every later request for this path look like a duplicate and
+                // be dropped, blacklisting it for the life of the process. The
+                // two `keep` checks are separated by a metadata syscall and a
+                // cache lookup, so a skip landing in that window is ordinary.
+                drop(inner);
+                release(&in_flight, &key);
                 finish(&batches, &path, &events);
                 continue;
             }
@@ -330,10 +371,7 @@ pub(crate) fn run(worker: Worker) {
                 inner.by_id.remove(&id);
             }
         }
-        in_flight
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&key);
+        release(&in_flight, &key);
 
         // Cancelled: the result is a prefix of a decode, so it is neither cached
         // nor published. The request that cancelled it has already asked for
@@ -383,4 +421,41 @@ fn publish(
         analysis: Box::new(analysis),
         cached,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A batch of N paths must be fully accounted even when one of them is
+    /// dropped before a decode.
+    #[test]
+    fn a_batch_reaches_complete_when_a_path_is_dropped() {
+        let batches = new_batches();
+        let events = EventBus::default();
+        let (_ticket, rx) = events.subscribe();
+
+        let a = PathBuf::from("/music/a.flac");
+        let b = PathBuf::from("/music/b.flac");
+        batches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Batch::new(vec![a.clone(), b.clone()]));
+
+        finish(&batches, &a, &events);
+        finish(&batches, &b, &events);
+
+        // The last event says complete, and the total never changed.
+        let mut last = None;
+        while let Ok(event) = rx.try_recv() {
+            if let Event::PreanalysisProgress { total, complete, .. } = event {
+                last = Some((total, complete));
+            }
+        }
+        assert_eq!(
+            last,
+            Some((2, true)),
+            "the batch did not report completion"
+        );
+    }
 }

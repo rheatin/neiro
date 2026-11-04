@@ -451,7 +451,7 @@ const MAX_ANALYSIS_WORKERS: usize = 4;
 pub struct Base {
     handle: BaseHandle,
     control_thread: Option<JoinHandle<()>>,
-    analysis_threads: Vec<JoinHandle<()>>,
+    analysis_threads: analysis::Threads,
     registry: analysis::CancelRegistry,
 }
 
@@ -513,6 +513,10 @@ impl Base {
         let in_flight = analysis::new_in_flight();
         let workers = analysis_workers();
         let target = analysis::Target::new(workers);
+        let analysis_threads = analysis::new_threads();
+        let live = Arc::new(Mutex::new(
+            (0..workers).collect::<std::collections::HashSet<usize>>(),
+        ));
 
         // One spawn closure, used both at start and by a later resize. A resize
         // that spawned its own threads would be a second copy of this wiring,
@@ -526,6 +530,8 @@ impl Base {
             let registry = registry.clone();
             let batches = batches.clone();
             let target = target.clone();
+            let threads = analysis_threads.clone();
+            let live = live.clone();
             Arc::new(move |index: usize| {
                 let rx = analysis_rx.clone();
                 let cache = cache.clone();
@@ -535,11 +541,13 @@ impl Base {
                 let registry = registry.clone();
                 let batches = batches.clone();
                 let target = target.clone();
-                thread::Builder::new()
+                let worker_live = live.clone();
+                let thread = thread::Builder::new()
                     .name(format!("neiro-base-analysis-{index}"))
                     .spawn(move || {
                         analysis::run(analysis::Worker {
                             requests: rx,
+                            live: worker_live,
                             index,
                             target,
                             cache,
@@ -550,8 +558,13 @@ impl Base {
                             registry,
                             batches,
                         });
-                    })
-                    .ok()
+                    });
+                // Recorded under the shared list, so a thread started by a later
+                // resize is joined by the same shutdown path as the ones started
+                // here.
+                if let Ok(thread) = thread {
+                    threads.lock().unwrap_or_else(|e| e.into_inner()).push(thread);
+                }
             })
         };
 
@@ -562,6 +575,7 @@ impl Base {
         let cache_for_control = cache.clone();
         let target_for_control = target.clone();
         let spawn_for_control = spawner.clone();
+        let live_for_control = live.clone();
         let control_thread = thread::Builder::new()
             .name("neiro-base-control".into())
             .spawn(move || {
@@ -578,18 +592,15 @@ impl Base {
                     library,
                     target: target_for_control,
                     spawn: spawn_for_control,
+                    live: live_for_control,
                 });
             })
             .map_err(|e| BaseError::Spawn(e.to_string()))?;
 
-        let mut analysis_threads = Vec::with_capacity(workers);
         for index in 0..workers {
             // A worker that failed to start is not fatal: the pool is smaller
             // than intended, and the first request simply waits for a free slot.
-            // The handle is kept so shutdown can join it.
-            if let Some(thread) = spawner(index) {
-                analysis_threads.push(thread);
-            }
+            spawner(index);
         }
 
         Ok(Self {
@@ -620,7 +631,13 @@ impl Base {
         if let Some(thread) = self.control_thread.take() {
             let _ = thread.join();
         }
-        for thread in self.analysis_threads.drain(..) {
+        let threads: Vec<_> = self
+            .analysis_threads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        for thread in threads {
             let _ = thread.join();
         }
     }

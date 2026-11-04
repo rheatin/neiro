@@ -44,6 +44,7 @@ pub(crate) struct Start {
     /// The pool's target size, and the means to grow it.
     pub target: crate::analysis::Target,
     pub spawn: crate::analysis::Spawner,
+    pub live: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<usize>>>,
 }
 
 pub(crate) fn run(start: Start) {
@@ -60,6 +61,7 @@ pub(crate) fn run(start: Start) {
         library,
         target,
         spawn,
+        live,
     } = start;
     let mut control = Control {
         commands,
@@ -77,6 +79,7 @@ pub(crate) fn run(start: Start) {
         cache,
         target,
         spawn,
+        live,
         devices: Vec::new(),
         library,
         most_played_watched: None,
@@ -111,6 +114,10 @@ struct Control {
     cache: Arc<Mutex<Cache>>,
     target: analysis::Target,
     spawn: analysis::Spawner,
+    /// Slots a thread currently occupies, shared with the workers. A slot is
+    /// removed when its worker exits, so a shrink-then-grow cannot start two
+    /// threads on one index.
+    live: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<usize>>>,
     devices: Vec<DeviceInfo>,
     /// The favourites, playlists and play counts. `None` when Base was started
     /// without a library location -- the rest of Base works, and every library
@@ -674,11 +681,20 @@ impl Control {
         self.target.set(count);
         if count > before {
             for index in before..count {
-                // The handle is dropped here: the control thread does not join
-                // analysis workers, `Base::stop_workers` does, and a worker
-                // started by a resize joins the same shutdown path by exiting
-                // when the request channel closes.
-                drop((self.spawn)(index));
+                // A worker whose slot was cut has not necessarily noticed yet:
+                // it checks the target at the top of its loop, up to one poll
+                // (200 ms) or one decode later. Shrinking and growing within
+                // that window would start a second thread on the same slot,
+                // and both would see `wants(index)` true and neither would
+                // exit -- the pool runs at `count + duplicates` with a decoder
+                // each, which is what the bound exists to prevent.
+                //
+                // `live` is the set of slots a thread currently occupies; it is
+                // cleared when a worker notices it is past the target.
+                let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+                if live.insert(index) {
+                    (self.spawn)(index);
+                }
             }
         }
         self.events.emit(Event::AnalysisWorkersChanged {

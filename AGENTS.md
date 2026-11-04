@@ -141,6 +141,15 @@ changes; the script refuses a build whose configuration still enables
 A function is only reachable if it is in all three export lists. The DLL is
 loaded by name; an ordinal-only DLL cannot be used by the Rust binding.
 
+**`nae.def` and `nae.map` must agree exactly; `ffi.rs` may declare less.** It
+declares what the binding calls, and the binding calls the `NAE_Session*` form
+of every runtime setter -- `NAE_SetVolume` and `NAE_SessionSetVolume` are two
+entry points to one operation, and declaring both would be a second way to do
+the same thing. The rule that matters is the converse: a symbol the binding
+*uses* must be declared, or it fails to link. That was checked, and all 61 used
+symbols are declared. A handle-level export that no Rust code calls is
+reachable from C and from the CLI, which is why it stays exported.
+
 ## 8. PowerShell 5 will silently rewrite your UTF-8 files
 
 `Get-Content` without `-Encoding` reads a BOM-less UTF-8 file as the system ANSI

@@ -302,7 +302,13 @@ runtime plugin ABI that only works on desktop.
   Growing starts threads immediately; shrinking moves the target and each
   worker past it exits when it next becomes idle -- a worker never exits while
   holding a request, because the request is already off the channel and would
-  be lost.
+  be lost. A slot is tracked in a shared set so a shrink followed by a grow
+  within the worker's poll window does not start two threads on one index.
+- A worker that drops a request because the wanted set moved releases its
+  in-flight slot through `analysis::release`. That is not covered by a check:
+  the window between the two `keep` checks is a filesystem stat and a hash
+  lookup, and five timed attempts to land in it all missed -- a probabilistic
+  test that never fired is a test that cannot fail, so there is none.
 - The most-played list is refreshed after a play only if one is being watched,
   and at the limit of the last `list_most_played`. A host that never asked for
   one gets no event, which is the point: an event nobody subscribed to is work
