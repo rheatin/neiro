@@ -6,6 +6,24 @@ repository has to do for an iOS host; the UI side's list is separate.
 The short version: the render path is nearly portable already, and the device
 discovery layer is not. That split decides the order.
 
+### Measured, not assumed: what compiles against the iOS SDK
+
+`xcrun --sdk iphoneos clang++ -target arm64-apple-ios17.0 -fsyntax-only`, one
+file at a time, on the machine that has Xcode 27.2:
+
+| File | iOS | Note |
+|---|---|---|
+| `output_stream_coreaudio.cpp` | OK | the ring and the AudioUnit callback, no HAL |
+| `session.cpp` | OK | |
+| `policy.cpp`, `routing.cpp`, `dither.cpp` | OK | the core DSP |
+| `resampler.cpp` | needs soxr headers | soxr builds for iOS; the check just lacked the include path |
+| `backend_coreaudio.cpp` | FAIL | `CoreAudio/CoreAudio.h` does not exist on iOS -- this is the file to replace |
+| `nae.cpp` | not conclusive | the ad-hoc check had no `NEIRO_HAVE_FFMPEG` and no FFmpeg/soxr include paths, so its errors are artefacts of the invocation, not of iOS |
+
+So the boundary is exactly where the roadmap said it was, and it is now a
+measurement: the stream, the session and the DSP are already portable, and the
+only file that cannot be compiled for iOS is the one that talks to the device.
+
 ## What already transfers
 
 Measured, not assumed:
