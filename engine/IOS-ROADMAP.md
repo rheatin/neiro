@@ -106,6 +106,62 @@ things it cannot ask for itself:
 - **Rate changes are requests**: `preferredSampleRate` is advice. Read back what
   the route granted, and resample. Never report the request as the result.
 
+## An external DAC on iOS: what can be known, what can be done
+
+This is the question that decides how honest the UI can be about a USB DAC, so it
+is written down separately from the phases.
+
+### Detection: yes, at the level of "a route changed"
+
+- `AVAudioSession.currentRoute.outputs` gives one entry per active output: its
+  `portType`, `portName` and `uid`. A USB DAC (including the Lightning-to-USB
+  adapters and most dongles) arrives as `.usbAudio`. Bluetooth is
+  `.bluetoothA2DP` / `.bluetoothLE` / `.bluetoothHFP`; the jack is
+  `.headphones`; AirPlay is `.airPlay`.
+- `AVAudioSession.routeChangeNotification` reports `.newDeviceAvailable`,
+  `.oldDeviceUnavailable`, `.categoryChange`, `.override`. That is how a DAC being
+  plugged or pulled reaches the app.
+- There is **no** device list and **no** format list. iOS will not tell you which
+  rates or bit depths the DAC supports, nor let you enumerate several outputs.
+  `enumerate()` on iOS is one device, forever.
+
+### Control: the sample rate, as a request
+
+- `setPreferredSampleRate(_:)` asks. Read `AVAudioSession.sampleRate` back to learn
+  what the route granted; it can differ, and asking can itself reconfigure the
+  route (which arrives as a route change).
+- `setPreferredIOBufferDuration(_:)` is likewise a request.
+- `setCategory(.playback)` and `setActive(true)` decide whether the app may play at
+  all, and which routes it is allowed to use.
+
+### What is refused
+
+- **Bit depth.** The app side of the RemoteIO output is float32. Handing the unit
+  integer samples makes the unit convert them; it does not set the DAC's bit
+  depth and nothing confirms what the DAC received.
+- **Exclusive access.** The system mixer is always in the playback path. There is
+  no `kAudioDevicePropertyHogMode` equivalent. Another app playing will mix.
+- **DoP.** It needs 24 valid bits with no resampling. There is no integer
+  hardware format to ask for, and no way to prove the path stayed untouched.
+- **Hardware volume.** `outputVolume` is read-only; the volume buttons belong to
+  the system.
+- **Vendor commands.** No USB host API for audio class devices. Anything a DAC
+  offers beyond playback (filters, gain modes) is not reachable.
+
+### What the engine therefore reports on iOS
+
+```
+exclusiveSupported = 0
+bitPerfect         = 0, reason = SharedMode
+dopSupported       = 0
+nativeRate         = session.sampleRate   (what the route granted, not what we asked)
+nativeFormat       = f32
+```
+
+And the UI may honestly say: "USB DAC · 48 kHz · f32", because that is what the
+session reports. It may not say "bit-perfect", and it may not say which rate the
+DAC is capable of beyond the one the session is on.
+
 ## What the UI side needs to decide, and tell this side
 
 1. Who calls `AVAudioSession.setCategory` / `setActive`, and when. Proposed: the
