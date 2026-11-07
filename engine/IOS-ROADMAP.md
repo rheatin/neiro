@@ -162,6 +162,38 @@ And the UI may honestly say: "USB DAC · 48 kHz · f32", because that is what th
 session reports. It may not say "bit-perfect", and it may not say which rate the
 DAC is capable of beyond the one the session is on.
 
+## The process we promise
+
+The limits above are accepted, not argued with. What is not accepted is any
+doubt about *what happened*. For every capability the rule is the same:
+
+1. **Attempt the best thing.** Ask the system for the rate the file wants before
+   opening, not after.
+2. **Read back what was granted.** The request is not the result. `sampleRate`,
+   `IOBufferDuration`, `currentRoute` are read after the session has settled.
+3. **Report the outcome and its reason.** A capability that is refused is
+   reported as refused, with the reason code that already exists in `nae.h` --
+   not as a success with a caveat in a log, and not as silence.
+
+The table is the contract for iOS, written against the codes the engine already
+defines:
+
+| Capability | What we attempt | What iOS decides | What we report |
+|---|---|---|---|
+| Output rate | `setPreferredSampleRate(file rate)`, then read `sampleRate` | honoured, or coerced to the route's rate | equal: `resampling = 0`. differ: `resampling = 1`, `reason = RESAMPLED_TO_SUPPORTED_RATE (6)` |
+| Buffer latency | `setPreferredIOBufferDuration(50 ms)`, then read `IOBufferDuration` | honoured, or clamped | the measured value in `latencyMs`; never the request |
+| Bit depth | nothing to attempt: the app side is float32 | f32 only | `bitPerfect = 0`, `reason = SHARED_MODE (7)` |
+| Exclusive mode | nothing to attempt | the mixer is always in the path | `exclusiveSupported = 0`, `sharedSupported = 1` |
+| DoP | open at 176400 / 352800 and see if the session takes it | the rate may be granted; the integer path is not | `dopSupported = 0`; the DSD file plays as PCM and says so |
+| Volume | our own float gain | the system also has one, which we cannot read or set | unity: no reason. otherwise `reason = VOLUME_NOT_UNITY (8)` |
+| Device | `currentRoute` + route-change notifications | one route at a time | one device in `enumerate()`, never more |
+| Interruption | the host tells us | only the host can observe it | pause; the host decides whether to resume |
+| Route pulled | the notification arrives | the route is gone | `NAE_ERR_DEVICE_LOST`; handle, decoder and position stay valid |
+
+The last two rows are the ones a desktop never exercises, and they are the pair
+that most needs the process written down: the engine cannot see either event
+itself, so the contract with the host has to say who watches and who reports.
+
 ## What the UI side needs to decide, and tell this side
 
 1. Who calls `AVAudioSession.setCategory` / `setActive`, and when. Proposed: the
