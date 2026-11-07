@@ -235,7 +235,6 @@ using neiro::wasapi::readNativeFormat;
 using neiro::wasapi::remember;
 using neiro::wasapi::wrap;
 
-static std::atomic<uint32_t> g_capsGeneration{1};
 
 // ---- 能力声明的来源 --------------------------------------------------------
 //
@@ -387,92 +386,6 @@ bool tryInitialize(IMMDevice* device, bool exclusive, const WAVEFORMATEX& native
 
 // The rates worth asking about.
 //
-// WASAPI offers no way to enumerate what an endpoint will accept, so the only
-// honest source is trying. These are the rates a driver is plausibly willing to
-// open; the list is not exhaustive and does not pretend to be -- it is a
-// candidate set, and a rate that is missing from it is treated as unsupported
-// only when the probe succeeds, so a rate nobody thought of here costs nothing.
-constexpr uint32_t kCandidateRates[] = {
-    8000,   11025,  16000,  22050,  32000,  44100,  48000,  64000,
-    88200,  96000,  176400, 192000, 352800, 384000, 768000,
-};
-
-// Cache of the last probe.
-//
-// Keyed by device id *and* by the endpoint's native rate, because the two
-// together identify the format situation, and a rate list belongs to a specific
-// endpoint in a specific state. A cache keyed on the device alone would keep
-// answering for a monitor that has since been unplugged and replaced by one
-// with a different list, which is the failure this whole change exists to stop.
-//
-// Guarded: two sessions opened concurrently both reach the probe, and an
-// unguarded std::string + std::vector here is a data race, not just a slow
-// duplicate probe. The lock also serialises the exclusive Initialize calls,
-// which would otherwise fight over the endpoint.
-struct RateCache {
-    std::string deviceId;
-    uint32_t nativeRate = 0;
-    std::vector<uint32_t> rates;
-    bool probed = false;
-};
-
-RateCache& rateCache() {
-    static RateCache cache;
-    return cache;
-}
-
-std::mutex& rateCacheMutex() {
-    static std::mutex m;
-    return m;
-}
-
-// Ask the driver which of the candidate rates it will open exclusively.
-//
-// The subtlety that makes this correct rather than merely plausible: a probe
-// where *nothing* succeeds usually means the endpoint is held by another
-// application, not that the driver dislikes every rate. Those look identical from
-// outside -- both surface as AUDCLNT_E_ENDPOINT_CREATE_FAILED -- and they have
-// opposite consequences. Believing the second and caching an empty list would
-// make the engine permanently refuse to open the device, on a machine where it
-// works, for the rest of the process. So an empty result is reported as "not
-// probed" and the caller keeps its old behaviour.
-std::vector<uint32_t> probeSupportedRates(IMMDevice* device, const WAVEFORMATEX& native,
-                                          uint16_t nativeValidBits, bool* probed) {
-    std::vector<uint32_t> found;
-    *probed = false;
-
-    for (const uint32_t rate : kCandidateRates) {
-        ComPtr<IAudioClient> probe;
-        if (FAILED(neiro::wasapi::activate(device, __uuidof(IAudioClient), probe.GetAddressOf())) ||
-            !probe) {
-            return {};
-        }
-
-        WAVEFORMATEXTENSIBLE want = wrap(&native, nativeValidBits);
-        want.Format.nSamplesPerSec = rate;
-        const uint16_t bytesPerSample = static_cast<uint16_t>(want.Format.wBitsPerSample / 8);
-        want.Format.nBlockAlign = static_cast<WORD>(bytesPerSample * want.Format.nChannels);
-        want.Format.nAvgBytesPerSec = want.Format.nSamplesPerSec * want.Format.nBlockAlign;
-
-        // `probe` is released by the ComPtr at the end of this iteration, before
-        // the next candidate is tried. Holding it while trying the next rate
-        // would make the endpoint busy with our own probe and every later
-        // candidate would fail for that reason alone.
-        if (SUCCEEDED(probe->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, 0, 0, 0, &want.Format,
-                                        nullptr))) {
-            found.push_back(rate);
-        }
-    }
-
-    // Nothing at all worked, including the endpoint's own advertised rate. That
-    // is contention or a device that has gone away, not a capability answer.
-    if (found.empty()) return {};
-
-    *probed = true;
-    std::sort(found.begin(), found.end());
-    return found;
-}
-
 
 }  // namespace
 #endif  // _WIN32
@@ -3197,13 +3110,13 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
     // 352.8 kHz, the mode says "352.8 kHz", Initialize refuses, and the listener
     // is told their file is unsupported. It is not; the driver simply does not do
     // 352.8 kHz, and every other file in the library plays.
-    RateCache& cache = rateCache();
+    neiro::wasapi::RateCache& cache = neiro::wasapi::rateCache();
     std::vector<uint32_t> cachedRates;
     {
-        std::lock_guard<std::mutex> lock(rateCacheMutex());
+        std::lock_guard<std::mutex> lock(neiro::wasapi::rateCacheMutex());
         if (cache.deviceId != deviceId || cache.nativeRate != native.nSamplesPerSec) {
             bool probed = false;
-            cache.rates = probeSupportedRates(device.Get(), native, nativeValidBits, &probed);
+            cache.rates = neiro::wasapi::probeSupportedRates(device.Get(), native, nativeValidBits, &probed);
             cache.deviceId = deviceId;
             cache.nativeRate = native.nSamplesPerSec;
             cache.probed = probed;
@@ -5495,122 +5408,11 @@ void NAE_Shutdown(void) NAE_NOEXCEPT {}
 #ifdef _WIN32
 int32_t NAE_QueryDeviceCaps(const char* deviceId, int32_t shareMode,
                             NAE_DeviceCaps* out) NAE_NOEXCEPT {
-    if (!out || out->structSize != sizeof(NAE_DeviceCaps)) return NAE_ERR_INVALID_ARGUMENT;
-    std::memset(out, 0, sizeof(*out));
-    out->structSize = sizeof(*out);
-    out->version = NAE_DEVICE_CAPS_VERSION;
-    out->backend = NAE_BACKEND_WASAPI;
-    out->shareMode = (shareMode == NAE_SHARE_MODE_SHARED) ? NAE_SHARE_MODE_SHARED
-                                                          : NAE_SHARE_MODE_EXCLUSIVE;
-    out->hotplug = 1;
-    out->exclusiveSupported = 1;
-    out->sharedSupported = 1;
-    out->supportedShareModes = (1u << NAE_SHARE_MODE_EXCLUSIVE) |
-                               (1u << NAE_SHARE_MODE_SHARED);
-
-    if (FAILED(ensureCom())) return NAE_ERR_COM;
-
-    std::unique_ptr<char, void (*)(void*)> defaultIdFree(nullptr, [](void* p) { std::free(p); });
-    std::string resolvedId;
-    if (!deviceId || !deviceId[0]) {
-        char* def = NAE_GetDefaultDeviceId();
-        if (!def || !*def) {
-            if (def) std::free(def);
-            return NAE_ERR_NO_DEVICE;
-        }
-        defaultIdFree.reset(def);
-        resolvedId = def;
-        deviceId = resolvedId.c_str();
-        out->isDefault = 1;
-    }
-
-    ComPtr<IMMDeviceEnumerator> enumerator;
-    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&enumerator))) ||
-        !enumerator) {
-        return NAE_ERR_NO_DEVICE;
-    }
-    ComPtr<IMMDevice> device;
-    if (FAILED(enumerator->GetDevice(std::wstring(deviceId, deviceId + std::strlen(deviceId)).c_str(),
-                                     &device)) ||
-        !device) {
-        return NAE_ERR_NO_DEVICE;
-    }
-
-    std::snprintf(out->id, sizeof(out->id), "%s", deviceId);
-    std::snprintf(out->name, sizeof(out->name), "%s", deviceId);
-
-    WAVEFORMATEX native{};
-    uint16_t nativeValid = 0;
-    if (!readNativeFormat(device.Get(), &native, &nativeValid)) return NAE_ERR_NO_NATIVE_FORMAT;
-    out->probed |= NAE_CAPS_PROBED_NATIVE | NAE_CAPS_PROBED_FORMATS | NAE_CAPS_PROBED_LAYOUTS;
-    out->nativeRate = native.nSamplesPerSec;
-    out->nativeChannels = native.nChannels;
-    out->nativeValidBits = nativeValid ? nativeValid : native.wBitsPerSample;
-    out->nativeContainerBits = native.wBitsPerSample;
-    out->maxChannels = native.nChannels;
-    if (native.wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-        out->nativeFormat = native.wBitsPerSample == 64 ? NAE_SAMPLE_FORMAT_F64
-                                                        : NAE_SAMPLE_FORMAT_F32;
-    } else if (out->nativeValidBits == 16) {
-        out->nativeFormat = NAE_SAMPLE_FORMAT_S16;
-    } else if (out->nativeValidBits == 24 && out->nativeContainerBits == 32) {
-        out->nativeFormat = NAE_SAMPLE_FORMAT_S24_IN_32;
-    } else if (out->nativeValidBits == 24) {
-        out->nativeFormat = NAE_SAMPLE_FORMAT_S24;
-    } else if (out->nativeValidBits == 32) {
-        out->nativeFormat = NAE_SAMPLE_FORMAT_S32;
-    } else {
-        out->nativeFormat = NAE_SAMPLE_FORMAT_UNKNOWN;
-    }
-    out->formatCount = 1;
-    out->formats[0].format = out->nativeFormat;
-    out->formats[0].validBits = out->nativeValidBits;
-    out->formats[0].containerBits = out->nativeContainerBits;
-    out->layoutCount = 1;
-    switch (native.nChannels) {
-        case 1: out->nativeChannelMask = NAE_LAYOUT_MONO; break;
-        case 2: out->nativeChannelMask = NAE_LAYOUT_STEREO; break;
-        case 6: out->nativeChannelMask = NAE_LAYOUT_5_1; break;
-        case 8: out->nativeChannelMask = NAE_LAYOUT_7_1; break;
-        default: out->nativeChannelMask = 0; break;
-    }
-    out->layouts[0] = out->nativeChannelMask;
-
-    bool probed = false;
-    std::vector<uint32_t> rates;
-    {
-        // The probe takes fresh exclusive clients, so it is serialised against
-        // every other probe in the process: two sequences at once fight over
-        // the endpoint and each misreads the other as "no rates".
-        std::lock_guard<std::mutex> lock(rateCacheMutex());
-        rates = probeSupportedRates(device.Get(), native, nativeValid, &probed);
-    }
-    // The probe opens exclusive streams. Do not report its result for a shared
-    // query: shared can accept a different set, and claiming exclusive's answer
-    // for shared is the same class of lie as a hardcoded capability string.
-    if (probed && out->shareMode == NAE_SHARE_MODE_EXCLUSIVE) {
-        out->probed |= NAE_CAPS_PROBED_RATES | NAE_CAPS_PROBED_DOP;
-        out->rateCount = static_cast<uint32_t>(
-            std::min<size_t>(rates.size(), NAE_MAX_DEVICE_RATES));
-        for (uint32_t i = 0; i < out->rateCount; ++i) out->rates[i] = rates[i];
-        for (uint32_t carrier : {176400u, 352800u, 705600u}) {
-            if (std::find(rates.begin(), rates.end(), carrier) == rates.end()) continue;
-            if (out->dopCarrierCount < NAE_MAX_DOP_CARRIERS) {
-                out->dopCarriers[out->dopCarrierCount++] = carrier;
-            }
-        }
-        out->dopSupported = out->dopCarrierCount > 0 ? 1 : 0;
-    }
-    // Native DSD. WASAPI defines no 1-bit stream format, so this backend can
-    // answer the question but the answer is no. Reporting it as probed is the
-    // point: 0 with the bit clear means "not asked", which policy must treat
-    // differently from "asked and unavailable".
-    out->probed |= NAE_CAPS_PROBED_NATIVE_DSD;
-    out->nativeDsdSupported = 0;
-    out->nativeDsdRateCount = 0;
-    out->capsGeneration = ++g_capsGeneration;
-    return NAE_OK;
+    // The device knowledge lives with the device layer. This used to be the
+    // second place that asked a WASAPI endpoint about itself, beside the open;
+    // two readers of one device is how `supportedShareModes` once ended up
+    // contradicting `exclusiveSupported`.
+    return neiro::wasapi::queryWasapiCaps(deviceId, shareMode, out);
 }
 #else
 // macOS: the backend already knows how to ask the HAL. Threading through it
@@ -5643,8 +5445,8 @@ int32_t NAE_QuerySupportedRates(NAE_Handle* handle, uint32_t* rates, uint32_t ca
     std::vector<uint32_t> cached;
     bool probed = false;
     {
-        std::lock_guard<std::mutex> lock(rateCacheMutex());
-        const RateCache& cache = rateCache();
+        std::lock_guard<std::mutex> lock(neiro::wasapi::rateCacheMutex());
+        const neiro::wasapi::RateCache& cache = neiro::wasapi::rateCache();
         probed = cache.probed;
         cached = cache.rates;
     }

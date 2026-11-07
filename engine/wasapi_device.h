@@ -33,6 +33,12 @@
 /// let the engine and the device layer disagree about why the open failed.
 extern thread_local HRESULT g_lastHr;
 
+#include "nae.h"
+
+#include <mutex>
+#include <string>
+#include <vector>
+
 namespace neiro::wasapi {
 
 /// Record and pass through an HRESULT, so a caller can report it later.
@@ -182,5 +188,30 @@ inline WAVEFORMATEXTENSIBLE wrap(const WAVEFORMATEX* src, uint16_t validBits) {
                                                                 : KSDATAFORMAT_SUBTYPE_PCM;
     return out;
 }
+
+/// The rates a driver is plausibly willing to open, and the cache of the last
+/// probe. Here rather than in `nae.cpp` because two call sites need them and the
+/// probe belongs with the device, not with the engine's policy.
+struct RateCache {
+    std::string deviceId;
+    uint32_t nativeRate = 0;
+    std::vector<uint32_t> rates;
+    bool probed = false;
+};
+
+RateCache& rateCache();
+std::mutex& rateCacheMutex();
+std::vector<uint32_t> probeSupportedRates(IMMDevice* device, const WAVEFORMATEX& native,
+                                          uint16_t nativeValidBits, bool* probed);
+
+/// Everything the engine asks a WASAPI endpoint about itself. One owner, next
+/// to the open, so the answer a host reads and the format a stream negotiates
+/// cannot come from different code.
+int32_t queryWasapiCaps(const char* deviceId, int32_t shareMode,
+                        NAE_DeviceCaps* out) NAE_NOEXCEPT;
+
+/// Bumped on every successful caps query, so a host can tell a fresh answer from
+/// a cached one.
+inline std::atomic<uint32_t> g_capsGeneration{1};
 
 }  // namespace neiro::wasapi
