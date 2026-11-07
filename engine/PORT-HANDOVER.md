@@ -191,6 +191,32 @@ carries `eventDriven` and `pacingNote`, and an open under `NAE_TRACE` prints
 answer to a question that used to have none: before this, a silent fallback to
 timer pacing looked exactly like a healthy run.
 
+### Moving the Windows caps query behind the device layer: why it is two steps
+
+The audit's remaining item is that `NAE_QueryDeviceCaps` still asks the device
+from `nae.cpp` while the open asks it from `backend_wasapi.cpp`. The obvious move
+(copy the function across) fails, and the compiler says exactly why:
+
+- it calls `probeSupportedRates(...)` and takes `rateCacheMutex()`, both defined
+  in `nae.cpp` and **also used at `nae.cpp:3202`** by the supported-rates export;
+- it uses `ensureCom` / `readNativeFormat`, which are in `namespace
+  neiro::wasapi` and need qualifying once the body leaves that namespace;
+- it increments `g_capsGeneration`, a static that has to move with it.
+
+So it is two steps, in this order:
+
+1. Move `rateCacheMutex()` and `probeSupportedRates()` into `wasapi_device.h`
+   (or a small `wasapi_rates.cpp`), and make `nae.cpp:3202` call them there. That
+   step is behaviour-neutral and can be checked with `nae_test` alone.
+2. Move `queryWasapiCaps` into `backend_wasapi.cpp`, declare it in
+   `wasapi_device.h`, and reduce the export to a call. Check with
+   `backend_check` on both the default device and an explicit id, because the
+   caps path is what a host reads when it draws a format selector.
+
+I started step 1 and step 2 together and reverted: the branch compiled only after
+qualifying half the helpers, and the rate cache made it a two-file change with an
+unrelated call site. Doing them in that order keeps each commit verifiable.
+
 ### What the Windows backend slice actually requires
 
 Not a file move. On Windows `NAE_Play(handle, ms)` calls
