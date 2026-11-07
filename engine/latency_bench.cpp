@@ -158,6 +158,19 @@ int main(int argc, char** argv) {
     const int wantSlices = wantSeconds * 1000 / kSliceMs;
     const double durationSec = durationMs / 1000.0;
 
+    // A benchmark is only a benchmark over enough slices. Asked for 6 s on a 1 s
+    // file, the loop below breaks at the end of the source and the medians are
+    // computed over whatever ran -- numbers that look like a measurement and are
+    // an artefact of the fixture. Say so instead.
+    if (durationSec > 0.0 && durationSec < wantSeconds + 0.1) {
+        std::fprintf(stderr,
+                     "fixture too short: %.1f s of audio, but %d s of playback were "
+                     "requested. Pass --seconds %d or use a longer file.\n",
+                     durationSec, wantSeconds, static_cast<int>(durationSec));
+        NAE_Close(h);
+        return 2;
+    }
+
     std::vector<double> fifoDepths;
     int shortRenders = 0;
     int slices = 0;

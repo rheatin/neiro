@@ -124,8 +124,12 @@ int main(int argc, char** argv) {
           "paused sink writes nothing");
     NAE_Resume(handle);
 
-    // Play in slices until the file ends.
-    for (int i = 0; i < 400 && capture.bytes.size() < source.size(); ++i) {
+    // Play in slices until the file ends. The budget is derived from the file:
+    // a fixed 400 slices is 8 s, and a longer DSD file simply ran out of loop
+    // before it ran out of audio -- which then failed as "the sink received
+    // every byte", a claim about the engine that was about the cap.
+    const int maxSlices = static_cast<int>(durationMs / 20.0) + 100;
+    for (int i = 0; i < maxSlices && capture.bytes.size() < source.size(); ++i) {
         const int32_t rc = NAE_PlayNativeDsd(handle, 20);
         if (rc != NAE_OK) {
             check(false, "play returned an error", std::to_string(rc));

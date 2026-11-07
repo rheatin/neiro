@@ -102,6 +102,40 @@ impl Cache {
         self.max_entries = self.max_entries.max(count.max(1));
     }
 
+
+    /// Move every entry for `from` onto `to`, returning how many moved.
+    ///
+    /// The key is path + size + mtime + analyzer version, and a rename changes
+    /// only the first. Without this a moved file is decoded again for no reason
+    /// -- the bytes, the timestamp and the analyzer are all the same -- and a
+    /// library reorganisation costs one decode per file for nothing.
+    ///
+    /// An entry already at the destination wins: it measured the file that is
+    /// there, and this one measured a file that is no longer at its path.
+    pub fn rename_path(&mut self, from: &Path, to: &Path) -> usize {
+        let keys: Vec<CacheKey> = self
+            .map
+            .keys()
+            .filter(|key| key.path == from)
+            .cloned()
+            .collect();
+        let mut moved = 0;
+        for mut key in keys {
+            let Some(value) = self.map.remove(&key) else {
+                continue;
+            };
+            self.order.retain(|k| k != &key);
+            key.path = to.to_path_buf();
+            if self.map.contains_key(&key) {
+                continue;
+            }
+            self.map.insert(key.clone(), value);
+            self.order.push_back(key);
+            moved += 1;
+        }
+        moved
+    }
+
     /// The current bound, for a check that needs to see it grow.
     #[cfg(test)]
     pub fn capacity(&self) -> usize {
@@ -155,5 +189,53 @@ mod tests {
         cache.put(key(2), value);
         assert!(cache.get(&key(0)).is_some(), "the touched entry survived");
         assert!(cache.get(&key(1)).is_none(), "the untouched one was evicted");
+    }
+
+    /// A rename keeps the measurement: the bytes did not change, so the entry
+    /// must not be thrown away and the file must not be decoded twice.
+    #[test]
+    fn a_rename_carries_the_entry() {
+        use neiro_audio::Analysis;
+        let mut cache = Cache::with_capacity(8);
+        let key = CacheKey {
+            path: PathBuf::from("/m/a.flac"),
+            len: 10,
+            modified_ns: Some(1),
+            analyzer_version: 1,
+        };
+        let analysis = Analysis::default();
+        cache.put(key.clone(), analysis);
+
+        assert_eq!(cache.rename_path(Path::new("/m/a.flac"), Path::new("/m/b.flac")), 1);
+
+        let moved = CacheKey {
+            path: PathBuf::from("/m/b.flac"),
+            ..key.clone()
+        };
+        assert!(cache.get(&moved).is_some(), "the entry followed the file");
+        assert!(cache.get(&key).is_none(), "and is gone from the old path");
+    }
+
+    /// An entry already at the destination is the better measurement.
+    #[test]
+    fn a_rename_does_not_overwrite_a_measurement_at_the_destination() {
+        use neiro_audio::Analysis;
+        let mut cache = Cache::with_capacity(8);
+        let old = CacheKey {
+            path: PathBuf::from("/m/a.flac"),
+            len: 10,
+            modified_ns: Some(1),
+            analyzer_version: 1,
+        };
+        let new = CacheKey {
+            path: PathBuf::from("/m/b.flac"),
+            len: 10,
+            modified_ns: Some(1),
+            analyzer_version: 1,
+        };
+        cache.put(old.clone(), Analysis::default());
+        cache.put(new.clone(), Analysis::default());
+        assert_eq!(cache.rename_path(Path::new("/m/a.flac"), Path::new("/m/b.flac")), 0);
+        assert!(cache.get(&new).is_some());
     }
 }

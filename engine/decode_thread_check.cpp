@@ -44,6 +44,16 @@ int main(int argc, char** argv) {
     check(active, "decode thread is the producer", stats ? stats : "(null)");
     if (stats) NAE_FreeString(stats);
 
+    // The measurement below plays 500 ms and requires the position to move by at
+    // least 100 ms. A shorter file reaches its end first and the reading would be
+    // about the fixture.
+    if (durationMs > 0.0 && durationMs < 600.0) {
+        std::fprintf(stderr,
+                     "fixture too short: %.0f ms; this check plays 500 ms and needs the "
+                     "position to move, so it needs at least 600 ms.\n",
+                     durationMs);
+        return 2;
+    }
     double before = NAE_Position(handle);
     for (int i = 0; i < 25; ++i) NAE_Play(handle, 20);
     double after = NAE_Position(handle);

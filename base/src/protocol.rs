@@ -68,11 +68,82 @@ pub struct VisualFrame {
     pub envelope_hop_ms: f64,
 }
 
+/// One row of the browsing index.
+///
+/// These are the file's own tags, cached so a list can be drawn without opening
+/// every file. `duration_ms`, `sample_rate`, `bits` and `channels` come from the
+/// decode, not from the tag frame -- a WAV carries no duration in its tags, and
+/// the engine already knows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackRow {
+    pub path: PathBuf,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub disc_no: i64,
+    pub track_no: i64,
+    pub year: i64,
+    pub genre: String,
+    pub duration_ms: i64,
+    pub sample_rate: i64,
+    pub bits: i64,
+    pub channels: i64,
+}
+
+/// One album, as the index groups them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlbumSummary {
+    pub album: String,
+    pub album_artist: String,
+    pub year: i64,
+    pub track_count: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtistSummary {
+    pub artist: String,
+    pub track_count: i64,
+    pub album_count: i64,
+}
+
 /// A track and how many times it has been played.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayedTrack {
     pub path: PathBuf,
     pub play_count: i64,
+}
+
+
+/// One file that was renamed rather than deleted and added.
+///
+/// Detected by size and timestamp within a single reconciliation, which is why
+/// this crate needs no persistent id column: the pairing rule is the identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Move {
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+/// The field names one tag family accepts, in the family's own vocabulary.
+///
+/// The names are not shared between families: ID3v2 calls the title `TIT2`,
+/// Vorbis comments call it `TITLE`, APE calls it `Title`. A control that
+/// offers fields has to know which family it is offering them for.
+
+/// How many items `ListRemote` asks for when the caller does not say.
+///
+/// A page, not the library: a host that wants everything pages through it, and
+/// a default that fetched ten thousand items would be the slowest possible
+/// first request.
+fn default_remote_limit() -> usize {
+    200
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TagKeyList {
+    pub family: crate::tag::TagFamily,
+    pub keys: Vec<String>,
 }
 
 /// One output endpoint, as the engine enumerated it.
@@ -429,6 +500,181 @@ pub enum Command {
     ListMostPlayed {
         limit: usize,
     },
+    /// The browsing index: one page of tracks, album/artist order.
+    ListTracks {
+        offset: usize,
+        limit: usize,
+    },
+    ListAlbums,
+    ListArtists,
+    /// Substring match over title, artist, album and album artist.
+    Search {
+        query: String,
+        limit: usize,
+    },
+    /// Read these files' tags into the index.
+    ///
+    /// A scan fills the index on its own; this is for a host that already has
+    /// paths from somewhere else, and for re-indexing after a tag write.
+    IndexTags {
+        paths: Vec<PathBuf>,
+    },
+    // ---- tags -----------------------------------------------------------
+    //
+    // A file's own text. Not library state: the file is the owner, and an
+    // answer describes one file at the moment it was read. The write goes
+    // through a copy and a rename (`tag.rs`), so it costs a file copy and
+    // belongs on the control thread rather than on the caller's.
+
+    /// Read one file's tags. Answered as a `tags_read` event.
+    ReadTags {
+        path: PathBuf,
+    },
+    /// Write fields into one file. Answered as `tags_changed` once the
+    /// replacement is in place, or as an `error` with `op` `"tags"`.
+    ///
+    /// `policy` has no default on purpose. Which families to write is the
+    /// caller's decision, and a default would make it here: an empty policy
+    /// writes nothing, and a preset one would pick ID3v2 or Vorbis on the
+    /// caller's behalf.
+    WriteTags {
+        path: PathBuf,
+        fields: Vec<crate::tag::TagFieldValue>,
+        policy: crate::tag::TagPolicy,
+    },
+    /// The field names a family accepts, for a control to offer.
+    ///
+    /// Answered as `tag_keys_changed`. An empty `families` asks for all of
+    /// them: the answer depends on the family and on no file, so a host asks
+    /// once instead of per selection.
+    ListTagKeys {
+        #[serde(default)]
+        families: Vec<crate::tag::TagFamily>,
+    },
+    /// The pictures a file embeds. Answered as `artwork_read`.
+    ///
+    /// Two questions in one command, because they are asked at different
+    /// moments and only one of them is expensive:
+    ///
+    /// * `index` absent lists every picture with its type and size, and carries
+    ///   no bytes. A tag editor opens with this.
+    /// * `index` present also carries that picture's bytes, base64, for a view
+    ///   that has to draw it.
+    ///
+    /// Splitting them keeps a track change from moving a megabyte of cover art
+    /// through the bridge when the library grid already has a thumbnail.
+    ReadArtwork {
+        path: PathBuf,
+        #[serde(default)]
+        index: Option<usize>,
+    },
+    /// Put a picture into one family. Answered as `artwork_changed`.
+    ///
+    /// The family is named because pictures live in one: a file can carry the
+    /// same cover in ID3v2 and in APE, each with its own list, so an index
+    /// without a family addresses nothing.
+    ///
+    /// `index` present replaces that picture in the family's list; absent
+    /// appends. `data` is base64, the same form `artwork_read` answers with.
+    SetArtwork {
+        path: PathBuf,
+        family: crate::tag::TagFamily,
+        #[serde(default)]
+        index: Option<usize>,
+        data: String,
+        #[serde(default)]
+        mime: Option<String>,
+        /// The `PictureType` name. Absent means `CoverFront`: a caller that has
+        /// bytes and nothing else is asking for a cover.
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    /// Remove one picture from one family. Answered as `artwork_changed`.
+    RemoveArtwork {
+        path: PathBuf,
+        family: crate::tag::TagFamily,
+        index: usize,
+    },
+    // ---- remote (Jellyfin) ----------------------------------------------
+    //
+    // A remote library is fetched into local files and then played as files.
+    // The engine stays audio-only and path-based: streaming would make its DSD
+    // path, its analysis cache and its bit-perfect accounting each answer a
+    // question about a URL they cannot measure.
+
+    /// Point the remote worker at a server, or at nothing when `token` is
+    /// empty. Answered as `remote_changed`.
+    ///
+    /// `cache_dir` is where downloaded files land. It has to be stable across
+    /// runs, because favourites and playlists are stored by path and a cache
+    /// directory that moved would orphan them.
+    SetRemote {
+        /// `null` disconnects. The two backends are tagged: Jellyfin has a
+        /// token header, Navidrome signs every request with a salt.
+        server: Option<crate::remote::Server>,
+        cache_dir: PathBuf,
+    },
+    /// List the server's audio items. Answered as `remote_listed`.
+    ListRemote {
+        #[serde(default)]
+        start: usize,
+        #[serde(default = "default_remote_limit")]
+        limit: usize,
+    },
+    /// Download one listed item into the cache. Answered as `remote_fetched`.
+    ///
+    /// The id is resolved against the last listing, so a fetch can only name
+    /// something the server actually reported. A guess would put a file in the
+    /// cache under a name the caller never saw.
+    FetchRemote {
+        id: String,
+    },
+    /// The cover of one listed track. Answered as `remote_artwork`, or as
+    /// `remote_artwork` with no data when the server says there is none.
+    FetchRemoteArtwork {
+        id: String,
+    },
+    /// The server's playlists. Answered as `remote_playlists`.
+    ListRemotePlaylists,
+    /// The entries of one server playlist. Answered as `remote_playlist_items`.
+    ListRemotePlaylistItems {
+        id: String,
+        #[serde(default)]
+        start: usize,
+        #[serde(default = "default_remote_limit")]
+        limit: usize,
+    },
+    // ---- local folders ---------------------------------------------------
+    //
+    // Scanning and watching are Base's job now. Earlier this layer deliberately
+    // did not scan, on the grounds that a host that supplies paths keeps Base
+    // from becoming a media library. A folder the listener added is a fact
+    // about the music, not about the host, and two hosts would disagree about
+    // it -- so it lives here, next to the favourites that name the same files.
+
+    /// Walk a folder and answer every audio file under it.
+    ScanFolder {
+        root: PathBuf,
+    },
+    /// Report changes under a folder from now on. Answered as `folder_watched`.
+    WatchFolder {
+        root: PathBuf,
+    },
+    UnwatchFolder {
+        root: PathBuf,
+    },
+    /// Reconcile every watched root this often, on the folder worker.
+    /// Answered as `reconcile_changed`. Zero turns it off.
+    ///
+    /// The reason this exists: a watcher reports the failures it is told about,
+    /// and a network share loses events silently. A periodic reconciliation is
+    /// the only thing that can see a silent loss, and it is cheap -- a 3,585
+    /// file library over SMB walks in about six seconds.
+    SetReconcileInterval {
+        seconds: u64,
+    },
     /// Start or stop forwarding visualiser frames.
     ///
     /// `None` stops. The interval is what the host can draw: a 60 Hz view asks
@@ -439,8 +685,8 @@ pub enum Command {
     },
     /// Analyze a batch of paths ahead of playback.
     ///
-    /// Base does not scan directories: the host supplies the paths, which keeps
-    /// this layer from growing into a media library. Each path is decoded once
+    /// The paths come from the host -- or from `ScanFolder`, which reports a
+    /// tree without deciding anything about it. Each path is decoded once
     /// and cached; results arrive as the usual `analysis_ready` events, and
     /// `preanalysis_progress` reports how far the batch has got.
     ///
@@ -507,6 +753,155 @@ pub enum Event {
     ResolvedPathChanged {
         resolved: serde_json::Value,
     },
+    /// A tag write landed: the file now carries these families.
+    ///
+    /// Emitted after the replacement is in place, so a subscriber that reads
+    /// the file sees the new tags. The fields themselves are not carried --
+    /// asking the file is one call and cannot disagree with it.
+    TagsChanged {
+        path: PathBuf,
+        families: Vec<crate::tag::TagFamily>,
+    },
+    /// One file's tags, after a `ReadTags`.
+    ///
+    /// `families` is what the file carries; `writable` is what the container
+    /// can be written with. They are two questions: a FLAC carries Vorbis
+    /// comments and can be written with them, while a WAV carrying an ID3v2
+    /// chunk may still have no ID3v1 to write. A UI draws its write choices
+    /// from `writable` and its family columns from `families`.
+    TagsRead {
+        path: PathBuf,
+        families: Vec<crate::tag::TagFamily>,
+        writable: Vec<crate::tag::TagFamily>,
+        /// Every field, each with the family it came from. Two families can
+        /// disagree about one key, which is why the family is carried rather
+        /// than merged.
+        fields: Vec<crate::tag::TagFieldValue>,
+    },
+    /// The field names each family accepts, after a `ListTagKeys`.
+    TagKeysChanged {
+        lists: Vec<TagKeyList>,
+    },
+    /// A file's embedded pictures, after a `ReadArtwork`.
+    ///
+    /// `pictures` always lists what is there. `data` is present only when the
+    /// command named an index, and it is that picture's bytes, base64: the
+    /// bridge is one JSON string and a picture is not text. `mime` comes from
+    /// the tag itself and may be absent -- a file that does not say what its
+    /// picture is has not told us, and guessing from the first bytes here would
+    /// be a second opinion the file never gave.
+    ArtworkRead {
+        path: PathBuf,
+        pictures: Vec<crate::tag::ArtworkInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+    },
+    /// The remote session, after `SetRemote`.
+    ///
+    /// The token is not carried. An event is what a host logs and a UI shows,
+    /// and a token in either is a token that leaks.
+    RemoteChanged {
+        configured: bool,
+        /// Which protocol, so a host can label the connection.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_dir: Option<PathBuf>,
+    },
+    /// The server's audio items, after `ListRemote`.
+    RemoteListed {
+        tracks: Vec<crate::remote::RemoteTrack>,
+    },
+    /// A track's cover, after `FetchRemoteArtwork`.
+    ///
+    /// `data` is base64 for the same reason the local artwork is: the bridge is
+    /// one JSON string. Absent means the server has no picture for this track,
+    /// which is a normal answer and not a failure.
+    RemoteArtwork {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+    },
+    /// The server's playlists, after `ListRemotePlaylists`.
+    RemotePlaylists {
+        playlists: Vec<crate::remote::RemotePlaylist>,
+    },
+    /// One server playlist's entries, after `ListRemotePlaylistItems`.
+    RemotePlaylistItems {
+        id: String,
+        tracks: Vec<crate::remote::RemoteTrack>,
+    },
+    /// One item is now a local file, after `FetchRemote`.
+    ///
+    /// The path is what the host hands to `play`: nothing above this module
+    /// knows the file arrived over the network.
+    RemoteFetched {
+        track: crate::remote::RemoteTrack,
+        path: PathBuf,
+    },
+    /// A walk of `root` has started. The answer is `scan_done`.
+    ///
+    /// A pair of events rather than a percentage: a library big enough that the
+    /// silence is a problem is big enough to warrant moving the walk off the
+    /// worker, and a progress bar would hide that.
+    ScanStarted {
+        root: PathBuf,
+    },
+    /// What the walk found that the index did not know, after `ScanFolder`.
+    ///
+    /// A diff, not the whole tree. Reporting every file on every launch would
+    /// make a host re-import the library each time, which is worse than not
+    /// scanning at all.
+    ScanDone {
+        root: PathBuf,
+        added: Vec<PathBuf>,
+        /// Present before and present now, with a different size or timestamp.
+        modified: Vec<PathBuf>,
+        removed: Vec<PathBuf>,
+        /// The same file under a new path. The library already moved its star,
+        /// play count and playlist entries; the host only has to move whatever
+        /// it caches by path.
+        moved: Vec<Move>,
+    },
+    /// A folder is being watched. `roots` is the whole set, because a host that
+    /// shows "watching 3 folders" must not have to add up deltas.
+    FolderWatched {
+        root: PathBuf,
+        roots: Vec<PathBuf>,
+    },
+    FolderUnwatched {
+        root: PathBuf,
+        roots: Vec<PathBuf>,
+    },
+    /// The automatic reconciliation interval, after `SetReconcileInterval`.
+    ReconcileChanged {
+        seconds: u64,
+    },
+    /// What changed under the watched folders.
+    ///
+    /// Coalesced per call: one save produces several backend events, and a host
+    /// redrawing for each would repaint the same change repeatedly. `rescan` is
+    /// set when the watcher cannot name the files that left -- a directory was
+    /// removed and its contents were never enumerated -- so the honest answer is
+    /// "look again" rather than a list it would have had to invent.
+    FilesChanged {
+        changes: Vec<crate::scan::Change>,
+    },
+    /// The pictures a file carries after an artwork edit.
+    ///
+    /// The whole list rather than a delta: a host that kept the delta would
+    /// have to apply it to its own copy, and two copies of one measurement
+    /// drift (AGENTS.md rule 1). The listing is small; it carries no bytes.
+    ArtworkChanged {
+        path: PathBuf,
+        pictures: Vec<crate::tag::ArtworkInfo>,
+    },
     /// The favourite list, after a change or on request.
     FavouritesChanged {
         paths: Vec<PathBuf>,
@@ -530,6 +925,27 @@ pub enum Event {
     /// stable across launches.
     MostPlayedChanged {
         tracks: Vec<PlayedTrack>,
+    },
+    TracksListed {
+        tracks: Vec<TrackRow>,
+        total: i64,
+        offset: usize,
+    },
+    AlbumsListed {
+        albums: Vec<AlbumSummary>,
+    },
+    ArtistsListed {
+        artists: Vec<ArtistSummary>,
+    },
+    SearchResults {
+        query: String,
+        tracks: Vec<TrackRow>,
+    },
+    /// How far an indexing batch has got. `complete` is the last one.
+    TagsIndexed {
+        done: usize,
+        total: usize,
+        complete: bool,
     },
     /// How far a `preanalyze` batch has got.
     ///

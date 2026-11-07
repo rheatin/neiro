@@ -19,6 +19,11 @@ belongs here; a host draws pixels in its own repository through this C ABI.
 `nae.dll` exports a C ABI; only the `NAE_*` names leave the DLL. Audio samples
 never cross the boundary. The host may be C++, Rust or a CLI.
 
+For what each capability means, how to prove it is working, and what a listener
+hears: [`HIFI-GUIDE.md`](HIFI-GUIDE.md) (English) ·
+[`HIFI-GUIDE.zh.md`](HIFI-GUIDE.zh.md) (中文). The contract it refers to is
+`engine/OUTPUT-POLICY.md`; the guide covers meaning and verification, not rules.
+
 ## The session owns the clock
 
 `NAE_Play(milliseconds)` is still the render primitive, but a host no longer has
@@ -121,12 +126,10 @@ mangled at that layer looks like an unreadable file.
 
 ## Limitations
 
-- Windows only for now. `nae.cpp` opens devices through its own WASAPI path and
-  includes `windows.h`; the platform-neutral `AudioBackend` interface in
-  `engine/audio_backend.h` is implemented by the CoreAudio and AAudio adapters,
-  but the engine itself does not route through it yet. Until it does, macOS and
-  Android build only the core and its checks, and an iOS host would also need a
-  static link instead of `nae.dll`.
+- Windows and macOS. Both open devices, share one `nae.cpp`, and pass the same
+  checks; `libnae.dylib` exports the same entry points as `nae.dll`. iOS and
+  Android are not started -- they need a static link (no dynamic loading) and,
+  on iOS, an `AVAudioSession` owner in the host.
 - DoP needs an endpoint that opens 176400 Hz (DSD64) or 352800 Hz (DSD128) at
   24 valid bits **without resampling**. An endpoint that coerces the rate is
   refused; it cannot carry DoP.

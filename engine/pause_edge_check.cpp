@@ -124,6 +124,32 @@ int playSlices(NAE_Handle* h, int ms, bool (*stopWhenTrue)(NAE_Handle*) = nullpt
 
 bool sawSilence(NAE_Handle* h) { return silenceFrames(h) > 0; }
 
+/// Refuse a fixture that cannot answer the question being asked of it.
+///
+/// This check plays 3000 ms before pausing and 2000 ms after a seek to 60% of the
+/// source, so section 1 needs the file to be at least 5 s long; section 2 plays
+/// 2000 ms twice. Fed a 1 s file it used to report three failures -- silence not
+/// fed during a pause, A never entering the pause, B's position not its own --
+/// none of which were about pausing: the source was exhausted before the pause,
+/// so `NAE_Play` returned in under a millisecond without touching the device,
+/// and the position had already reached its end-of-source value.
+///
+/// A probe that reports plausible numbers about the wrong fixture is the failure
+/// this whole file exists to avoid. Failing here, with the length it was given,
+/// costs one line and cannot be mistaken for a finding.
+bool longEnough(const Open& o, double neededMs, const char* path) {
+    // A reported length of zero is the engine failing to answer, not a fixture
+    // that is too short. Refusing in that case would turn an engine fault into
+    // "wrong file", which is the failure direction this guard exists to avoid.
+    if (o.duration_ms <= 0.0 || o.duration_ms >= neededMs) return true;
+    std::fprintf(stderr,
+                 "fixture too short: %s is %.0f ms, this check needs %.0f ms.\n"
+                 "Pass a longer file; the failures it would otherwise report are "
+                 "about exhaustion, not about pausing.\n",
+                 path, o.duration_ms, neededMs);
+    return false;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -142,6 +168,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         const double totalMs = a.duration_ms;
+        if (!longEnough(a, 5000.0, pathA)) return 1;
 
         playSlices(a.h, 3000);
         const double posBeforePause = positionMs(a.h);
@@ -189,6 +216,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::printf("  A: %.1f s\n", a.duration_ms / 1000.0);
+        if (!longEnough(a, 2500.0, pathA)) return 1;
 
         playSlices(a.h, 2000);
         const double aPosBeforePause = positionMs(a.h);
@@ -208,6 +236,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::printf("  B: %.1f s\n", b.duration_ms / 1000.0);
+        if (!longEnough(b, 2500.0, pathB)) return 1;
 
         const double bPosAtOpen = positionMs(b.h);
         check(std::fabs(bPosAtOpen) < 5.0, "新文件从头开始",

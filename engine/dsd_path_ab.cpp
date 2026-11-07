@@ -19,6 +19,7 @@
 //   dsd_path_ab <file.dsf>
 //   （环境变量 NEIRO_DSD_DECODER 由调用方设置，本仪器自己会跑两次）
 
+#include "dsf_reader.h"
 #include "nae.h"
 
 #include <algorithm>
@@ -66,6 +67,9 @@ struct BandRms {
     // 同一件事的算术表达，且不需要 FFT。两条独立证据互相印证，才排得掉「频谱测量出错」
     // 这个解释。
     double positionAdvanceRatio = 0.0;
+    // The file's own length, so the play-ahead below can be checked against it
+    // instead of assuming there is 2.5 s to skip.
+    double durationMs = 0.0;
     std::string note;
 };
 
@@ -98,6 +102,7 @@ BandRms measure(const std::string& path, int32_t forceRate) {
             decodeNote = std::string("open failed rc=") + std::to_string(rc) + " " + buf;
         return out;
     }
+    out.durationMs = durationMs;
     out.deviceRate = rate;
     out.bitPerfect = bitPerfect;
     out.resampling = resampling; out.sourceRate = srcRate;
@@ -122,6 +127,17 @@ BandRms measure(const std::string& path, int32_t forceRate) {
     }
 
     // 往前跑一段，跳过起始瞬态（滤波器建立、淡入）。
+    //
+    // 2.5 秒是**要求**，不是权利：短于它的文件在跑完之前就结束了，位置比值会读成 0，
+    // 而那一条的报错读起来像引擎坏了。所以先拒绝，并说明需要多长的文件。
+    if (durationMs > 0.0 && durationMs < 3500.0) {
+        std::fprintf(stderr,
+                     "fixture too short: %.0f ms. This check skips 2500 ms of transient "
+                     "and then measures two spectra, so it needs at least 3500 ms.\n",
+                     durationMs);
+        NAE_Close(h);
+        return out;
+    }
     NAE_Play(h, 2500);
 
     NAE_SpectrumInfo info{};
@@ -289,6 +305,27 @@ int main(int argc, char** argv) {
 
     std::printf("== DSD 解码路径 A/B（同一引擎、同一设备、同一个文件）==\n");
     std::printf("  文件 %s\n", path.c_str());
+
+    // The comparison is written for DSD64: its claim is that both paths make the
+    // engine see a 176400 Hz source, which is the DSD64 DoP carrier. A DSD128
+    // file gives 352800 on the FFmpeg path, so that claim fails for a reason that
+    // has nothing to do with either decoder -- and it failed that way for months
+    // because nothing stated the premise.
+    {
+        dsf::File header;
+        if (!header.open(path.c_str())) {
+            std::fprintf(stderr, "%s: %s\n", path.c_str(), header.error.c_str());
+            return 2;
+        }
+        if (header.fmt.dsdRate != 2822400u) {
+            std::fprintf(stderr,
+                         "%s is %u Hz bit rate; this comparison expects DSD64 (%u Hz), "
+                         "because its claim is that both decode paths hand the engine a "
+                         "176400 Hz source.\n",
+                         path.c_str(), header.fmt.dsdRate, 2822400u);
+            return 2;
+        }
+    }
 
     // 第一次：不设环境变量 -> FFmpeg 的解码器。
     // 第一次：清空环境变量 -> FFmpeg 的解码器。引擎只判断这个变量是否存在，

@@ -114,6 +114,20 @@ $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
 cargo run --bin probe -- <file.flac>
 ```
 
+The tag writer is the one path that can destroy a listener's audio, so it is
+checked by consequence: the samples are decoded before and after the write and
+compared, and the temp file is checked to be gone.
+
+```powershell
+cd base
+$env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
+cargo run --bin tag_check -- ..\test\tagtmp\a.flac ..\test\tagtmp\b.mp3 ..\test\tagtmp\c.wav
+```
+
+Do not pass `--target x86_64-pc-windows-gnu`. That toolchain's default host is
+already GNU; naming the target again selects the self-contained link setup, and
+every binary it produces dies at process start with `STATUS_STACK_OVERFLOW`.
+
 If `nae.dll` is held by a running process, the link fails. Stop it first.
 
 ### Toolchain

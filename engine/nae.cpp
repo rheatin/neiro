@@ -1,5 +1,12 @@
 #include "nae.h"
 
+// The device half of this file is Windows-only for now. Everything below the
+// platform boundary -- decode, resample, dither, routing, position accounting --
+// is plain C++ and is what macOS and iOS will run unchanged; keeping the
+// Windows includes behind the guard is the first step to proving that, because
+// the compiler then names every remaining Windows dependency instead of the
+// file simply refusing to open.
+#ifdef _WIN32
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -8,6 +15,7 @@
 #include <avrt.h>       // AvSetMmThreadCharacteristicsW -- the multimedia class scheduler
 #include <functiondiscoverykeys_devpkey.h>
 #include <wrl/client.h>
+#endif
 
 #include <algorithm>
 #include <condition_variable>
@@ -34,8 +42,95 @@
 extern "C" const char* avutil_license(void);
 #endif
 
+#ifdef _WIN32
 #include "wasapi_compat.hpp"
+#include "wasapi_device.h"
+#endif
 #include "dither.h"
+#include "audio_backend.h"
+#include "output_stream.h"
+
+// ---- the few Windows primitives the platform-neutral code still names --------
+//
+// Not a device shim: these are timing and error-shape names that appear in code
+// which is not Windows-specific (a wait, a yield, a success test). Naming them
+// once keeps the boundary at the device rather than smeared across the file.
+#ifndef _WIN32
+#include <sched.h>
+#include <ctime>
+#include <unistd.h>
+using HRESULT = int32_t;
+using BYTE = uint8_t;
+using UINT32 = uint32_t;
+using ULONGLONG = unsigned long long;
+constexpr HRESULT S_OK = 0;
+constexpr HRESULT S_FALSE = 1;
+#define SUCCEEDED(hr) (static_cast<HRESULT>(hr) >= 0)
+#define FAILED(hr) (static_cast<HRESULT>(hr) < 0)
+// No API on this platform produces these; they exist so the shared branches
+// still name the case they are distinguishing.
+constexpr HRESULT AUDCLNT_E_BUFFER_TOO_LARGE = -2004287484;
+constexpr HRESULT AUDCLNT_E_DEVICE_INVALIDATED = -2004287480;
+constexpr HRESULT AUDCLNT_E_RESOURCES_INVALIDATED = -2004287310;
+constexpr HRESULT AUDCLNT_E_SERVICE_NOT_RUNNING = -2004287484;
+inline void Sleep(unsigned ms) { usleep(ms * 1000u); }
+inline void SwitchToThread() { sched_yield(); }
+
+// Windows raises the render thread to the multimedia class here. macOS has an
+// equivalent (pthread_set_qos_class_self_np), but it is not wired yet, and a
+// function that silently does nothing is better than one that claims a priority
+// it did not get. Named so the gap is visible.
+inline void ensureAudioThreadQos() {}
+
+// Windows spins on the multimedia timer for one tick. There is no such tick
+// here; yielding is the honest thing and does not claim a delay it never
+// measured.
+inline void spinForBuffer() { SwitchToThread(); }
+
+
+
+// Windows waits on the device's own event here. macOS has that wait inside the
+// stream (`waitForRoom`); this helper exists for the one call site that asks for
+// a duration rather than for room, so it sleeps for it.
+inline void waitForDeviceBuffer(double waitMs) {
+    if (waitMs <= 0.0) return;
+    usleep(static_cast<useconds_t>(waitMs * 1000.0));
+}
+
+// The same high-resolution clock the Windows build uses for its timing
+// instrumentation. It measures durations, not device frames, so the meaning is
+// identical on both platforms.
+namespace neiro::wasapi {
+inline double nowMsHr() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<double>(ts.tv_sec) * 1000.0 + static_cast<double>(ts.tv_nsec) / 1e6;
+}
+
+// Same arithmetic as the Windows version: a 24-bit value in a 32-bit container
+// is left-justified. Kept because the sample-placement code compiles on both
+// platforms even when the device takes floats.
+inline uint32_t placeInContainer(int32_t value, uint32_t containerBits, uint32_t validBits) {
+    if (containerBits <= validBits || validBits == 0) return static_cast<uint32_t>(value);
+    return static_cast<uint32_t>(value) << (containerBits - validBits);
+}
+
+// Milliseconds since the process started, at the system tick. The Windows build
+// uses GetTickCount64 for the same purpose; the resolution is what the call
+// sites expect, not better.
+inline ULONGLONG GetTickCount64() {
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<ULONGLONG>(ts.tv_sec) * 1000ULL +
+           static_cast<ULONGLONG>(ts.tv_nsec) / 1000000ULL;
+}
+}  // namespace neiro::wasapi
+#ifndef _WIN32
+// The call sites use it unqualified, as they did on Windows.
+using neiro::wasapi::GetTickCount64;
+#endif
+#endif
+
 #include "routing.h"
 #include "clip_guard.h"
 #include "partitioned_convolver.h"
@@ -57,85 +152,14 @@ extern "C" const char* avutil_license(void);
 #endif
 #include "output_mode.h"
 #include "resampler.h"
+#include "nae_internal.h"
 
+#ifdef _WIN32
 using Microsoft::WRL::ComPtr;
+#endif
 
-namespace {
 
-thread_local HRESULT g_lastHr = S_OK;
 
-// Why the last call failed, in words.
-//
-// A bare error code tells a caller that something went wrong and nothing else.
-// For a music player the useful message is "the file is not audio" rather than
-// "0x0208...", and the host has no way to produce the first from the second.
-thread_local std::string g_lastErrorText;
-thread_local bool g_comReady = false;
-static std::atomic<uint32_t> g_capsGeneration{1};
-
-HRESULT remember(HRESULT hr) {
-    g_lastHr = hr;
-    return hr;
-}
-
-// Did the output device stop existing?
-//
-// True for the codes Windows uses when the endpoint is gone rather than merely
-// busy: unplugged, disabled in the Sound control panel, or taken away by another
-// application that asked for exclusive access. AUDCLNT_E_RESOURCES_INVALIDATED
-// and AUDCLNT_E_SERVICE_NOT_RUNNING are included because they mean the same
-// thing operationally -- the stream cannot continue and the handle's worth
-// keeping -- even though the cause differs.
-//
-// What is deliberately *not* here: AUDCLNT_E_BUFFER_TOO_LARGE and
-// AUDCLNT_E_OUT_OF_ORDER. Those are a device that is still there and asking for
-// less than was offered, and the correct response is a smaller request on the
-// next slice. Treating them as a lost device would tear down a stream that would
-// have recovered on its own.
-//
-// This is the single place that decision is made. A host should not have to know
-// these values, and neither should the render loop's other branches.
-bool deviceIsGone(HRESULT hr) {
-    return hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_RESOURCES_INVALIDATED ||
-           hr == AUDCLNT_E_SERVICE_NOT_RUNNING;
-}
-
-// COM apartment lifetime.
-//
-// An earlier version called CoUninitialize() at the end of
-// NAE_OpenExclusiveSine. That is wrong: the returned handle holds COM
-// interfaces created in *this* apartment, and tearing the apartment down while
-// those interfaces are still alive makes any later call on them undefined —
-// Start() crashed with an access violation. The apartment has to outlive every
-// handle created in it, so initialisation is per-thread and stays until the
-// host explicitly calls NAE_Shutdown().
-HRESULT ensureCom() {
-    if (g_comReady) return S_OK;
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    // RPC_E_CHANGED_MODE means the thread already initialised COM as
-    // apartment-threaded; that is fine, we just must not uninitialise it.
-    if (hr == RPC_E_CHANGED_MODE) {
-        g_comReady = true;
-        return S_OK;
-    }
-    if (FAILED(hr)) return hr;
-    g_comReady = true;
-    return S_OK;
-}
-
-// ---- 能力声明的来源 --------------------------------------------------------
-//
-// `NAE_GetEngineCapabilities` 里那个 `shareModes` 曾经是硬编码的
-// `"[\"shared\",\"exclusive\"]"`。它是一句**声称**，不是一次测量：引擎里根本
-// 没有打开 shared 流的代码路径（`tryInitialize` 的 shared 分支只在设备枚举
-// 时被调用，用来回答「这设备能不能以 shared 打开」，见下面 919/921 两行）。
-//
-// 一句声称比没有更糟：调用方会照着它去选一条不存在的路线，然后在别处收到一个
-// 说不清的失败。所以这份清单改成从下面这个表生成，表里**只有真的能开流的模式**。
-//
-// 为什么是表而不是常量：下一个人实现 shared 时，必须往这张表里加一行，而加一行
-// 就意味着他同时接上了开流路径。字符串和实现在两个地方的时候，只有仪器能抓住
-// 它们不同步——见 `capability_check.cpp`，它会核对 DLL 导出的开流入口。
 struct ShareModeEntry {
     const char* name;
     // The value passed to `IAudioClient::Initialize`.
@@ -162,6 +186,72 @@ constexpr ShareModeEntry kOpenableShareModes[] = {
     {"shared", AUDCLNT_SHAREMODE_SHARED, "NAE_OpenFileShared"},
 };
 
+std::string jsonEscape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size() + 8);
+    for (char c : in) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out;
+}
+
+// Shared by code on both sides of the device boundary: the error text a host
+// reads, and the HRESULT two diagnostics print. Declared here -- outside the
+// platform guard -- so the neutral half can use them without dragging the device
+// block along. `HRESULT` exists on both sides: windows.h defines it on one, the
+// compatibility block above defines it on the other.
+thread_local HRESULT g_lastHr = S_OK;
+thread_local std::string g_lastErrorText;
+
+
+#ifdef _WIN32
+
+
+
+
+namespace {
+
+
+// The device helpers both translation units share -- the COM apartment, the
+// endpoint's native format, the wire-format builder, and the one verdict on
+// "the device is gone". They live in `wasapi_device.h` so the policy in this
+// file and the stream in `backend_wasapi.cpp` cannot answer differently.
+using neiro::wasapi::ensureCom;
+using neiro::wasapi::readNativeFormat;
+using neiro::wasapi::remember;
+using neiro::wasapi::wrap;
+
+static std::atomic<uint32_t> g_capsGeneration{1};
+
+// ---- 能力声明的来源 --------------------------------------------------------
+//
+// `NAE_GetEngineCapabilities` 里那个 `shareModes` 曾经是硬编码的
+// `"[\"shared\",\"exclusive\"]"`。它是一句**声称**，不是一次测量：引擎里根本
+// 没有打开 shared 流的代码路径（`tryInitialize` 的 shared 分支只在设备枚举
+// 时被调用，用来回答「这设备能不能以 shared 打开」，见下面 919/921 两行）。
+//
+// 一句声称比没有更糟：调用方会照着它去选一条不存在的路线，然后在别处收到一个
+// 说不清的失败。所以这份清单改成从下面这个表生成，表里**只有真的能开流的模式**。
+//
+// 为什么是表而不是常量：下一个人实现 shared 时，必须往这张表里加一行，而加一行
+// 就意味着他同时接上了开流路径。字符串和实现在两个地方的时候，只有仪器能抓住
+// 它们不同步——见 `capability_check.cpp`，它会核对 DLL 导出的开流入口。
+
+
 struct DeviceInfo {
     std::string id;
     std::string name;
@@ -173,39 +263,6 @@ struct DeviceInfo {
     bool sharedOpens = false;
     bool exclusiveOpens = false;
 };
-
-bool readNativeFormat(IMMDevice* device, WAVEFORMATEX* out, uint16_t* validBits = nullptr) {
-    ComPtr<IPropertyStore> store;
-    if (FAILED(neiro::wasapi::openPropertyStore(device, &store)) || !store) return false;
-
-    PROPVARIANT value;
-    PropVariantInit(&value);
-    if (FAILED(store->GetValue(PKEY_AudioEngine_DeviceFormat, &value))) return false;
-
-    bool ok = false;
-    if (validBits) *validBits = 0;
-    if (value.vt == VT_BLOB && value.blob.pBlobData &&
-        value.blob.cbSize >= sizeof(WAVEFORMATEX)) {
-        const auto* fmt = reinterpret_cast<const WAVEFORMATEX*>(value.blob.pBlobData);
-        if (fmt->wFormatTag == WAVE_FORMAT_PCM || fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE ||
-            fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-            *out = *fmt;
-
-            // The valid-bits count lives in the EXTENSIBLE tail, which
-            // WAVEFORMATEX has no room for. A 24-in-32 endpoint reports
-            // wBitsPerSample=32 here, and losing wValidBitsPerSample=24 is
-            // exactly what made exclusive mode look impossible on hardware
-            // that supports it perfectly well.
-            if (validBits && fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-                value.blob.cbSize >= sizeof(WAVEFORMATEXTENSIBLE)) {
-                *validBits = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(fmt)->Samples.wValidBitsPerSample;
-            }
-            ok = true;
-        }
-    }
-    PropVariantClear(&value);
-    return ok;
-}
 
 // Wait for the device to want another buffer, without missing its deadline.
 //
@@ -276,32 +333,10 @@ void waitForDeviceBuffer(double waitMs) {
     }
 }
 
-// Event-driven rendering.
-//
-// `AUDCLNT_STREAMFLAGS_EVENTCALLBACK` asks the audio engine to signal an event when
-// the next buffer period is due, rather than leaving the client to discover it by
-// polling. Twilight Echo's exclusive backend uses exactly this -- its stream flags
-// are `NOPERSIST | EVENTCALLBACK` unless it is deliberately in push mode -- and its
-// render loop then waits on that event alongside the timer and the samples-ready
-// signal from the decode thread.
-//
-// This engine polled. That is not merely slower: polling can only ever ask "is it
-// ready yet", and the answer's precision is bounded by how often the question is
-// asked. The engine can ask the device exactly when it will be ready, and it does
-// not, which is a plausible account of a delivered rate below the negotiated one
-// that no amount of timer precision could fix -- a high-resolution timer makes the
-// *asking* precise and cannot make the *answering* any more frequent than the
-// device's own period.
-//
-// `SetEventHandle` must be called before `Initialize`, which is why this is a
-// function rather than a line at the top of the render loop.
-inline HANDLE createRenderEvent() {
-    // Auto-reset: WASAPI re-signals it for the next period, and a manual-reset
-    // event left signalled would make every subsequent wait return immediately.
-    return CreateEventW(nullptr, FALSE, FALSE, nullptr);
-}
+// The device period belongs to the device layer now: `backend_wasapi.cpp`
+// creates the render event and owns it, and the loop asks `waitForRoom`.
 
-
+// Raise this thread to the multimedia class.
 //
 // Twilight Echo does this at the top of its render loop for the same reason it
 // uses a high-resolution timer: an audio deadline is a deadline, and the default
@@ -328,43 +363,6 @@ inline void spinForBuffer() {
     while (GetTickCount64() < until) {
         Sleep(0);
     }
-}
-
-// Build a WAVEFORMATEXTENSIBLE from a device's own description.
-//
-// Passing the device's format through verbatim does not work: a plain
-// WAVE_FORMAT_PCM description is rejected with E_INVALIDARG. Re-wrapping it as
-// extensible with a consistent cbSize is the form drivers accept. (Found the
-// hard way in the wasapi-probe spike.)
-WAVEFORMATEXTENSIBLE wrap(const WAVEFORMATEX* src, uint16_t validBits) {
-    WAVEFORMATEXTENSIBLE out{};
-    ZeroMemory(&out, sizeof(out));
-    out.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-    out.Format.nChannels = src->nChannels;
-    out.Format.nSamplesPerSec = src->nSamplesPerSec;
-    out.Format.wBitsPerSample = src->wBitsPerSample;
-    out.Format.nBlockAlign = src->nBlockAlign;
-    out.Format.nAvgBytesPerSec = src->nAvgBytesPerSec;
-    out.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-    // wValidBitsPerSample MUST come from the device's own value, not from
-    // wBitsPerSample. Plenty of endpoints report 24 bits of audio inside a
-    // 32-bit container. Asking for 32 bits of real data is something the driver
-    // cannot supply, and it answers AUDCLNT_E_ENDPOINT_CREATE_FAILED — the same
-    // error Windows gives when another application holds the endpoint.
-    //
-    // That misreading cost real time: exclusive mode was declared impossible on
-    // a machine where it works perfectly, and this one line was the cause. The
-    // endpoint that exposed it reports bits=32 valid=24; passing its own blob
-    // through untouched succeeds where wrap() failed. See format_matrix.cpp.
-    //
-    // Fall back to the container size only when the device reported nothing,
-    // which is the case for a bare WAVEFORMATEX with no valid-bits field.
-    out.Samples.wValidBitsPerSample = validBits ? validBits : src->wBitsPerSample;
-    out.dwChannelMask =
-        src->nChannels == 1 ? SPEAKER_FRONT_LEFT : (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT);
-    out.SubFormat = (src->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
-                                                                : KSDATAFORMAT_SUBTYPE_PCM;
-    return out;
 }
 
 // Try Initialize in the given share mode; on success the format actually in
@@ -475,30 +473,9 @@ std::vector<uint32_t> probeSupportedRates(IMMDevice* device, const WAVEFORMATEX&
     return found;
 }
 
-std::string jsonEscape(const std::string& in) {
-    std::string out;
-    out.reserve(in.size() + 8);
-    for (char c : in) {
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                } else {
-                    out += c;
-                }
-        }
-    }
-    return out;
-}
 
 }  // namespace
+#endif  // _WIN32
 
 // Seam-distribution sizes, at file scope.
 //
@@ -507,617 +484,28 @@ std::string jsonEscape(const std::string& in) {
 // member of NAE_Handle is not in scope in a free function. Declaring them as
 // members as well does not help: the member version shadows the file-scope one and
 // the arrays end up sized by whichever declaration a given use site resolved to.
-constexpr size_t kSeamQuantiles = 8;
-/// Log-spaced buckets from 0.01 to 100, i.e. -2..+2 decades.
-constexpr size_t kSeamBuckets = 41;
-/// Seams retained for the quantiles. 4096 is about 35 minutes at this buffer size:
-/// long enough to catch a periodic artefact, short enough not to be a leak.
-constexpr size_t kSeamSamples = 4096;
-
-
-// Handle definition lives here rather than in the header: the C ABI must not
 // leak COM types into consumers.
-struct NAE_Handle {
-    ComPtr<IMMDevice> device;
-    ComPtr<IAudioClient> client;
-    ComPtr<IAudioRenderClient> render;
-    WAVEFORMATEXTENSIBLE fmt{};
-    UINT32 bufferFrames = 0;
-    double latencyMs = 0.0;
 
-    // ---- conversion state ----
-    //
-    // These live on the handle rather than being rebuilt per block. soxr carries
-    // filter history across calls, so recreating it would put an audible seam in
-    // the output every block; the dither generator carries a random state for
-    // the same reason.
-
-    // The rate the source material is at, before conversion.
-    uint32_t sourceRate = 0;
-
-    // The file's own channel count, which differs from the device's whenever a
-    // conversion happened. NAE_QuerySignalPath reports the file's, because the
-    // listener's question is "what is in the file" and the device's number
-    // answers a different one.
-    int32_t fileChannels = 0;
-
-    // Present only when a converter is actually in the path. When rates match,
-    // `resampler.ready()` is false and samples pass through untouched — which is
-    // what makes the bit-perfect claim true rather than merely intended.
-    neiro::Resampler resampler;
-
-    // Dither is sized to the device's *valid* bits, not the container size. A
-    // 24-in-32 device must not dither as though it were 24-bit.
-    neiro::Dither dither{32};
-    bool dithered = false;
-
-    // Reported back to the UI. The one value that decides whether "bit-perfect"
-    // may be said out loud, and beside it the name of the verdict, which decides
-    // what the UI may say about it.
-    bool bitPerfect = false;
-    bool resampling = false;
-    neiro::PerfectReason reason = neiro::PerfectReason::DeviceCannotCarryFormat;
-
-    // Which share mode this stream was actually opened in.
-    //
-    // Stored rather than assumed, because `NAE_QuerySignalPath` used to answer
-    // `exclusive = 1` unconditionally -- a hardcoded claim that happened to be
-    // true while exclusive was the only mode there was. It became false the moment
-    // shared existed, and nothing caught it except an instrument that opened a
-    // shared stream and read the field back.
-    bool exclusive = true;
-
-    // 采样实际是怎么被解出来的。见 `NAE_QueryDecodePath`。
-    //
-    // 存在句柄上而不是每次去问解码器，是因为解码器在打开之后就可能被换掉（换曲、seek），
-    // 而界面要显示的是**当前**这条路径。打开时存一份，之后只读。
-    std::string decodePath;
-    // The listener's setting did not choose this rate; the driver did. Kept apart
-    // from `reason` because the interface has to say both things and they are
-    // different: the reason says what happened to the samples, this says whose
-    // decision it was.
-    bool coercedToSupportedRate = false;
-
-    // ---- telemetry ----
-    //
-    // Read by NAE_QuerySignalPath. Counted on the audio thread and only ever
-    // incremented, so no lock is needed and the read is a snapshot that may be a
-    // few callbacks stale -- which for "did this happen during the track" is the
-    // only question being asked.
-    uint64_t callbackCount = 0;
-    uint64_t deadlineMissCount = 0;
-    double peakCallbackMs = 0.0;
-    uint64_t underrunCount = 0;
-    uint64_t dropCount = 0;
-    // Device frames the render loop had to invent because the fifo ran dry
-    // mid-buffer. Non-zero means the decoder is not keeping up in real time, and
-    // it is the number that turns "the output burbles" into a measured statement.
-    uint64_t padFrameCount = 0;
-    // Signalled by the audio engine when the next buffer period is due. Null when
-    // the device refused `AUDCLNT_STREAMFLAGS_EVENTCALLBACK`, in which case the
-    // render loop falls back to pacing itself with a high-resolution timer.
-    HANDLE renderEvent = nullptr;
-    // Worst wall-clock gap between two consecutive device-buffer writes, and the
-    // device buffer's own duration in ms.
-    //
-    // This is the measurement that can see a missed deadline. Every other counter
-    // here reports what the engine *did*, and a buffer written perfectly but late
-    // is indistinguishable from one written on time. A gap larger than
-    // `bufferDurationMs` means the device ran dry waiting, no matter how correct
-    // the samples were -- which is the whole of "steady clicking at the buffer
-    // rate", a fault that was invisible until this existed.
-    double maxBufferGapMs = 0.0;
-
-    /// Milliseconds the render thread spent inside topUp() in its worst period.
-    ///
-    /// Our render loop decodes from inside the device period; Twilight Echo's runs
-    /// the decoder on its own thread. Whatever this costs is spent out of the
-    /// runway the device gave us, so this is the number that has to be small.
-    double maxDecodeStallMs = 0.0;
-
-    /// Milliseconds from reading the padding to handing the buffer over, worst case.
-    double maxFillMs = 0.0;
-
-    /// Milliseconds by which the worst buffer missed its runway, and how often.
-    ///
-    /// Zero means every buffer reached the device before the device ran out of
-    /// audio to play. A positive value is the device having played stale audio,
-    /// which is what a bubble is.
-    double maxLateMs = 0.0;
-    int64_t lateCount = 0;
-    double bufferDurationMs = 0.0;
-
-    // Device frames actually delivered, per second of wall clock.
-    //
-    // Everything else here counts frames the engine *wrote*. This counts frames
-    // the device was actually handed per second of real time, and it is the only
-    // figure that can distinguish "playing at the right speed" from "playing
-    // correctly and slowly". The fifo accounting balances either way.
-    double deviceRateActual = 0.0;
-    double rateWindowStart = 0.0;
-    int64_t rateWindowFrames = 0;
-
-    /// Nothing to hold here any more.
-    ///
-    /// This slot held the "discard the rate window on pause" flag, which was the
-    /// second of two attempts to keep `deviceRateActual` from reporting a pause as
-    /// playback at half rate. Both are gone; the reason is LESSONS.md 58 and the
-    /// working definition is in the field's own documentation. Nothing is kept here
-    /// because a field whose only content is "this used to be wrong" is a field
-    /// nobody will read twice.
-    /// Set once the first 3 s of the stream have elapsed and been discarded.
-    bool rateWarmupDone = false;
-
-    /// Device frames still to be faded in, after a start.
-    ///
-    /// A resume begins from silence -- the prefill fills the device buffer with
-    /// zeros -- so a stream that starts at a non-zero phase steps out of silence and
-    /// clicks. The ramp is applied to the first few milliseconds of real audio.
-    int64_t fadeInRemaining = 0;
-    int64_t fadeInTotal = 0;
-    int64_t fadeInFrame = 0;
-
-    /// Channel trims (dB), balance (-1..1), polarity mask, and per-channel delay
-    /// in device frames. Applied after EQ/crossfeed, before volume.
-    double channelTrimDb[NAE_MAX_CHANNELS]{};
-    double balance = 0.0;
-    uint32_t polarityMask = 0;
-    std::vector<int32_t> channelDelay;  // device frames per channel
-    std::vector<size_t> channelDelayPos;
-    std::vector<float> channelDelayBuf;
-    uint32_t channelDelayMax = 0;
-    /// Clip guard. Configured by the session policy; inactive by default.
-    neiro::ClipGuard clipGuard;
-    /// Digital volume, linear 0..1, ramped per device frame.
-    ///
-    /// 1.0 is exact bypass: the render loop does not multiply at all, so a
-    /// bit-perfect stream stays bit-perfect. Any other value is reported as
-    /// NAE_REASON_VOLUME_NOT_UNITY.
-    double volume = 1.0;
-    double volumeTarget = 1.0;
-    double volumeRampDelta = 0.0;
-    int64_t volumeRampRemaining = 0;
-
-    /// Equaliser cascade. Coefficients are recomputed in NAE_SetEq; the render
-    /// loop only runs them. `eqZ*` are transposed direct-form-II state, one pair
-    /// per band per channel.
-    bool eqEnabled = false;
-    double eqPreamp = 1.0;
-    int32_t eqBandCount = 0;
-    bool eqBandEnabled[NAE_EQ_MAX_BANDS]{};
-    uint32_t eqBandChannelMask[NAE_EQ_MAX_BANDS]{};
-    bool eqLinear = false;
-    neiro::LinearPhaseEq linearEq;
-    neiro::EqBiquad eqCoeffs[NAE_EQ_MAX_BANDS]{};
-    std::vector<double> eqZ1;
-    std::vector<double> eqZ2;
-    NAE_EqParams eqParams{};
-
-    /// Stereo crossfeed: a circular delay line of two channels, a one-pole
-    /// low-pass per side, and the mix amount. Only used when the stream is 2ch.
-    bool crossfeedEnabled = false;
-    double crossfeedAmount = 0.3;
-    double crossfeedDelayMs = 0.3;
-    double crossfeedCutoffHz = 700.0;
-    std::vector<double> crossfeedDelay;
-    size_t crossfeedDelayFrames = 0;
-    size_t crossfeedPos = 0;
-    double crossfeedLpL = 0.0;
-    double crossfeedLpR = 0.0;
-    double crossfeedAlpha = 0.0;
-    NAE_CrossfeedParams crossfeedParams{};
-
-    /// FIR convolver. The IR is applied in the source domain, before the
-    /// resampler, so it must be at the source rate.
-    NAE_ConvolverParams convParams{};
-    bool convEnabled = false;
-    size_t convTaps = 0;
-    size_t convChannels = 0;
-    neiro::PartitionedConvolver conv;
-    std::vector<float> convDryL;
-    std::vector<float> convDryR;
-    /// Error text for the render loop, reused so no string is constructed per
-    /// device buffer.
-    std::string renderErr;
-
-    /// Render-loop scratch, sized once per channel count.
-    std::vector<double> frameHeld;
-    std::vector<double> frameOut;
-    std::vector<float> frameFloat;
-
-    std::vector<float> convInBuf;
-    std::vector<float> convDryOut;
-    /// The dry-path delay ring: kConvLatency frames x ch, one block.
-    std::vector<float> convDryBuf;
-    size_t convDryPos = 0;
-    double convWet = 1.0;
-    double convDry = 0.0;
-    double convGain = 1.0;
-
-    /// Crossfade: the next file's first frames are mixed into the current end.
-    NAE_CrossfadeParams crossfadeParams{};
-    bool crossfadeEnabled = false;
-    double crossfadeDurationMs = 0.0;
-    int32_t crossfadeCurve = NAE_CROSSFADE_EQUAL_POWER;
-    int64_t crossfadeFrames = 0;
-    bool crossfadeActive = false;
-    std::vector<float> crossfadeBuf;
-    size_t crossfadeBufPos = 0;
-    size_t crossfadeBufFrames = 0;
-    int64_t crossfadeConsumed = 0;
-
-    /// ReplayGain policy and the gain it resolves to. `rgEnabled` is the mode;
-    /// the multiply is skipped when `rgGain` is exactly 1.0.
-    NAE_ReplayGainInfo rgInfo{};
-    NAE_ReplayGainParams rgParams{};
-    bool rgEnabled = false;
-    double rgGain = 1.0;
-    double rgTarget = 1.0;
-    double rgDelta = 0.0;
-    int64_t rgRamp = 0;
-
-    /// Whether this handle has ever started a stream.
-    ///
-    /// Distinguishes "the beginning of a track", where silence before the first
-    /// sample is right, from "a resume", where it is a 26.67 ms hole in the middle
-    /// of the music. Both go through the same Start call.
-    bool streamEverStarted = false;
-
-    /// Whether the render loop should hand the device silence instead of audio.
-    ///
-    /// This is what makes a pause possible at all. Stopping the client and starting
-    /// it again is audible on this endpoint -- measured, see NAE_Pause in nae.h --
-    /// so a pause keeps the stream running and feeds it zeros. There is then no
-    /// boundary for the device to react to, which is the entire point.
-    bool silencing = false;
-
-    /// Device frames handed over as silence, reported as `silenceFramesWritten`.
-    int64_t silenceFramesWritten = 0;
-
-    // ---- output spectrum tap ----
-    //
-    // A ring of the most recent `spectrumRing.size()` channel-0 device frames,
-    // filled from inside the render loop and read by NAE_QuerySpectrum.
-    //
-    // The render loop's only cost here is copying one double per frame; the FFT
-    // happens on whichever thread calls the query. That split matters, because the
-    // render loop's entire budget is the runway the device gave it and a 4096-point
-    // transform inside a 5.7 ms period is a deadline miss waiting to happen.
-    //
-    // `spectrumLock` is the one lock in the handle. Everything else on this struct
-    // is either written-only by the render thread or atomically readable, which is
-    // possible because those are all monotonic counters. A ring buffer is neither:
-    // the reader has to see a consistent window, so it needs the writer held off.
-    std::mutex spectrumLock;
-    std::vector<double> spectrumRing;
-    size_t spectrumWrite = 0;
-    size_t spectrumFilled = 0;
-    uint64_t spectrumFramesFed = 0;
-    /// Rate the ring was filled at. Recorded rather than read from the signal path
-    /// because the tap is filled before any conversion to the device's own format,
-    /// and after a rate change a window holding samples from two rates would be a
-    /// measurement of nothing.
-    uint32_t spectrumRate = 0;
-
-    // ---- 时域包络（节拍检测用）----
-    //
-    // 与频谱共用同一个 `spectrumRing`。环形缓冲里本来就是时域样本，频谱是读它时
-    // 做的变换，所以这里**不复制一份**——第二份环形缓冲意味着两处状态要保持同步，
-    // 而它们唯一的区别只是聚合方式。
-    //
-    // 包络本身是一串聚合后的帧，环形缓冲满了就被覆盖，所以它记录的是环形缓冲的
-    // 历史，而不是独立的长期存储。窗口长度因此是固定的（见 kEnvelopeFrames），
-    // 这是有意的：BPM 检测需要的是最近几秒，不是整首歌。
-    std::vector<float> envelope;
-    size_t envelopeFill = 0;
-    uint32_t envelopeRate = 0;
-    // 环形缓冲被消费了多少次，用来判断包络是否已经稳定。
-    uint64_t envelopeEpoch = 0;
-    // 跨调用的余数：**攒够 `hop` 个样本才写一帧**。
-    //
-    // 原来是 `for (offset = 0; offset < frames; offset += hop)`——每一帧的边界都对齐到
-    // **本次调用**的 0，而且末尾不足一帧的那一段**照样写成一帧**。调用越碎，写出来的帧
-    // 就越短，而 `frame_hop_ms` 一直报 5 ms。实测（`probe-tempo-window`，三次独立运行）：
-    // 包络的真实帧率是**每秒 358 ~ 421 帧**，而 5 ms 的意思是 200 帧。
-    //
-    // 节拍估计器的时间基就是这个 5 ms，所以它算出来的每个 BPM 都带着一个 1.8 ~ 2.1 倍的、
-    // 而且还在飘的偏差——界面上「同一段音频、同一个窗给出 103 ~ 197」就是这么来的。
-    //
-    // 改成跨调用累加之后，一帧的定义回到它该有的样子：**连续的 `hop` 个样本**。
-    double envelopeAccum = 0.0;
-    size_t envelopeAccumN = 0;
-
-    uint64_t deviceLostCount = 0;
-    uint64_t recoveryCount = 0;
-
-    // Measured levels, for "the sound is too quiet, where did it go". See the
-    // matching block in nae.h for why these are two numbers and not one.
-    std::atomic<float> fifoPeak{0.0f};
-    std::atomic<float> writtenPeak{0.0f};
-    // Peak read back out of the device's own buffer, interpreted as the device
-    // will interpret it. writtenPeak is computed before packing and cannot see
-    // a wrong shift or a wrong offset; this can.
-    std::atomic<float> devicePeak{0.0f};
-
-    // What was asked for, and what the device handed back. `Initialize` writes
-    // into the WAVEFORMATEX it was given, so a difference here is the device
-    // changing the depth under us -- and the one case where writing the requested
-    // depth would be writing the wrong number of bytes per sample.
-    uint16_t requestedBits = 0;
-    uint16_t grantedBits = 0;
-
-    // Per-call pipeline accounting, for the last `NAE_Play`.
-    //
-    // This is the same data `NAE_TRACE` prints, exposed so a benchmark can read
-    // it instead of scraping a log. The numbers exist because the alternative is
-    // reasoning about a playback-rate bug, and reasoning is what produced four
-    // wrong conclusions in a row before the counters were added.
-    //
-    // The invariant worth checking first: `sourceAdvance * deviceRate /
-    // sourceRate` must equal `deviceWritten`. When it does not, the device is
-    // being fed frames the source never paid for.
-    double lastSourceAdvance = 0.0;
-    double lastDeviceWritten = 0.0;
-    double lastFifoFrames = 0.0;
-    double lastProduced = 0.0;
-    double lastConsumed = 0.0;
-    double lastShortRender = 0.0;
-
-    /// Whether IAudioClient is currently started.
-    ///
-    /// The bubbling, and the reason this flag exists.
-    ///
-    /// NAE_Play is a *slice* call: the host calls it every 200 ms
-    /// (the Tauri host's SLICE_MS, since removed) and each call was doing
-    /// prefill-with-zeros, Start, render, Stop. The zero prefill is a full-scale
-    /// discontinuity in a continuous waveform, and it happened five times a
-    /// second -- which is exactly the periodic click that was reported as
-    /// "bubbling" and could not be found for a whole day.
-    ///
-    /// Nothing inside a single call could see it. Every counter read healthy:
-    /// worstLate 0, padFrameCount 0, worstFill 0.4 ms against a 53 ms runway, and
-    /// splice_check found no discontinuity across all 14M decoded frames. Each
-    /// call was individually perfect; the fault was in the seam between calls,
-    /// and every instrument in this engine measures within one call.
-    ///
-    /// It was also invisible to the obvious experiment. Deepening the fifo
-    /// (NEIRO_FIFO_OVERFEED=4) changed nothing and left deviceRateActual at the
-    /// same 98.5%, because what was lost was not audio we failed to supply --
-    /// it was audio the device was told to discard.
-    bool clientRunning = false;
-
-    /// How many times the client has been stopped and restarted.
-    ///
-    /// This is the number that would have found it. It is exposed rather than
-    /// kept private because a counter that cannot be read cannot accuse anything,
-    /// and the whole reason this took a day is that the restart count was
-    /// structurally invisible.
-    uint64_t clientRestartCount = 0;
-
-    /// The last sample of the previous written buffer, for the seam measurement.
-    double seamTail = 0.0;
-    bool haveSeamTail = false;
-
-    /// Largest step the signal takes between adjacent samples, normalised.
-    ///
-    /// The reference the seam is judged against. A waveform that simply continued
-    /// has a seam step the same order as this; a break is several times larger.
-    double slewRef = 0.0;
-
-    /// Worst seam step over the peak, and the slew it should be compared with.
-    double worstSeamRatio = 0.0;
-    // The distribution of that ratio, not just its maximum.
-    //
-    // A maximum with no distribution cannot be read. The recorded values across
-    // sessions were 0.95, 1.04, 2.63, 3.46 and 11.68, and nothing said whether a
-    // worst-case of 11.68 is a real boundary artefact or the largest legitimate
-    // step in a particular passage -- and the difference decides whether the seam
-    // needs fixing at all. A maximum answers "has this ever happened"; a
-    // distribution answers "how often, and is this seam worse than the others".
-    //
-    // Percentiles rather than a histogram because the question is about ordering,
-    // not about shape, and a fixed set of quantiles is comparable between runs
-    // without a bin-width argument. The buckets below are logarithmic because the
-    // ratio spans two orders of magnitude between a clean stream and a broken one.
-    //
-    // `seamCount` is the sample count for these quantiles, and it is already
-    // reported -- so a percentile can always be checked against how many seams it
-    // was computed from.
-    double seamQuantiles[kSeamQuantiles] = {};
-    uint64_t seamHistogram[kSeamBuckets] = {};
-    uint64_t seamRatioTotal = 0.0;  // fixed point, thousandths, to keep it integral
-    // Every seam's ratio, kept only if the count is small enough to be useful. The
-    // point is to have the raw numbers when something looks wrong, and a cap keeps
-    // that bounded: 4096 seams is 35 minutes at this buffer size, which is long
-    // enough to catch a periodic artefact and short enough not to be a leak.
-    float seamSample[kSeamSamples];
-    size_t seamSampleCount = 0;
-    double worstSeamSlew = 0.0;
-    uint64_t seamCount = 0;
-
-    // ---- stream state ----
-    //
-    // These live on the handle, not in the play function, and that placement is
-    // load-bearing. The host renders in ~200 ms slices, each a separate
-    // NAE_PlaySine call on the same handle. When this state was local, every
-    // slice began with an empty fifo, sourcePos at 0 and the tone's phase at 0 —
-    // so a 1 kHz test tone restarted every 200 ms, which puts a phase
-    // discontinuity (a click) at 5 Hz, and real audio would have replayed from
-    // the top of the file five times a second.
-    //
-    // A handle is one playback session. "Play for 200 ms more" is the correct
-    // meaning of the call, and these are what make it mean that.
-    std::vector<float> fifo;
-    int64_t sourcePos = 0;
-    int64_t phase = 0;
-
-    // Where `sourcePos` was zeroed, in source frames.
-    //
-    // A seek resets `sourcePos` and then the decoder picks up from the new place,
-    // so `sourcePos` counts frames played *since the seek*, not from the start of
-    // the file. Reporting that directly would put a progress bar back at zero
-    // after a jump to 3:20 and let it crawl forward from there while the music is
-    // already three minutes in. Adding the base makes position mean "where in the
-    // track the listener is", which is the only thing the UI wants to show.
-    int64_t seekBaseFrames = 0;
-
-    // ---- file source ----
-    //
-    // Present when playback was opened on a file rather than a tone. Null means
-    // the test tone is the source, and only then is the synthesis path taken.
-    //
-    // The decoder is owned here so its FFmpeg types never reach the C ABI, for
-    // the same reason the resampler is: a caller that had to know about an
-    // AVFrame could not survive an FFmpeg upgrade.
-#ifdef NEIRO_HAVE_FFMPEG
-    std::unique_ptr<neiro::Decoder> decoder;
-
-    // Decode-ahead. The producer owns the decoder and fills `decodeRing`; the
-    // render thread only consumes source frames. The producer never touches the
-    // device, and the render thread never calls readExact while it is running.
-    std::mutex decodeMutex;
-    std::condition_variable decodeCv;
-    std::deque<float> decodeRing;
-    bool decodeEof = false;
-    bool decodeQuit = false;
-    bool decodeRunning = false;
-    std::thread decodeThread;
-
-    // The file's channel count before the engine's downmix, kept so the UI can
-    // report what the user's file actually is.
-    uint32_t sourceChannels = 0;
-    // Optional source->device routing. When active, the decoder keeps the file's
-    // channel count and topUp routes before the resampler/fifo.
-    neiro::RoutingProcessor routing;
-    bool routingActive = false;
-    std::vector<float> routingIn;
-    std::vector<float> routingOut;
-    // The file's true length in frames. 0 for a tone, where there is no end.
-    int64_t totalSourceFrames = 0;
-
-    // 文件自己的信息，播放期间不变。
-    //
-    // 之前只有 `sourceChannels` 和时长被 open 的 out-param 带出去，其余全部在
-    // open 时丢掉——于是 `track` 事件只带 channels 和 durationMs，本地文件的
-    // fact strip 少了九个值。
-    //
-    // 而这些字段本来就在手上：`decoder->info()` 有采样率、位深、编码、声道。所以
-    // 这不是「数据不存在」，是**没有人把它带上来**。存在而没上报，和不存在一样让
-    // 界面只能说不知道——而后者会让人以为播放器没读那个字段。
-    int32_t fileSampleRate = 0;
-    /// 文件的位深，位/采样。0 表示容器没有报。
-    ///
-    /// 这是**容器声称的**，不是引擎实际用的：解码器总是产出 float32（见 nae.h
-    /// 里 `bitPerfect` 那一段的说明）。所以它描述用户的音乐，不描述信号通路——
-    /// 两者必须分开报。混在一起就会把「文件是 24 bit」说成「设备收到 24 bit」，
-    /// 而这个引擎对那个说法有专门的、更严格的定义。
-    int32_t fileBitsPerSample = 0;
-    /// Bits the source actually carries (`StreamInfo::raw_bits_per_sample`).
-    ///
-    /// Separate from `fileBitsPerSample` above because that one is the container
-    /// the decoder produces: a 24-bit FLAC and a 32-bit WAV both report 32 there.
-    /// This is the number that decides whether the float32 path can carry the
-    /// file without dropping bits. 0 means the demuxer did not say.
-    int32_t fileRawBits = 0;
-    /// The open-time verdict, before the source's depth is considered.
-    ///
-    /// `applySourcePrecision` only clears, so a gapless swap has to start from
-    /// this rather than from the previous track's verdict.
-    bool sourceBitPerfect = false;
-    neiro::PerfectReason sourceReason = neiro::PerfectReason::DeviceCannotCarryFormat;
-    /// 文件时长，毫秒。0 表示容器没有报。
-    ///
-    /// 之前时长只经由 open 的 out-param 传出去，而那个值只被**打开时**调用 open
-    /// 的那一方读到——界面上过了几秒再问就问不到了。句柄上留一份是为了让
-    /// `NAE_QueryTrackInfo` 在播放期间任何时刻都能回答。
-    int32_t fileDurationMs = 0;
-    /// 容器或编码名，如 "flac" / "aac"。空表示没有。
-    ///
-    /// 固定长度内嵌数组而不是 std::string：这个值要经过 C ABI，而 std::string 的
-    /// 布局不是 ABI。它也不需要释放——与 open 的 out-param 里那个 `char*` 刻意
-    /// 不同，那个由引擎分配、调用方 `NAE_FreeString` 释放。两处都像对方管内存是
-    /// 一种很难查的错，所以做法必须明显不同。
-    char fileCodec[32] = {};
-
-    // The next file, opened ahead of time. Same source rate and channel count
-    // only: the device stream and the resampler are not rebuilt for it.
-    std::unique_ptr<neiro::Decoder> nextDecoder;
-    int64_t nextTotalSourceFrames = 0;
-    int32_t nextFileChannels = 0;
-    int32_t nextFileSampleRate = 0;
-    int32_t nextFileBitsPerSample = 0;
-    int32_t nextFileRawBits = 0;
-    int32_t nextFileDurationMs = 0;
-    char nextFileCodec[32] = {};
-    std::string nextDecodePath;
-    NAE_ReplayGainInfo nextRgInfo{};
-    std::vector<float> nextPrefetched;
-    size_t nextPrefetchedFrames = 0;
-    std::vector<float> prefetched;
-    size_t prefetchedPos = 0;
-    size_t prefetchedFrames = 0;
-
-    // Set when the decoder ran out, so a short final block plays as silence
-    // rather than as a truncated or repeated tail.
-    bool sourceExhausted = false;
-    // Set once the fifo has hit its ceiling and production has been stopped.
-    bool fifoCapped = false;
-#endif
-
-    /// Increments when a preloaded file takes over. A tone stays at 0.
-    uint64_t trackSerial = 0;
-    /// Set by NAE_SkipToNext, consumed by the next render slice.
-    ///
-    /// The switch has to happen where the fifo and the resampler are owned -- on
-    /// the render thread, between slices -- so the request is a flag rather than
-    /// a swap performed by the caller.
-    std::atomic<bool> skipRequested{false};
-
-    // ---- DoP ----
-    //
-    // DoP is a transport, not a decoder: raw DSD bits are packed into 24-bit
-    // carrier words and written straight to the device. NAE_Play and the whole
-    // float DSP chain are bypassed; volume/EQ would corrupt the marker.
-    bool dopMode = false;
-    std::unique_ptr<dsf::File> dopDsf;
-    std::unique_ptr<dff::File> dopDff;
-    uint64_t dopBlock = 0;
-    uint32_t dopBlockFrames = 0;
-    uint32_t dopFrameInBlock = 0;
-    std::vector<uint8_t> dopRaw;
-    size_t dopRawPos = 0;
-    size_t dopRawBytes = 0;
-    uint64_t dopDataOffset = 0;
-    uint32_t dopCarrierRate = 0;
-    int32_t dopStreamRate = 0;
-    uint8_t dopMarker = 0x05;
-    int64_t dopFramesPlayed = 0;
-    int64_t dopFramesTotal = 0;
-    /// Host-owned native DSD sink. `nativeWrite` is called from
-    /// NAE_PlayNativeDsd with interleaved 1-bit bytes.
-    bool nativeSinkMode = false;
-    NAE_DsdWriteFn nativeWrite = nullptr;
-    void* nativeContext = nullptr;
-    bool nativePaused = false;
-    bool nativeEnded = false;
-    uint32_t nativeRate = 0;
-    uint32_t nativeChannels = 0;
-    int32_t nativeBitOrderMsbFirst = 0;
-    double nativeDurationMs = 0.0;
-    std::unique_ptr<neiro::dsd::Downrate> nativeDownrate;
-    std::vector<uint8_t> nativeIn;
-    std::vector<uint8_t> nativeOut;
-
-    /// Bitstream downrate (null when the source rate is played as is).
-    std::unique_ptr<neiro::dsd::Downrate> dopDownrate;
-    std::vector<uint8_t> dopDownOut;
-    std::vector<uint8_t> dopDownIn;
-    /// Read index into dopDownOut. Erasing from the front once per DoP frame
-    /// was O(n) per frame and measured 15 ms of memmove per second of audio;
-    /// the buffer is compacted only when the read index passes half of it.
-    size_t dopDownRead = 0;
-    uint32_t dopPairChannel = 0;
-};
+static void chargeRateWindow(NAE_Handle* handle, int64_t frames) {
+    if (!handle) return;
+    const double now = neiro::wasapi::nowMsHr();
+    if (handle->rateWindowStart == 0.0) {
+        handle->rateWindowStart = now;
+        handle->rateWindowFrames = 0;
+    }
+    handle->rateWindowFrames += frames;
+    const double elapsed = now - handle->rateWindowStart;
+    if (elapsed >= 3000.0) {
+        handle->rateWindowStart = now;
+        handle->rateWindowFrames = 0;
+        handle->rateWarmupDone = true;
+    } else if (handle->rateWarmupDone && elapsed >= 500.0) {
+        handle->deviceRateActual =
+            1000.0 * static_cast<double>(handle->rateWindowFrames) / elapsed;
+        handle->rateWindowStart = now;
+        handle->rateWindowFrames = 0;
+    }
+}
 
 #ifdef NEIRO_HAVE_FFMPEG
 // Decode-ahead producer.
@@ -1128,7 +516,7 @@ struct NAE_Handle {
 // This is deliberately only the decode move: the source-side switch logic is
 // unchanged, and the render loop keeps working if the thread cannot start.
 static void decodeThreadMain(NAE_Handle* handle) {
-    const size_t channels = handle->fmt.Format.nChannels ? handle->fmt.Format.nChannels : 1;
+    const size_t channels = handle->fmt.channels ? handle->fmt.channels : 1;
     const size_t targetFrames =
         std::max<size_t>(8192, static_cast<size_t>(handle->sourceRate));
     std::vector<float> block;
@@ -1263,7 +651,7 @@ static void stopDecodeThread(NAE_Handle* handle) {
 static size_t readDecodedFrames(NAE_Handle* handle, size_t frames,
                                 std::vector<float>* out) {
     if (!handle || !out || frames == 0) return 0;
-    const size_t channels = handle->fmt.Format.nChannels ? handle->fmt.Format.nChannels : 1;
+    const size_t channels = handle->fmt.channels ? handle->fmt.channels : 1;
     std::unique_lock<std::mutex> lock(handle->decodeMutex);
     handle->decodeCv.wait(lock, [handle, frames, channels] {
         return handle->decodeRing.size() / channels >= frames || handle->decodeEof ||
@@ -1289,7 +677,16 @@ static void swapNextDecoder(NAE_Handle* handle) {
     stopDecodeThread(handle);
     handle->decoder = std::move(handle->nextDecoder);
     handle->totalSourceFrames = handle->nextTotalSourceFrames;
+    handle->sourceFramesReal = handle->nextSourceFramesReal;
     handle->sourcePos = 0;
+    // And the seek base, or B inherits A's offset.
+    //
+    // `seekBaseFrames` is the distance into the track that a seek moved to, added
+    // to `sourcePos` when reporting a position. It was reset only by `NAE_Seek`,
+    // so a gapless transition *after* a seek carried A's offset into B: measured
+    // 3.327 s for track B about 200 ms after it started, on a track that had
+    // never been seeked. The position of a track is a fact about that track.
+    handle->seekBaseFrames = 0;
     handle->sourceExhausted = false;
     handle->fileChannels = handle->nextFileChannels;
     handle->fileSampleRate = handle->nextFileSampleRate;
@@ -1333,6 +730,108 @@ namespace {
 
 }  // namespace
 
+constexpr double kEnvelopeHopMs = 5.0;
+constexpr size_t kEnvelopeFrames = 4096;
+
+static constexpr size_t kSpectrumFft = 4096;
+
+static void feedSpectrum(NAE_Handle* handle, const double* samples, size_t frames) {
+    if (!handle) return;
+    if (handle->spectrumRing.empty()) handle->spectrumRing.assign(kSpectrumFft, 0.0);
+    if (frames == 0) return;
+    std::lock_guard<std::mutex> guard(handle->spectrumLock);
+    // A rate change invalidates the window: a ring holding samples from two rates
+    // is not a measurement of either, so it is emptied rather than blended.
+    const uint32_t rate = handle->fmt.rate;
+    if (handle->spectrumRate != rate) {
+        handle->spectrumRate = rate;
+        handle->spectrumRing.assign(kSpectrumFft, 0.0);
+        handle->spectrumWrite = 0;
+        handle->spectrumFilled = 0;
+    }
+    if (frames >= kSpectrumFft) {
+        // Longer than the window: only the tail can be in it.
+        const size_t tail = frames - kSpectrumFft;
+        samples = samples ? samples + tail : nullptr;
+        handle->spectrumWrite = 0;
+        handle->spectrumFilled = 0;
+        frames = kSpectrumFft;
+    }
+    const size_t fedFrames = frames;
+    if (std::getenv("NAE_TRACE_SPECTRUM")) {
+        std::fprintf(stderr, "[nae:feed] n=%zu first:", frames);
+        for (size_t i = 0; i < 3 && i < frames; ++i) {
+            std::fprintf(stderr, " %.5f", samples ? samples[i] : 0.0);
+        }
+        std::fprintf(stderr, "  write=%zu filled=%zu totalFed=%llu\n", handle->spectrumWrite,
+                     handle->spectrumFilled,
+                     static_cast<unsigned long long>(handle->spectrumFramesFed));
+    }
+    for (size_t i = 0; i < frames; ++i) {
+        handle->spectrumRing[handle->spectrumWrite] = samples ? samples[i] : 0.0;
+        if (++handle->spectrumWrite == kSpectrumFft) handle->spectrumWrite = 0;
+        if (handle->spectrumFilled < kSpectrumFft) ++handle->spectrumFilled;
+    }
+    // The real count, counted before the clamp above shortened it.
+    //
+    // `framesFed` is the only way a caller tells a live reading from a leftover
+    // one, so it has to count device frames and nothing else. It was reading the
+    // post-clamp value, which on a path that feeds short blocks -- the sine path
+    // feeds 4 to 28 frames at a time -- undercounts by more than two orders of
+    // magnitude. A staleness check built on that would have declared a live
+    // stream dead.
+    handle->spectrumFramesFed += fedFrames;
+
+    // 包络在这里算，而不是交给读者算——否则就得把原始样本交给读者，而那恰恰是整套
+    // 架构要防的事。
+    //
+    // 用平均绝对值而不是 RMS：便宜三分之一，而且起始点是能量事件。前端 `tempo.js`
+    // 选的是同一个，两者一致才能让两条路由的答案**可比**，而不只是「差不多」。
+    if (handle->envelope.empty()) {
+        handle->envelope.assign(kEnvelopeFrames, 0.0f);
+        handle->envelopeFill = 0;
+        handle->envelopeEpoch = 0;
+        // 环重建了，攒了一半的那一帧也扔掉——否则它会跨过一段不属于自己的音频。
+        handle->envelopeAccum = 0.0;
+        handle->envelopeAccumN = 0;
+    }
+    if (handle->envelopeRate != rate) {
+        handle->envelopeRate = rate;
+        handle->envelope.assign(kEnvelopeFrames, 0.0f);
+        handle->envelopeFill = 0;
+        handle->envelopeEpoch = 0;
+        // 环重建了，攒了一半的那一帧也扔掉——否则它会跨过一段不属于自己的音频。
+        handle->envelopeAccum = 0.0;
+        handle->envelopeAccumN = 0;
+    }
+    // 设备速率下的 5 ms。做了保护：速率为零会除零，得出零帧——而零帧读起来是
+    // 「没有包络」，不是一个错误。
+    const size_t hop =
+        rate ? static_cast<size_t>(static_cast<double>(rate) * kEnvelopeHopMs / 1000.0) : 0;
+    if (hop > 0) {
+        // `samples` 为 nullptr 表示静音，而静音是被喂进去而不是跳过的。
+        // 跳过会让包络里留着上一段音乐，于是暂停的播放器会继续报告一首已经停下
+        // 的歌的节拍——而 `framesFed` 也不再推进，读者无法分辨这两者。
+        // **一帧 = 连续的 `hop` 个样本，跨调用攒够才写。**（见 handle 上那两个字
+        // 段的注释：原来每帧都从本次调用的 0 开始，末尾不足一帧也写成帧，于是帧率
+        // 跟着调用频率走而不是跟着采样率走。）
+        //
+        // `samples` 为 nullptr 表示静音，而静音是被喂进去而不是跳过的。跳过会让包络
+        // 里留着上一段音乐，于是暂停的播放器会继续报告一首已经停下的歌的节拍——而
+        // `framesFed` 也不再推进，读者无法分辨这两者。
+        for (size_t i = 0; i < frames; ++i) {
+            if (samples != nullptr) handle->envelopeAccum += std::fabs(samples[i]);
+            if (++handle->envelopeAccumN < hop) continue;
+            handle->envelope[handle->envelopeFill++] = static_cast<float>(
+                handle->envelopeAccum / static_cast<double>(hop));
+            if (handle->envelopeFill >= kEnvelopeFrames) handle->envelopeFill = 0;
+            ++handle->envelopeEpoch;
+            handle->envelopeAccum = 0.0;
+            handle->envelopeAccumN = 0;
+        }
+    }
+}
+
 extern "C" {
 
 const char* NAE_GetEngineCapabilities(void) NAE_NOEXCEPT {
@@ -1347,8 +846,22 @@ const char* NAE_GetEngineCapabilities(void) NAE_NOEXCEPT {
     // 说出来，这条声明才**可被验证**而不是只能被相信。
     static const std::string json = [] {
         std::string modes;
+        bool firstMode = true;
         for (size_t i = 0; i < sizeof(kOpenableShareModes) / sizeof(kOpenableShareModes[0]); ++i) {
-            if (i) modes += ',';
+            // Every mode in the table, on every platform.
+            //
+            // There used to be a `#ifndef _WIN32` filter here that dropped
+            // exclusive, justified by `NAE_QueryDeviceCaps` reporting
+            // `exclusiveSupported = 0` on CoreAudio. That is no longer true --
+            // CoreAudio reports 1 because hog mode *is* this platform's
+            // exclusive, and `NAE_OpenFile` opens with it -- so the filter made
+            // the engine advertise the one mode it could not promote: a host
+            // reading `shareModes` would never ask for exclusive, while the
+            // device list said the device had it.
+            // A flag, not the index: skipping an entry must not leave its comma
+            // behind, which produced `[,{...}]` and invalid JSON.
+            if (!firstMode) modes += ',';
+            firstMode = false;
             modes += "{\"mode\":\"";
             modes += kOpenableShareModes[i].name;
             modes += "\",\"entryPoint\":\"";
@@ -1369,7 +882,15 @@ const char* NAE_GetEngineCapabilities(void) NAE_NOEXCEPT {
 #else
         const char* ffmpegLicense = "none";
 #endif
-        std::string json = std::string("{\"backend\":\"wasapi\",\"shareModes\":[") + modes +
+        // The backend this build actually uses. Saying "wasapi" on CoreAudio is a
+        // claim the host reads and cannot check, and it contradicted the caps.
+#ifdef _WIN32
+        const char* backendName = "wasapi";
+#else
+        const char* backendName = "coreaudio";
+#endif
+        std::string json = std::string("{\"backend\":\"") + backendName +
+                           "\",\"shareModes\":[" + modes +
                            "],\"rawStream\":false,\"ffmpegLicense\":\"" +
                            (ffmpegLicense ? ffmpegLicense : "unknown") +
                            "\",\"version\":\"0.1.0-spike\"}";
@@ -1384,7 +905,13 @@ const char* NAE_GetLastError(void) NAE_NOEXCEPT {
     return buf;
 }
 
+#ifdef _WIN32
 int32_t NAE_GetLastHresult(void) NAE_NOEXCEPT { return static_cast<int32_t>(g_lastHr); }
+#else
+// No COM on this platform, so there is no HRESULT to report. Zero is the honest
+// answer: it says "no device call supplied one", not "the last call succeeded".
+int32_t NAE_GetLastHresult(void) NAE_NOEXCEPT { return 0; }
+#endif
 
 char* enumerateDevicesImpl();  // may throw; wrapped below
 
@@ -1405,6 +932,7 @@ char* NAE_EnumerateDevices(void) NAE_NOEXCEPT {
 }
 
 char* enumerateDevicesImpl() {
+#ifdef _WIN32
     if (FAILED(ensureCom())) return nullptr;
 
     std::string json = "[";
@@ -1484,6 +1012,38 @@ char* enumerateDevicesImpl() {
     }
 
     json += "]";
+#else
+    // macOS: the same JSON, filled from the backend that already knows how to
+    // ask the HAL. Going through `createPlatformBackend` rather than calling
+    // AudioObject* here keeps one copy of the device knowledge -- the enumeration
+    // this returns and the one `caps_check` reads are the same code.
+    auto backend = neiro::createPlatformBackend();
+    std::string json = "[";
+    if (backend) {
+        std::string error;
+        const auto devices = backend->enumerate(&error);
+        bool first = true;
+        for (const auto& device : devices) {
+            NAE_DeviceCaps caps{};
+            caps.structSize = sizeof(caps);
+            if (!backend->queryCaps(device.id, NAE_SHARE_MODE_EXCLUSIVE, &caps, &error)) {
+                continue;
+            }
+            if (!first) json += ",";
+            first = false;
+            char flags[160];
+            std::snprintf(flags, sizeof(flags),
+                          "\"sampleRate\":%u,\"bitsPerSample\":%u,\"validBits\":%u,"
+                          "\"channels\":%u,\"exclusive\":%s,\"shared\":%s",
+                          caps.nativeRate, caps.nativeContainerBits, caps.nativeValidBits,
+                          caps.nativeChannels, caps.exclusiveSupported ? "true" : "false",
+                          caps.sharedSupported ? "true" : "false");
+            json += "{\"id\":\"" + jsonEscape(device.id) + "\",\"name\":\"" +
+                    jsonEscape(device.name) + "\"," + flags + "}";
+        }
+    }
+    json += "]";
+#endif
 
     char* out = static_cast<char*>(std::malloc(json.size() + 1));
     if (!out) return nullptr;
@@ -1527,6 +1087,7 @@ int32_t openExclusiveSineImpl(const char* deviceId, NAE_Handle** out, int32_t* s
                             channels, bitsPerSample, validBits, isFloat, nullptr,
                             nullptr, nullptr, latencyMs, NAE_BUFFER_AUTO, 0);
 }
+
 
 int32_t NAE_OpenExclusiveSine(const char* deviceId, NAE_Handle** out, int32_t* sampleRate,
                               int32_t* channels, int32_t* bitsPerSample, int32_t* validBits,
@@ -1759,9 +1320,10 @@ int32_t openFileImpl(const char* deviceId, const char* path, int32_t outputMode,
     // on the end: an estimate that is slightly long costs a moment of silence,
     // while one that is slightly short cuts the track off mid-phrase, and only
     // one of those is a defect a listener would call a bug.
+    handle->sourceFramesReal =
+        static_cast<int64_t>(info.duration_ms / 1000.0 * info.sample_rate);
     handle->totalSourceFrames =
-        static_cast<int64_t>(info.duration_ms / 1000.0 * info.sample_rate) +
-        static_cast<int64_t>(info.sample_rate) / 2;
+        handle->sourceFramesReal + static_cast<int64_t>(info.sample_rate) / 2;
     handle->decoder = std::move(dec);
     // 解码路径在**这里**记，而不是在 `openExclusiveImpl` 里——那一处在 `NAE_OpenFile`
     // 之外，`handle->decoder` 还没挂上，于是读到的是空。
@@ -1883,6 +1445,10 @@ int32_t NAE_QueryTrackInfo(NAE_Handle* handle, NAE_TrackInfo* out) NAE_NOEXCEPT 
     return NAE_OK;
 }
 
+// The device the handle drives is `handle->stream`: one `OutputStream` per
+// platform, owning its own COM clients, render event and format. The render loop
+// below is identical on both platforms, and it never names a device API.
+
 int32_t NAE_Play(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
     if (handle && handle->dopMode) return NAE_ERR_INVALID_ARGUMENT;
     // The same render loop serves both sources; which one feeds it is decided per
@@ -1896,13 +1462,13 @@ int32_t NAE_Stop(NAE_Handle* handle) NAE_NOEXCEPT {
         handle->nativeEnded = true;
         return NAE_OK;
     }
-    if (!handle->clientRunning) return NAE_OK;
-    const HRESULT hr = neiro::wasapi::stopClient(handle->client.Get());
-    if (FAILED(hr)) {
-        if (deviceIsGone(hr)) {
-            g_lastErrorText = "the output device was removed or is being used by another program";
-            return NAE_ERR_DEVICE_LOST;
-        }
+    if (!handle->stream || !handle->stream->running()) return NAE_OK;
+    const auto st = handle->stream->stop();
+    if (st == neiro::StreamStatus::DeviceLost) {
+        g_lastErrorText = "the output device was removed or is being used by another program";
+        return NAE_ERR_DEVICE_LOST;
+    }
+    if (st != neiro::StreamStatus::Ok) {
         g_lastErrorText = "the output device refused to stop";
         return NAE_ERR_INITIALIZE;
     }
@@ -1939,7 +1505,7 @@ int32_t NAE_Resume(NAE_Handle* handle) NAE_NOEXCEPT {
     // so audio resumes out of actual zero, and if the first sample is not zero that
     // is a real step. 8 ms of ramp, in device frames, applied to the first buffer
     // of real audio.
-    const double rate = handle->fmt.Format.nSamplesPerSec;
+    const double rate = handle->fmt.rate;
     if (rate > 0) {
         handle->fadeInTotal = static_cast<int64_t>((rate * 8) / 1000);
         handle->fadeInRemaining = handle->fadeInTotal;
@@ -1955,8 +1521,8 @@ int32_t NAE_SetClipGuard(NAE_Handle* handle, int32_t enabled, double ceilingDbTp
         handle->clipGuard.set_active(false);
         return NAE_OK;
     }
-    const uint32_t channels = handle->fmt.Format.nChannels;
-    const uint32_t rate = handle->fmt.Format.nSamplesPerSec;
+    const uint32_t channels = handle->fmt.channels;
+    const uint32_t rate = handle->fmt.rate;
     if (!handle->clipGuard.configure(channels, rate, ceilingDbTp, lookaheadMs, releaseMs)) {
         g_lastErrorText = "clip guard settings are out of range";
         return NAE_ERR_INVALID_ARGUMENT;
@@ -2032,7 +1598,7 @@ int32_t NAE_SetChannelDelay(NAE_Handle* handle, const int32_t* frames,
                             uint32_t count) NAE_NOEXCEPT {
     if (!handle || !frames) return NAE_ERR_INVALID_ARGUMENT;
     if (count > NAE_MAX_CHANNELS) return NAE_ERR_INVALID_ARGUMENT;
-    const uint32_t channels = handle->fmt.Format.nChannels;
+    const uint32_t channels = handle->fmt.channels;
     if (channels > NAE_MAX_CHANNELS) return NAE_ERR_INVALID_ARGUMENT;
     uint32_t maxDelay = 0;
     for (uint32_t i = 0; i < count; ++i) {
@@ -2060,7 +1626,7 @@ int32_t NAE_SetVolume(NAE_Handle* handle, double gain) NAE_NOEXCEPT {
     if (gain == handle->volumeTarget) return NAE_OK;
 
     handle->volumeTarget = gain;
-    const int64_t rate = static_cast<int64_t>(handle->fmt.Format.nSamplesPerSec);
+    const int64_t rate = static_cast<int64_t>(handle->fmt.rate);
     const int64_t rampFrames = std::max<int64_t>(1, rate / 50);  // 20 ms
     handle->volumeRampRemaining = rampFrames;
     handle->volumeRampDelta =
@@ -2103,7 +1669,7 @@ int32_t NAE_SetEq(NAE_Handle* handle, const NAE_EqParams* params) NAE_NOEXCEPT {
             return NAE_ERR_INVALID_ARGUMENT;
         }
         if (band.enabled) {
-            if (!neiro::computeEqBiquad(band, static_cast<double>(handle->fmt.Format.nSamplesPerSec),
+            if (!neiro::computeEqBiquad(band, static_cast<double>(handle->fmt.rate),
                                &coeffs[i])) {
                 return NAE_ERR_INVALID_ARGUMENT;
             }
@@ -2111,7 +1677,7 @@ int32_t NAE_SetEq(NAE_Handle* handle, const NAE_EqParams* params) NAE_NOEXCEPT {
         }
     }
 
-    const size_t channels = handle->fmt.Format.nChannels ? handle->fmt.Format.nChannels : 1;
+    const size_t channels = handle->fmt.channels ? handle->fmt.channels : 1;
     handle->eqLinear = false;
     if (params->enabled && params->phase == NAE_EQ_PHASE_LINEAR) {
         std::vector<std::vector<neiro::LinearPhaseBandSpec>> perChannel(channels);
@@ -2130,7 +1696,7 @@ int32_t NAE_SetEq(NAE_Handle* handle, const NAE_EqParams* params) NAE_NOEXCEPT {
         }
         neiro::LinearPhaseEq built;
         if (!built.configure(static_cast<uint32_t>(channels),
-                             handle->fmt.Format.nSamplesPerSec, perChannel,
+                             handle->fmt.rate, perChannel,
                              std::pow(10.0, params->preampDb / 20.0))) {
             g_lastErrorText =
                 "the linear-phase EQ could not be built: check the band count, the "
@@ -2192,7 +1758,7 @@ int32_t NAE_SetCrossfeed(NAE_Handle* handle,
     if (!std::isfinite(params->delayMs) || params->delayMs < 0.0 || params->delayMs > 5.0) {
         return NAE_ERR_INVALID_ARGUMENT;
     }
-    const double fs = static_cast<double>(handle->fmt.Format.nSamplesPerSec);
+    const double fs = static_cast<double>(handle->fmt.rate);
     if (!std::isfinite(params->cutoffHz) || params->cutoffHz < 20.0 ||
         params->cutoffHz >= fs * 0.45) {
         return NAE_ERR_INVALID_ARGUMENT;
@@ -2295,7 +1861,7 @@ int32_t NAE_SetReplayGain(NAE_Handle* handle,
     handle->rgEnabled = params->mode != NAE_RG_OFF;
     handle->rgTarget = target;
 
-    const int64_t rate = static_cast<int64_t>(handle->fmt.Format.nSamplesPerSec);
+    const int64_t rate = static_cast<int64_t>(handle->fmt.rate);
     const int64_t rampFrames = std::max<int64_t>(1, rate / 50);  // 20 ms
     if (target == handle->rgGain) {
         handle->rgRamp = 0;
@@ -2331,7 +1897,7 @@ int32_t NAE_PreloadNext(NAE_Handle* handle, const char* path) NAE_NOEXCEPT {
     if (!handle->decoder) return NAE_ERR_NOT_OPEN;
     std::unique_ptr<neiro::Decoder> next(new neiro::Decoder());
     std::string error;
-    if (!next->open(path, &error, handle->fmt.Format.nChannels)) {
+    if (!next->open(path, &error, handle->fmt.channels)) {
         g_lastErrorText = error;
         return NAE_ERR_CANNOT_OPEN;
     }
@@ -2342,9 +1908,10 @@ int32_t NAE_PreloadNext(NAE_Handle* handle, const char* path) NAE_NOEXCEPT {
             "gapless requires the same sample rate and channel count as the current file";
         return NAE_ERR_INVALID_ARGUMENT;
     }
+    handle->nextSourceFramesReal =
+        static_cast<int64_t>(info.duration_ms / 1000.0 * info.sample_rate);
     handle->nextTotalSourceFrames =
-        static_cast<int64_t>(info.duration_ms / 1000.0 * info.sample_rate) +
-        static_cast<int64_t>(info.sample_rate) / 2;
+        handle->nextSourceFramesReal + static_cast<int64_t>(info.sample_rate) / 2;
     handle->nextFileChannels = static_cast<int32_t>(info.channels);
     handle->nextFileSampleRate = static_cast<int32_t>(info.sample_rate);
     handle->nextFileBitsPerSample = static_cast<int32_t>(info.bits_per_sample);
@@ -2369,7 +1936,7 @@ int32_t NAE_PreloadNext(NAE_Handle* handle, const char* path) NAE_NOEXCEPT {
     std::string readError;
     next->readExact(&handle->nextPrefetched, 4096, &readError);
     handle->nextPrefetchedFrames =
-        handle->nextPrefetched.size() / static_cast<size_t>(handle->fmt.Format.nChannels);
+        handle->nextPrefetched.size() / static_cast<size_t>(handle->fmt.channels);
     handle->nextDecoder = std::move(next);
     return NAE_OK;
 #else
@@ -2481,7 +2048,7 @@ int32_t NAE_SetConvolver(NAE_Handle* handle,
                 }
             }
         }
-        const size_t streamChannels = handle->fmt.Format.nChannels ? handle->fmt.Format.nChannels : 1;
+        const size_t streamChannels = handle->fmt.channels ? handle->fmt.channels : 1;
         if (irChannels != 1 && irChannels != streamChannels) {
             // A mono IR applies to every channel; any other count must match the
             // stream. Folding a 5.1 IR into two channels (or padding a stereo IR
@@ -2584,6 +2151,7 @@ int32_t NAE_GetCrossfade(NAE_Handle* handle, NAE_CrossfadeParams* out) NAE_NOEXC
 // gets its own initialization: 24-in-32 first, then 24-in-24. If neither opens,
 // the endpoint cannot carry DoP and the caller must say so rather than play
 // shifted noise.
+#ifdef _WIN32
 static int32_t openDopDevice(const char* deviceId, uint32_t carrier, uint32_t channels,
                              NAE_Handle** out) {
     if (!out) return NAE_ERR_INVALID_ARGUMENT;
@@ -2612,8 +2180,7 @@ static int32_t openDopDevice(const char* deviceId, uint32_t carrier, uint32_t ch
     }
 
     WAVEFORMATEX native{};
-    uint16_t nativeValid = 0;
-    if (!readNativeFormat(device.Get(), &native, &nativeValid)) {
+    if (!readNativeFormat(device.Get(), &native)) {
         return NAE_ERR_NO_NATIVE_FORMAT;
     }
     if (native.nChannels != channels) {
@@ -2621,92 +2188,73 @@ static int32_t openDopDevice(const char* deviceId, uint32_t carrier, uint32_t ch
         return NAE_ERR_DEVICE_CANNOT_CARRY_FORMAT;
     }
 
-    ComPtr<IAudioClient> client;
-    if (FAILED(neiro::wasapi::activate(device.Get(), __uuidof(IAudioClient),
-                                       client.GetAddressOf())) ||
-        !client) {
-        return NAE_ERR_ACTIVATE;
-    }
-    HANDLE renderEvent = createRenderEvent();
-    if (renderEvent && FAILED(client->SetEventHandle(renderEvent))) {
-        CloseHandle(renderEvent);
-        renderEvent = nullptr;
-    }
-    const DWORD streamFlags = renderEvent ? AUDCLNT_STREAMFLAGS_EVENTCALLBACK : 0;
-
-    WAVEFORMATEXTENSIBLE fmt{};
-    auto build = [&](uint16_t containerBits) {
-        fmt = {};
-        fmt.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-        fmt.Format.nChannels = static_cast<WORD>(channels);
-        fmt.Format.nSamplesPerSec = carrier;
-        fmt.Format.wBitsPerSample = containerBits;
-        fmt.Format.nBlockAlign = static_cast<WORD>(channels * (containerBits / 8));
-        fmt.Format.nAvgBytesPerSec = carrier * fmt.Format.nBlockAlign;
-        fmt.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-        fmt.Samples.wValidBitsPerSample = 24;
-        fmt.dwChannelMask = channels == 1 ? SPEAKER_FRONT_LEFT
-                                          : (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT);
-        fmt.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
-    };
-
-    HRESULT initHr = E_FAIL;
+    neiro::StreamFormatRequest want;
+    want.deviceId = deviceId ? deviceId : "";
+    want.rate = carrier;
+    want.channels = channels;
+    want.validBits = 24;
+    want.isFloat = false;
+    want.shareMode = NAE_SHARE_MODE_EXCLUSIVE;
     // DoP does not need low latency; a 50 ms buffer gives the packer and the
     // disk read room. The endpoint's default here was 10 ms, which is tight
     // enough that a file read shows up as crackle.
-    const REFERENCE_TIME bufferDuration = 50 * 10000;
-    build(32);
-    initHr = remember(client->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, streamFlags,
-                                         bufferDuration, 0, &fmt.Format, nullptr));
-    if (FAILED(initHr)) {
-        initHr = remember(client->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, streamFlags, 0, 0,
-                                             &fmt.Format, nullptr));
+    want.bufferFrames = (carrier * 50) / 1000;
+
+    // 24-in-32 first, then 24-in-24: a device may take the 24 valid bits only in
+    // one of the two containers. If neither opens, the endpoint cannot carry DoP
+    // and the caller must say so rather than play shifted noise.
+    neiro::OpenedFormat opened;
+    std::string error;
+    std::shared_ptr<neiro::OutputStream> stream;
+    for (const uint32_t container : {32u, 24u}) {
+        want.containerBits = container;
+        stream = neiro::openWasapiStream(want, &opened, &error);
+        if (stream) break;
     }
-    if (FAILED(initHr)) {
-        build(24);
-        initHr = remember(client->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, streamFlags,
-                                             bufferDuration, 0, &fmt.Format, nullptr));
-        if (FAILED(initHr)) {
-            initHr = remember(client->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, streamFlags, 0, 0,
-                                                 &fmt.Format, nullptr));
-        }
-    }
-    if (FAILED(initHr)) {
-        g_lastErrorText =
-            "the endpoint refused a 24-valid-bit DoP carrier at this rate";
-        if (renderEvent) CloseHandle(renderEvent);
+    if (!stream) {
+        g_lastErrorText = "the endpoint refused a 24-valid-bit DoP carrier at this rate";
         return NAE_ERR_DEVICE_CANNOT_CARRY_FORMAT;
     }
 
-    UINT32 bufferFrames = 0;
-    if (FAILED(remember(client->GetBufferSize(&bufferFrames))) || bufferFrames == 0) {
-        if (renderEvent) CloseHandle(renderEvent);
-        return NAE_ERR_INITIALIZE;
-    }
-    ComPtr<IAudioRenderClient> render;
-    if (FAILED(remember(client->GetService(IID_PPV_ARGS(&render)))) || !render) {
-        if (renderEvent) CloseHandle(renderEvent);
-        return NAE_ERR_INITIALIZE;
-    }
-    REFERENCE_TIME latency = 0;
-    client->GetStreamLatency(&latency);
-
     auto handle = std::make_unique<NAE_Handle>();
-    handle->device = device;
-    handle->client = client;
-    handle->render = render;
-    handle->renderEvent = renderEvent;
-    handle->fmt = fmt;
-    handle->bufferFrames = bufferFrames;
-    handle->latencyMs = static_cast<double>(latency) / 10000.0;
-    handle->bufferDurationMs =
-        static_cast<double>(bufferFrames) * 1000.0 / static_cast<double>(carrier);
+    handle->stream = stream;
+    handle->fmt.rate = opened.rate;
+    handle->fmt.channels = opened.channels;
+    handle->fmt.containerBits = opened.containerBits;
+    handle->fmt.validBits = opened.validBits;
+    handle->fmt.blockAlign = opened.channels * ((opened.containerBits + 7u) / 8u);
+    handle->fmt.isFloat = opened.isFloat;
+    handle->bufferFrames = opened.bufferFrames;
+    // The driver's own figure, which is what this path has always reported as
+    // `latencyMs`; the buffer's duration is a separate number.
+    handle->latencyMs = stream->driverLatencyMs();
+    handle->bufferDurationMs = opened.rate
+                                   ? 1000.0 * static_cast<double>(opened.bufferFrames) /
+                                         static_cast<double>(opened.rate)
+                                   : 0.0;
     handle->requestedBits = 24;
     handle->grantedBits = 24;
     handle->exclusive = true;
     *out = handle.release();
     return NAE_OK;
 }
+#else
+// No native DSD output on this platform: CoreAudio's HAL carries PCM, so a DSF
+// reaches the device as DoP or as decimated PCM, and neither goes through here.
+// Saying so is the whole implementation -- inventing a path that cannot work
+// would be worse than the honest refusal, and the caller already has
+// `NAE_ERR_NOT_SUPPORTED` for exactly this.
+static int32_t openDopDevice(const char* deviceId, uint32_t carrier, uint32_t channels,
+                             NAE_Handle** out) {
+    (void)deviceId;
+    (void)carrier;
+    (void)channels;
+    if (out) *out = nullptr;
+    g_lastErrorText =
+        "this platform has no native DSD output; DSD plays through DoP or as decimated PCM";
+    return NAE_ERR_DEVICE_CANNOT_CARRY_FORMAT;
+}
+#endif
 
 static int32_t openDopWithTarget(const char* deviceId, const char* path,
                                  int32_t targetDsdRate, NAE_Handle** out,
@@ -2798,6 +2346,7 @@ static int32_t openDopWithTarget(const char* deviceId, const char* path,
     handle->dopMarker = 0x05;
     handle->sourceRate = static_cast<uint32_t>(carrier);
     handle->totalSourceFrames = frames;
+    handle->sourceFramesReal = frames;
     handle->sourcePos = 0;
     handle->fileChannels = static_cast<int32_t>(dsdChannels);
     handle->fileSampleRate = static_cast<int32_t>(dsdRate);
@@ -3119,15 +2668,15 @@ int32_t NAE_PlayDop(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
     if (!handle || !handle->dopMode) return NAE_ERR_NOT_OPEN;
     if (milliseconds <= 0) return NAE_ERR_INVALID_ARGUMENT;
 
-    const uint32_t containerBits = handle->fmt.Format.wBitsPerSample;
-    const uint32_t validBits = handle->fmt.Samples.wValidBitsPerSample;
+    const uint32_t containerBits = handle->fmt.containerBits;
+    const uint32_t validBits = handle->fmt.validBits;
     if (containerBits < 24 || validBits != 24) {
         g_lastErrorText = "DoP needs a 24-bit carrier";
         return NAE_ERR_DEVICE_CANNOT_CARRY_FORMAT;
     }
     const size_t bytesPerSample = containerBits / 8;
-    const size_t bytesPerFrame = handle->fmt.Format.nBlockAlign;
-    const size_t ch = handle->fmt.Format.nChannels;
+    const size_t bytesPerFrame = handle->fmt.blockAlign;
+    const size_t ch = handle->fmt.channels;
     const uint32_t carrier = handle->dopCarrierRate;
 
     // Diagnostic switches for bringing up a new DAC. The defaults are the spec:
@@ -3251,28 +2800,29 @@ int32_t NAE_PlayDop(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
         return false;
     };
 
+    if (!handle->stream) return NAE_ERR_NOT_OPEN;
+    neiro::OutputStream& stream = *handle->stream;
     if (!handle->clientRunning) {
         // Prefill a half buffer with valid DoP silence before starting.
-        BYTE* raw = nullptr;
-        UINT32 chunk = 0;
-        const UINT32 prefill = std::max<UINT32>(1, handle->bufferFrames / 2);
-        if (SUCCEEDED(neiro::wasapi::getRenderBuffer(handle->render.Get(), prefill, &raw,
-                                                     &chunk)) &&
-            raw) {
-            for (UINT32 f = 0; f < chunk; ++f) {
+        uint8_t* raw = nullptr;
+        uint32_t chunk = 0;
+        const uint32_t prefill = std::max<uint32_t>(1, handle->bufferFrames / 2);
+        if (stream.acquire(prefill, &raw, &chunk) == neiro::StreamStatus::Ok && raw) {
+            for (uint32_t f = 0; f < chunk; ++f) {
                 const uint8_t marker = dop::nextMarker(&handle->dopMarker);
                 for (size_t c = 0; c < ch; ++c) {
                     writeWord(raw + f * bytesPerFrame + c * bytesPerSample,
                               dop::word(marker, 0, 0));
                 }
             }
-            remember(handle->render->ReleaseBuffer(chunk, 0));
+            stream.commit(chunk, false);
         }
-        const HRESULT startHr = remember(handle->client->Start());
-        if (FAILED(startHr)) {
-            if (deviceIsGone(startHr)) return NAE_ERR_DEVICE_LOST;
-            return NAE_ERR_INITIALIZE;
-        }
+        const auto started = stream.start();
+        if (started == neiro::StreamStatus::DeviceLost) return NAE_ERR_DEVICE_LOST;
+        if (started != neiro::StreamStatus::Ok) return NAE_ERR_INITIALIZE;
+        // The same bookkeeping the sine path does: without it every slice would
+        // prefill half a buffer with packer silence and start the device again,
+        // which is the seam this loop's comment below is about.
         handle->clientRunning = true;
     }
 
@@ -3282,57 +2832,35 @@ int32_t NAE_PlayDop(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
     const bool traceDop = std::getenv("NAE_TRACE_DOP") != nullptr;
     while (written < target) {
         const double bufferStart = neiro::wasapi::nowMsHr();
-        if (handle->renderEvent) {
-            if (WaitForSingleObject(handle->renderEvent, 2000) != WAIT_OBJECT_0) {
-                ++handle->underrunCount;
-            }
-        }
-        UINT32 padding = 0;
-        const HRESULT padHr = remember(handle->client->GetCurrentPadding(&padding));
-        if (FAILED(padHr)) {
-            // A device that has gone away fails this call every time, so a bare
-            // `continue` spins forever with `written` never advancing -- the
-            // session thread hangs inside the device period and `NAE_SessionStop`
-            // never joins. This is the same call `NAE_PlaySine` had to be taught
-            // about ("the one that was missed, and it is the one that fires first
-            // in practice"), and the DoP path never learned it: NAE_ERR_DEVICE_LOST
-            // was unreachable here.
-            if (traceDop) std::fprintf(stderr, "[dop] padding failed hr=0x%08X\n",
-                                       static_cast<unsigned>(padHr));
-            if (deviceIsGone(padHr)) {
-                g_lastErrorText = "the output device was removed or is being used by "
-                                  "another program; playback is paused at the current "
-                                  "position";
-                return NAE_ERR_DEVICE_LOST;
-            }
-            continue;
-        }
-        const UINT32 capacity =
-            padding < handle->bufferFrames ? handle->bufferFrames - padding : 0;
+        if (!stream.waitForRoom(2000)) ++handle->underrunCount;
+        // What is ours to write: the whole buffer minus what the device has
+        // already committed. A backend that cannot report its own padding -- the
+        // macOS ring, where the ring *is* the buffer -- answers zero and the
+        // whole thing is addressable.
+        const uint32_t queued = stream.queuedFrames();
+        const uint32_t capacity =
+            queued < handle->bufferFrames ? handle->bufferFrames - queued : 0;
         if (traceDop && capacity < handle->bufferFrames) {
-            std::fprintf(stderr, "[dop] padding=%u capacity=%u\n", padding, capacity);
+            std::fprintf(stderr, "[dop] queued=%u capacity=%u\n", queued, capacity);
         }
         if (capacity == 0) {
-            if (handle->renderEvent) WaitForSingleObject(handle->renderEvent, 1);
-            else SwitchToThread();
+            // The device has nothing free until the next period. Wait for it
+            // rather than spinning; the wait is bounded by the device.
+            stream.waitForRoom(1);
             continue;
         }
-        BYTE* raw = nullptr;
-        UINT32 chunk = 0;
-        const HRESULT bufHr = neiro::wasapi::getRenderBuffer(handle->render.Get(),
-                                                             capacity, &raw, &chunk);
-        if (bufHr == AUDCLNT_E_BUFFER_TOO_LARGE || bufHr == S_FALSE) {
+        uint8_t* raw = nullptr;
+        uint32_t chunk = 0;
+        const auto got = stream.acquire(capacity, &raw, &chunk);
+        if (got == neiro::StreamStatus::NoRoom) {
             if (traceDop) {
-                std::fprintf(stderr, "[dop] not-ready hr=0x%08X after %.2f ms\n",
-                             static_cast<unsigned>(bufHr),
+                std::fprintf(stderr, "[dop] not-ready after %.2f ms\n",
                              neiro::wasapi::nowMsHr() - bufferStart);
             }
             continue;
         }
-        if (FAILED(bufHr)) {
-            if (deviceIsGone(bufHr)) return NAE_ERR_DEVICE_LOST;
-            return NAE_ERR_INITIALIZE;
-        }
+        if (got == neiro::StreamStatus::DeviceLost) return NAE_ERR_DEVICE_LOST;
+        if (got != neiro::StreamStatus::Ok) return NAE_ERR_INITIALIZE;
         if (!raw || chunk == 0) continue;
 
         UINT32 filled = 0;
@@ -3371,7 +2899,7 @@ int32_t NAE_PlayDop(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
             if (handle->dopDsf) ++handle->dopFrameInBlock;
             else handle->dopRawPos += 2 * ch;
         }
-        remember(handle->render->ReleaseBuffer(chunk, 0));
+        stream.commit(chunk, false);
         if (traceDop) {
             std::fprintf(stderr, "[dop] chunk=%u filled=%u total=%.2f ms\n", chunk, filled,
                          neiro::wasapi::nowMsHr() - bufferStart);
@@ -3398,10 +2926,10 @@ int32_t NAE_PlayDop(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
     // the client running, because "stopped" has to be said by NAE_Stop rather
     // than inferred from a call returning.
     if (ended) {
-        if (handle->clientRunning) {
-            neiro::wasapi::stopClient(handle->client.Get());
-            handle->clientRunning = false;
-        }
+        // The stream's stop, not a platform call: this function compiles on
+        // every backend, and "the slice ended" has to be said the same way on
+        // all of them.
+        if (stream.running()) stream.stop();
     }
     return NAE_OK;
 }
@@ -3467,11 +2995,27 @@ double NAE_Position(NAE_Handle* handle) NAE_NOEXCEPT {
         return static_cast<double>(handle->sourcePos) * 8.0 / static_cast<double>(rate);
     }
     const uint32_t rate = handle->sourceRate ? handle->sourceRate
-                                             : handle->fmt.Format.nSamplesPerSec;
+                                             : handle->fmt.rate;
     if (!rate) return 0.0;
     // Frames since the start of the file, not since the last seek. See
     // seekBaseFrames on the handle.
-    return static_cast<double>(handle->seekBaseFrames + handle->sourcePos) / rate;
+    const double pos = static_cast<double>(handle->seekBaseFrames + handle->sourcePos) /
+                       static_cast<double>(rate);
+    // The source's own length is the ceiling.
+    //
+    // `totalSourceFrames` is half a second longer than the file on purpose, and
+    // `sourcePos` keeps advancing through that padded tail. Dividing by the pad
+    // limit made the position run past the end of every track: measured 6500.0 ms
+    // for a 6000.0 ms file and 1500.0 for a 1000.0 ms one, while
+    // `silenceFramesWritten` stayed at 0 and `padFrameCount` accounted for 609
+    // frames -- three fields describing one moment and disagreeing. A position
+    // past the end is not a fact about the source, so it is not reported.
+    if (handle->sourceFramesReal > 0) {
+        const double end = static_cast<double>(handle->sourceFramesReal) /
+                           static_cast<double>(rate);
+        if (pos > end) return end;
+    }
+    return pos;
 }
 
 double NAE_Duration(NAE_Handle* handle) NAE_NOEXCEPT {
@@ -3560,6 +3104,7 @@ int32_t NAE_OpenExclusive(const char* deviceId, int32_t sourceRate, int32_t outp
 // whatever the rate negotiation concluded. A shared stream that happens to run at
 // the source rate is still not bit-perfect, and reporting it as such is the exact
 // claim this project does not make.
+#ifdef _WIN32
 int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outputMode,
                             int32_t fixedRate, int32_t quality, AUDCLNT_SHAREMODE shareMode,
                             NAE_Handle** out,
@@ -3682,83 +3227,42 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
         return NAE_ERR_INITIALIZE;
     }
 
-    ComPtr<IAudioClient> client;
-    if (FAILED(neiro::wasapi::activate(device.Get(), __uuidof(IAudioClient), client.GetAddressOf())) ||
-        !client) {
-        return NAE_ERR_ACTIVATE;
-    }
-
-    WAVEFORMATEXTENSIBLE fmt = wrap(&native, nativeValidBits);
-
-    // The target rate replaces the endpoint's own. Everything else -- valid
-    // bits, channel mask, subformat, block align -- is recomputed for it,
-    // because carrying a 44.1 kHz blockAlign with a 192 kHz sample rate
-    // produces a format the driver rejects.
-    if (target.rate != native.nSamplesPerSec) {
-        fmt.Format.nSamplesPerSec = target.rate;
-        const uint16_t bytesPerSample = static_cast<uint16_t>(fmt.Format.wBitsPerSample / 8);
-        fmt.Format.nBlockAlign = static_cast<WORD>(bytesPerSample * fmt.Format.nChannels);
-        fmt.Format.nAvgBytesPerSec = fmt.Format.nSamplesPerSec * fmt.Format.nBlockAlign;
-    }
-
-    // Read before `Initialize`, because that call is allowed to write back into the
-    // format it was handed. Keeping the "before" value is the only way to tell a
-    // device that agreed with us from one that quietly changed the depth.
-    const uint16_t requestedBits = fmt.Format.wBitsPerSample;
-
-    // The device's own period: 0, 0.
-    //
-    // An explicit period was tried here and made things worse, which is worth
-    // recording because the reasoning behind it was sound and the measurement
-    // still said no. Asking for 20 ms did work in the narrow sense -- the device
-    // honoured it and the buffer shrank from 50.67 ms to 21.33 ms -- but the
-    // delivered rate went from 85.3% to 68.3%, because the device's actual grant
-    // interval is longer than whatever buffer size it reports.
-    //
-    //   reported 50.67 ms -> granted every 62.5 ms  (85.3% of real time)
-    //   reported 21.33 ms -> granted every 31.2 ms  (68.3% of real time)
-    //
-    // The same 32%-ish shortfall in both, which says the period is set by the
-    // display link rather than by this request. So the two faults are separate and
-    // I was wrong to keep trying to fix them as one: the under-feed is a property
-    // of this endpoint, and the stale-buffer bubbling is ours.
-    //
-    // Note also that `Initialize` may only be called once per client. The old code
-    // had a second Initialize behind `if (frames > desired)`, and that guard was
-    // not a logic error to be corrected -- calling it again returns
-    // AUDCLNT_E_NOT_INITIALIZED, which reads as "the device refused the format".
-    // Event-driven, so the engine tells us when the next period is due instead of us
-    // polling for it. `SetEventHandle` has to happen first.
-    HANDLE renderEvent = createRenderEvent();
-    // One argument, not two: the cookie-bearing overload belongs to IAudioClient3,
-// and IAudioClient::SetEventHandle takes only the handle.
-    if (renderEvent && FAILED(client->SetEventHandle(renderEvent))) {
-        CloseHandle(renderEvent);
-        renderEvent = nullptr;
-    }
-    const DWORD streamFlags = renderEvent ? AUDCLNT_STREAMFLAGS_EVENTCALLBACK : 0;
-
+    // What to ask the device for. The request carries the numbers the resolver
+    // chose; the factory owns everything that talks to WASAPI -- activation,
+    // `Initialize` in either share mode, the render event, the buffer size and
+    // the render client -- and reports back only what the device granted.
+    neiro::StreamFormatRequest want;
+    want.deviceId = deviceId;
+    want.rate = target.rate;
+    want.channels = native.nChannels;
+    want.containerBits = native.wBitsPerSample;
+    want.validBits = nativeValidBits ? nativeValidBits : native.wBitsPerSample;
+    // `wrap()` picks the subformat from this one tag, so the request uses the
+    // same rule: the wire format is unchanged from when this path built it by
+    // hand.
+    want.isFloat = native.wFormatTag == WAVE_FORMAT_IEEE_FLOAT;
+    want.shareMode = (shareMode == AUDCLNT_SHAREMODE_EXCLUSIVE) ? NAE_SHARE_MODE_EXCLUSIVE
+                                                               : NAE_SHARE_MODE_SHARED;
     // Buffer policy. Auto/Stable let the backend choose; LowLatency asks for the
     // smallest period the device accepts; Fixed asks for the exact duration.
     // A refused explicit request falls back to the backend default and is
     // reported, rather than failing playback.
-    REFERENCE_TIME requestedDuration = 0;
     if (bufferMode == NAE_BUFFER_LOW_LATENCY) {
-        requestedDuration = 10 * 10000;  // 10 ms
+        want.bufferFrames = (target.rate * 10) / 1000;  // 10 ms
     } else if (bufferMode == NAE_BUFFER_FIXED && bufferMs > 0) {
-        requestedDuration = static_cast<REFERENCE_TIME>(bufferMs) * 10000;
+        want.bufferFrames = (target.rate * bufferMs) / 1000;
     }
 
-    HRESULT initHr = client->Initialize(shareMode, streamFlags, requestedDuration, 0,
-                                        &fmt.Format, nullptr);
-    if (FAILED(initHr) && requestedDuration != 0) {
-        initHr = client->Initialize(shareMode, streamFlags, 0, 0, &fmt.Format, nullptr);
-        if (SUCCEEDED(initHr)) {
-            g_lastErrorText = "the device refused the requested buffer; the backend default is used";
-        }
-    }
+    // Read before `Initialize`, because that call is allowed to write back into
+    // the format it was handed. Keeping the "before" value is the only way to
+    // tell a device that agreed with us from one that quietly changed the depth.
+    const uint16_t requestedBits = static_cast<uint16_t>(want.containerBits);
 
-    if (FAILED(initHr) && target.rate != native.nSamplesPerSec) {
+    neiro::OpenedFormat opened;
+    std::string error;
+    auto stream = neiro::openWasapiStream(want, &opened, &error);
+
+    if (!stream && target.rate != native.nSamplesPerSec) {
         // The chosen rate was refused even though the probe said it would be
         // accepted. Rather than stop, fall back to the endpoint's own advertised
         // rate: the one format the driver is obliged to accept, and the one
@@ -3768,21 +3272,19 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
         // client before the real open, so a device reconfigured in between -- a TV
         // renegotiating over HDMI, a driver reloading -- is exactly the case where
         // a list measured a moment ago is no longer true. The cost of the branch
-        // is one extra Initialize; the alternative is not playing at all.
-        //
-        // Re-initialising the same client is only valid because the first attempt
-        // failed, which leaves the client uninitialised.
-        WAVEFORMATEXTENSIBLE fallbackFmt = wrap(&native, nativeValidBits);
-        const HRESULT retry = client->Initialize(shareMode, 0, 0, 0,
-                                                  &fallbackFmt.Format, nullptr);
-        if (SUCCEEDED(retry)) {
-            initHr = retry;
-            fmt = fallbackFmt;
+        // is one extra open; the alternative is not playing at all.
+        want.rate = native.nSamplesPerSec;
+        // The old retry asked for the device's own period, so an explicit buffer
+        // request is not carried into it.
+        want.bufferFrames = 0;
+        error.clear();
+        stream = neiro::openWasapiStream(want, &opened, &error);
+        if (stream) {
             // The reason changes with it. The listener asked for one rate, was
             // refused, and got another. "Resampled to the device rate" is true
             // here, but it was the *driver* that chose this rate and not their
             // setting, and the interface has to be able to say so.
-            target.rate = fmt.Format.nSamplesPerSec;
+            target.rate = opened.rate;
             target.resampling = effectiveSourceRate != target.rate;
             target.bitPerfect = false;
             target.coercedToSupportedRate = true;
@@ -3790,92 +3292,44 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
         }
     }
 
-    if (FAILED(remember(initHr))) {
-        // The single most useful thing this engine can say. Exclusive mode
-        // failing has two very different causes with two very different fixes,
-        // and the HRESULT alone does not distinguish them for a user:
-        //
-        //   * the format was rejected -- retrying will not help, a different
-        //     device or a different output mode might;
-        //   * something else has the endpoint open -- closing that program will.
-        //
-        // AUDCLNT_E_ENDPOINT_CREATE_FAILED (0x8889000F) is the confusing one:
-        // Windows uses it both for a bad format and for "another app holds this
-        // device", so it cannot be read as either on its own.
-        char detail[128];
-        std::snprintf(detail, sizeof(detail), "0x%08X", static_cast<unsigned>(g_lastHr));
-        // State the facts and stop. AUDCLNT_E_ENDPOINT_CREATE_FAILED is used by
-        // Windows both for a format the endpoint will not accept and for an
-        // endpoint another application already holds, so naming either cause here
-        // is a guess -- and this project has already made that guess and been
-        // wrong. A DSD1024 file in Native mode asks for 5 644 800 Hz, which the
-        // HDMI endpoint cannot provide, and it arrives here under exactly the same
-        // code as a device held by another program.
-        //
-        // The caller knows more than this function does: it knows which rate was
-        // asked for and whether the endpoint supports it, so the honest message is
-        // the request and the result, and the diagnosis belongs one layer up.
-        g_lastErrorText = std::string("exclusive mode refused (") + detail + "): " +
-                          std::to_string(fmt.Format.nSamplesPerSec) + " Hz, " +
-                          std::to_string(fmt.Format.wBitsPerSample) + "-bit " +
-                          std::to_string(fmt.Format.nChannels) + "ch on this endpoint";
+    if (!stream) {
+        // The single most useful thing this engine can say, and the device layer
+        // already said it: the request, the result and the HRESULT. Naming a
+        // cause here would be a guess -- `AUDCLNT_E_ENDPOINT_CREATE_FAILED` is
+        // used by Windows both for a format the endpoint will not accept and for
+        // an endpoint another application already holds.
+        g_lastErrorText = error.empty() ? "the device refused to open" : error;
         return NAE_ERR_INITIALIZE;
     }
+    // A successful open can still have something to say: an explicit buffer
+    // request that was refused and replaced by the device default. This path has
+    // always reported that and continued.
+    if (!error.empty()) g_lastErrorText = error;
 
-    ComPtr<IAudioRenderClient> render;
-    if (FAILED(remember(neiro::wasapi::getService(client.Get(), __uuidof(IAudioRenderClient),
-                                                  render.GetAddressOf())))) {
-        return NAE_ERR_ACTIVATE;
-    }
-
-    // The device period, asked for explicitly.
-    // `Initialize` was already called above, once. It may not be called again --
-    // doing so returns AUDCLNT_E_NOT_INITIALIZED, which reads as the device
-    // refusing the format rather than the client refusing to initialise twice.
-    // That is what the second Initialize behind `if (frames > desired)` used to do,
-    // and its guard was not a logic error to be corrected.
-    //
-    // An explicit hnsBufferDuration was tried here and made it worse, which is worth
-    // recording because the reasoning was sound and the measurement still said no.
-    // Asking for 20 ms did work narrowly -- the device honoured it and the buffer
-    // shrank from 50.67 ms to 21.33 ms -- but the delivered rate fell from 85.3% to
-    // 68.3%, because the device's real grant interval is longer than whatever buffer
-    // size it reports:
-    //
-    //   reported 50.67 ms, granted every 62.5 ms  ->  85.3% of real time
-    //   reported 21.33 ms, granted every 31.2 ms  ->  68.3% of real time
-    //
-    // So the period here belongs to the display link, not to this request, and the
-    // under-feed cannot be negotiated away. The two faults are separate: the
-    // under-feed is a property of this endpoint, the stale-buffer bubbling is ours.
-    const bool tracing = getenv("NAE_TRACE") != nullptr;
-    UINT32 frames = 0;
-    HRESULT hr = remember(client->GetBufferSize(&frames));
-    if (FAILED(hr) || frames == 0) {
-        return NAE_ERR_INITIALIZE;
-    }
-    if (tracing) {
-        std::fprintf(stderr, "[nae] granted frames=%u (%.2f ms) rate=%u\n", frames,
-                     target.rate ? 1000.0 * frames / target.rate : 0.0, target.rate);
-    }
+    // Both widths, kept apart on purpose. `containerBits` is the word the driver
+    // takes; `validBits` is how many of its bits are audio.
+    const uint16_t deviceValidBits = static_cast<uint16_t>(
+        opened.validBits ? opened.validBits : opened.containerBits);
 
     auto* handle = new (std::nothrow) NAE_Handle();
     if (!handle) {
         return NAE_ERR_NO_MEMORY;
     }
-    handle->device = device;
-    handle->client = client;
-    handle->render = render;
-    handle->fmt = fmt;
-    // `fmt` has been through `Initialize`, so it now holds whatever the device
+    handle->stream = stream;
+    // `opened` was measured after `Initialize`, so it holds whatever the device
     // agreed to -- the format the render loop must write, not the format that was
     // asked for. Keep both, because the difference between them is the single most
     // useful thing to know when the output comes out wrong.
-    handle->grantedBits = fmt.Format.wBitsPerSample;
+    handle->fmt.rate = opened.rate;
+    handle->fmt.channels = opened.channels;
+    handle->fmt.containerBits = opened.containerBits;
+    handle->fmt.validBits = opened.validBits;
+    handle->fmt.blockAlign = opened.channels * ((opened.containerBits + 7u) / 8u);
+    handle->fmt.isFloat = opened.isFloat;
+    handle->grantedBits = static_cast<uint16_t>(opened.containerBits);
     handle->requestedBits = requestedBits;
-    handle->bufferFrames = frames;
-    handle->renderEvent = renderEvent;
-    handle->latencyMs = 1000.0 * static_cast<double>(frames) / target.rate;
+    handle->bufferFrames = opened.bufferFrames;
+    handle->latencyMs = opened.latencyMs;
     handle->sourceRate = effectiveSourceRate;
     handle->resampling = target.resampling;
     handle->bitPerfect = target.bitPerfect;
@@ -3888,8 +3342,8 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
         std::string err;
         const auto q = static_cast<neiro::ResamplerQuality>(
             quality >= 0 && quality <= 2 ? quality : static_cast<int32_t>(neiro::ResamplerQuality::High));
-        if (!handle->resampler.prepare(fmt.Format.nChannels, handle->sourceRate,
-                                      target.rate, q, &err)) {
+        if (!handle->resampler.prepare(static_cast<int>(opened.channels), handle->sourceRate,
+                                      opened.rate, q, &err)) {
             delete handle;
             remember(E_FAIL);
             return NAE_ERR_INITIALIZE;
@@ -3900,9 +3354,6 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
     // narrower than the pipeline's internal precision. A 24-in-32 endpoint
     // therefore passes through untouched, which is correct: there is
     // nothing to dither.
-    const uint16_t deviceValidBits = fmt.Samples.wValidBitsPerSample
-                                         ? fmt.Samples.wValidBitsPerSample
-                                         : fmt.Format.wBitsPerSample;
     handle->dither.set_valid_bits(deviceValidBits);
     handle->dithered = handle->dither.active();
 
@@ -3933,7 +3384,7 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
         handle->bitPerfect = false;
         handle->reason = neiro::PerfectReason::SharedMode;
     } else if (handle->fileChannels != 0 &&
-        static_cast<int32_t>(fmt.Format.nChannels) != handle->fileChannels) {
+        static_cast<int32_t>(opened.channels) != handle->fileChannels) {
         handle->bitPerfect = false;
         handle->reason = neiro::PerfectReason::ChannelConverted;
     } else if (target.coercedToSupportedRate) {
@@ -3959,12 +3410,12 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
     // 记下实际开流用的模式，供 `NAE_QuerySignalPath` 如实上报。
     handle->exclusive = (shareMode == AUDCLNT_SHAREMODE_EXCLUSIVE);
 
-    if (outSampleRate) *outSampleRate = static_cast<int32_t>(fmt.Format.nSamplesPerSec);
+    if (outSampleRate) *outSampleRate = static_cast<int32_t>(opened.rate);
     if (outSourceRate) *outSourceRate = static_cast<int32_t>(effectiveSourceRate);
-    if (channels) *channels = static_cast<int32_t>(fmt.Format.nChannels);
-    if (bitsPerSample) *bitsPerSample = static_cast<int32_t>(fmt.Format.wBitsPerSample);
+    if (channels) *channels = static_cast<int32_t>(opened.channels);
+    if (bitsPerSample) *bitsPerSample = static_cast<int32_t>(opened.containerBits);
     if (validBits) *validBits = static_cast<int32_t>(deviceValidBits);
-    if (isFloat) *isFloat = (fmt.SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ? 1 : 0;
+    if (isFloat) *isFloat = opened.isFloat ? 1 : 0;
     if (resampling) *resampling = handle->resampling ? 1 : 0;
     if (dithered) *dithered = handle->dithered ? 1 : 0;
     if (bitPerfect) *bitPerfect = handle->bitPerfect ? 1 : 0;
@@ -3973,6 +3424,79 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
     *out = handle;
     return NAE_OK;
 }
+#else
+// The macOS open is in open_coreaudio.cpp. The split is a file boundary, not an
+// `#ifdef` boundary: a change to one platform's open path lands in a file the
+// other platform does not compile.
+#endif
+
+
+char* duplicateString(const std::string& in) {
+    char* out = static_cast<char*>(std::malloc(in.size() + 1));
+    if (!out) return nullptr;
+    std::memcpy(out, in.c_str(), in.size() + 1);
+    return out;
+}
+
+// ---- restored from git HEAD ----
+void NAE_Close(NAE_Handle* handle) NAE_NOEXCEPT {
+    if (!handle) return;
+    // The one place the resampler may be flushed. A filter holds its last frames
+    // back until it is told the source has ended, and this is the only point at
+    // which that is true.
+    //
+    // The result is discarded: a stream is being torn down and there is nowhere
+    // left to deliver the tail to. Draining it would only delay the close.
+    if (handle->resampler.ready()) {
+        std::vector<float> discard;
+        std::string err;
+        handle->resampler.flush(&discard, &err);
+    }
+    if (handle) {
+        stopDecodeThread(handle);
+        handle->dopDsf.reset();
+        handle->dopDff.reset();
+    }
+    delete handle;
+}
+
+#ifdef _WIN32
+char* NAE_GetDefaultDeviceId(void) NAE_NOEXCEPT {
+    try {
+        if (FAILED(ensureCom())) return nullptr;
+
+        ComPtr<IMMDeviceEnumerator> enumerator;
+        if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&enumerator))) ||
+            !enumerator) {
+            return nullptr;
+        }
+
+        // eConsole, not eMultimedia: this is the endpoint a user means by
+        // "the sound", and it is what a music player should follow.
+        ComPtr<IMMDevice> device;
+        const HRESULT hr = remember(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device));
+        if (FAILED(hr) || !device) return nullptr;
+
+        // deviceId wraps GetId, which allocates with CoTaskMem; it copies into
+        // a std::wstring and frees it, so nothing leaks across the boundary.
+        std::wstring id;
+        if (FAILED(neiro::wasapi::deviceId(device.Get(), id)) || id.empty()) return nullptr;
+
+        const int needed =
+            WideCharToMultiByte(CP_UTF8, 0, id.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (needed <= 1) return nullptr;
+
+        std::string utf8(static_cast<size_t>(needed - 1), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, id.c_str(), -1, utf8.data(), needed, nullptr, nullptr);
+        // WideCharToMultiByte wrote a terminating NUL at index needed-1, which
+        // is one past the string, so the std::string stays well-formed.
+        return duplicateString(utf8);
+    } catch (...) {
+        return nullptr;
+    }
+}
+#endif
 
 int32_t NAE_QuerySignalPath(NAE_Handle* handle, NAE_SignalPath* out) NAE_NOEXCEPT {
     // The caller's declared size, read before anything is written.
@@ -4025,10 +3549,10 @@ int32_t NAE_QuerySignalPath(NAE_Handle* handle, NAE_SignalPath* out) NAE_NOEXCEP
     if (handle->dopMode) {
         local.sourceRate = handle->fileSampleRate;
         local.sourceChannels = handle->fileChannels;
-        local.sampleRate = static_cast<int32_t>(handle->fmt.Format.nSamplesPerSec);
-        local.channels = static_cast<int32_t>(handle->fmt.Format.nChannels);
-        local.bitsPerSample = static_cast<int32_t>(handle->fmt.Format.wBitsPerSample);
-        local.validBits = static_cast<int32_t>(handle->fmt.Samples.wValidBitsPerSample);
+        local.sampleRate = static_cast<int32_t>(handle->fmt.rate);
+        local.channels = static_cast<int32_t>(handle->fmt.channels);
+        local.bitsPerSample = static_cast<int32_t>(handle->fmt.containerBits);
+        local.validBits = static_cast<int32_t>(handle->fmt.validBits);
         local.isFloat = 0;
         local.resampling = 0;
         local.dithered = 0;
@@ -4045,11 +3569,11 @@ int32_t NAE_QuerySignalPath(NAE_Handle* handle, NAE_SignalPath* out) NAE_NOEXCEP
     }
     local.sourceRate = static_cast<int32_t>(handle->sourceRate);
     local.sourceChannels = static_cast<int32_t>(handle->fileChannels);
-    local.sampleRate = static_cast<int32_t>(handle->fmt.Format.nSamplesPerSec);
-    local.channels = static_cast<int32_t>(handle->fmt.Format.nChannels);
-    local.bitsPerSample = static_cast<int32_t>(handle->fmt.Format.wBitsPerSample);
-    local.validBits = static_cast<int32_t>(handle->fmt.Samples.wValidBitsPerSample);
-    local.isFloat = (handle->fmt.SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ? 1 : 0;
+    local.sampleRate = static_cast<int32_t>(handle->fmt.rate);
+    local.channels = static_cast<int32_t>(handle->fmt.channels);
+    local.bitsPerSample = static_cast<int32_t>(handle->fmt.containerBits);
+    local.validBits = static_cast<int32_t>(handle->fmt.validBits);
+    local.isFloat = (handle->fmt.isFloat) ? 1 : 0;
     local.resampling = handle->resampling ? 1 : 0;
     local.dithered = handle->dithered ? 1 : 0;
     local.bitPerfect = handle->bitPerfect ? 1 : 0;
@@ -4087,23 +3611,15 @@ int32_t NAE_QuerySignalPath(NAE_Handle* handle, NAE_SignalPath* out) NAE_NOEXCEP
     local.grantedBits = handle->grantedBits;
 
     // Latency, split. The buffer part is the audio we have queued and the
-    // listener has not heard; the driver part is what WASAPI reports for the
+    // listener has not heard; the driver part is what the backend reports for the
     // stream, which is downstream of us.
     //
-    // `GetStreamLatency` is read on every call rather than cached at open,
-    // because the device is allowed to change it while the stream runs and a
-    // cached number would be a number about the past. A failure is reported as
-    // zero rather than folded into the buffer figure: "we do not know" and "the
-    // driver says nothing" must not add up to the same display.
-    REFERENCE_TIME driverTicks = 0;
-    double driverLatencyMs = 0.0;
-    if (handle->client) {
-        const UINT32 rate = handle->fmt.Format.nSamplesPerSec;
-        if (SUCCEEDED(handle->client->GetStreamLatency(&driverTicks)) && rate > 0) {
-            // REFERENCE_TIME is 100-nanosecond units.
-            driverLatencyMs = static_cast<double>(driverTicks) / 10000.0;
-        }
-    }
+    // The driver figure is read on every call rather than cached at open, because
+    // the device is allowed to change it while the stream runs and a cached number
+    // would be a number about the past. A backend that cannot answer -- the macOS
+    // ring has no such figure -- returns zero rather than a guess: "we do not
+    // know" and "the driver says nothing" must not add up to the same display.
+    const double driverLatencyMs = handle->stream ? handle->stream->driverLatencyMs() : 0.0;
     local.bufferFrames = static_cast<int32_t>(handle->bufferFrames);
     local.channelDelayMaxFrames = static_cast<int32_t>(handle->channelDelayMax);
     local.bufferLatencyMs = handle->latencyMs;
@@ -4112,7 +3628,7 @@ int32_t NAE_QuerySignalPath(NAE_Handle* handle, NAE_SignalPath* out) NAE_NOEXCEP
     // EQ and the convolver hold samples back, and the clip guard delays by its
     // lookahead; a host that syncs video to `totalLatencyMs` needs them.
     {
-        const double rate = handle->fmt.Format.nSamplesPerSec;
+        const double rate = handle->fmt.rate;
         double dspMs = 0.0;
         if (rate > 0.0) {
             if (handle->eqEnabled && handle->eqLinear) {
@@ -4184,1173 +3700,29 @@ int32_t NAE_QuerySignalPath(NAE_Handle* handle, NAE_SignalPath* out) NAE_NOEXCEP
     local.seamHistogramMax = kSeamBuckets;
     local.deviceRateActual = handle->deviceRateActual;
     local.silenceFramesWritten = static_cast<uint64_t>(handle->silenceFramesWritten);
-    local.bufferDurationMs = handle->fmt.Format.nSamplesPerSec
+    local.bufferDurationMs = handle->fmt.rate
                               ? 1000.0 * static_cast<double>(handle->bufferFrames) /
-                                    static_cast<double>(handle->fmt.Format.nSamplesPerSec)
+                                    static_cast<double>(handle->fmt.rate)
                               : 0.0;
     local.deviceLostCount = handle->deviceLostCount;
     local.recoveryCount = handle->recoveryCount;
     return NAE_OK;
 }
 
-int32_t NAE_QuerySupportedRates(NAE_Handle* handle, uint32_t* rates, uint32_t capacity,
-                                uint32_t* outCount) NAE_NOEXCEPT {
-    if (outCount) *outCount = 0;
 
-    std::vector<uint32_t> cached;
-    bool probed = false;
-    {
-        std::lock_guard<std::mutex> lock(rateCacheMutex());
-        const RateCache& cache = rateCache();
-        probed = cache.probed;
-        cached = cache.rates;
-    }
-    if (probed && !cached.empty()) {
-        if (outCount) *outCount = static_cast<uint32_t>(cached.size());
-        if (rates && capacity > 0) {
-            const uint32_t n = cached.size() < capacity
-                                   ? static_cast<uint32_t>(cached.size())
-                                   : capacity;
-            std::memcpy(rates, cached.data(), n * sizeof(uint32_t));
-        }
-        return NAE_OK;
-    }
-
-    // Not probed yet, or the probe found nothing at all -- which is contention
-    // rather than a capability answer. NAE_OK with a count of zero, and the
-    // engine keeps its previous behaviour. A hard error here would be wrong: the
-    // caller has no way to distinguish "this device supports no rates" from "I
-    // could not ask", and treating the second as the first stops playback.
-    if (!handle) return NAE_OK;
-
-    return NAE_OK;
-}
-
-// The share mode a stream is opened in.
-//
-// It is a parameter rather than a constant because there are now two entry
-// points and the two differ in exactly this one thing. Everything else -- the
-// negotiation, the rate choice, the decoder, the render loop -- is shared, so
-// threading a mode through is the whole of the change and there is no second
-// implementation to drift.
-//
-// The mode also decides what may be *claimed*: a shared stream goes through the
-// Windows mixer, so `bitPerfect` is forced false with `PerfectReason::SharedMode`
-// whatever the rate negotiation concluded. A shared stream that happens to run at
-// the source rate is still not bit-perfect, and reporting it as such is the exact
-// claim this project does not make.
-int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outputMode,
-                            int32_t fixedRate, int32_t quality, AUDCLNT_SHAREMODE shareMode,
-                            NAE_Handle** out,
-                            int32_t* outSampleRate, int32_t* outSourceRate,
-                            int32_t* channels, int32_t* bitsPerSample, int32_t* validBits,
-                            int32_t* isFloat, int32_t* resampling, int32_t* dithered,
-                            int32_t* bitPerfect, double* latencyMs,
-                            int32_t bufferMode, uint32_t bufferMs);  // may throw
-
-/// Add device frames to the delivered-rate window, and publish when it is long enough.
-///
-/// A free function rather than a block inside the render loop, because two paths now
-/// feed it: the audio path and the paused path that hands the device silence. When
-/// only one of them did, the window was defined by whichever path happened to hold
-/// the code, and the other one silently fell outside the definition.
-///
-/// Counts every frame the device was handed, silence included. The claim this makes
-/// is "device frames per second of wall clock", and the device consumes silence at
-/// the rate it consumes audio -- a device clock running slow is just as visible
-/// through a pause as through music. `silenceFramesWritten` is the field that says a
-/// pause happened; one field, one claim, rather than one field carrying both.
-///
-/// Two corrections are folded in here, both because the window used to include the
-/// start-up transient and so described the first moments of a stream rather than the
-/// stream. It read 98.5% before the bubbling fix and 98.4% after it: the click went
-/// away and this did not move, which is what made it suspect. The same error had
-/// produced a "0.9701 of real time" reading sitting next to a drift of 0.6 ms with no
-/// visible contradiction between them.
-///
-/// So the first 3 s is discarded outright -- opening a stream costs real time and that
-/// cost is not playback -- and the clock is QueryPerformanceCounter rather than
-/// GetTickCount64, whose 15.6 ms tick is coarse against a 53 ms buffer.
-static void chargeRateWindow(NAE_Handle* handle, int64_t frames) {
-    if (!handle) return;
-    const double now = neiro::wasapi::nowMsHr();
-    if (handle->rateWindowStart == 0.0) {
-        handle->rateWindowStart = now;
-        handle->rateWindowFrames = 0;
-    }
-    handle->rateWindowFrames += frames;
-    const double elapsed = now - handle->rateWindowStart;
-    if (elapsed >= 3000.0) {
-        handle->rateWindowStart = now;
-        handle->rateWindowFrames = 0;
-        handle->rateWarmupDone = true;
-    } else if (handle->rateWarmupDone && elapsed >= 500.0) {
-        handle->deviceRateActual =
-            1000.0 * static_cast<double>(handle->rateWindowFrames) / elapsed;
-        handle->rateWindowStart = now;
-        handle->rateWindowFrames = 0;
-    }
-}
-
-/// Window length for the output tap, in device frames.
-///
-/// A power of two because the transform is radix-2, and 4096 because it is the
-/// smallest length that gives useful resolution across the whole audible band at
-/// every rate this engine opens: at 44.1 kHz one bin is 10.8 Hz, which is narrow
-/// enough to see a single harmonic, and at 192 kHz it is 46.9 Hz.
-///
-/// It is also the length that decides what the display can resolve. 2048 at 44.1
-/// kHz is 21.5 Hz per bin, which smears adjacent harmonics together, and 8192 is
-/// 92 ms of history -- long enough that a drum hit is gone before the frame that
-/// would show it is drawn. 4096 is 93 ms at 44.1 kHz and 21 ms at 192 kHz, and the
-/// asymmetry is stated rather than hidden: the display is sharper on a
-/// high-rate path because the same window is shorter in time there.
-static constexpr size_t kSpectrumFft = 4096;
-
-/// 包络的帧间隔，毫秒。
-///
-/// 与 `src/scripts/audio/tempo.js` 的 `HOP_MS` 取同一个值。两条路由必须用同一个
-/// 帧间隔，否则 exclusive 和 Web Audio 会给出不同的 BPM，而两者都看起来是对的——
-/// 那正是这个项目最难查的那类 bug。数值选 5 ms 是沿用前端的既有取值，不是重新
-/// 调优的结果：BPM 的分辨力由后面的自相关决定，帧间隔只需要细过一个最短的音符间隔
-/// （十六分音符在 180 BPM 下是 83 ms，5 ms 是它的 1/16）。
-constexpr double kEnvelopeHopMs = 5.0;
-
-/// 包络保留的帧数。
-///
-/// 4096 帧 × 5 ms = 20.5 秒。选它是因为节拍检测的自相关窗口需要覆盖至少 4 个
-/// 最长拍周期：60 BPM 是 1 秒，4 个是 4 秒，20 秒有五倍余量。
-///
-/// 也因为它和 `kSpectrumFft` 同为 4096，这个数字不是巧合调出来的，而是让两条
-/// 通路的心跳一致，方便对照。
-constexpr size_t kEnvelopeFrames = 4096;
-
-/// Feed `frames` device frames of channel 0 into the tap. `samples` may be null,
-/// which means silence.
-///
-/// Silence is fed rather than skipped. A pause that left the previous window in
-/// place would leave a spectrum on screen that looked exactly like live audio,
-/// and a paused player showing live audio is a claim it is not making. The cost
-/// is one store per frame, which is the same cost the audio branch pays.
-static void feedSpectrum(NAE_Handle* handle, const double* samples, size_t frames) {
-    if (!handle) return;
-    if (handle->spectrumRing.empty()) handle->spectrumRing.assign(kSpectrumFft, 0.0);
-    if (frames == 0) return;
-    std::lock_guard<std::mutex> guard(handle->spectrumLock);
-    // A rate change invalidates the window: a ring holding samples from two rates
-    // is not a measurement of either, so it is emptied rather than blended.
-    const uint32_t rate = handle->fmt.Format.nSamplesPerSec;
-    if (handle->spectrumRate != rate) {
-        handle->spectrumRate = rate;
-        handle->spectrumRing.assign(kSpectrumFft, 0.0);
-        handle->spectrumWrite = 0;
-        handle->spectrumFilled = 0;
-    }
-    if (frames >= kSpectrumFft) {
-        // Longer than the window: only the tail can be in it.
-        const size_t tail = frames - kSpectrumFft;
-        samples = samples ? samples + tail : nullptr;
-        handle->spectrumWrite = 0;
-        handle->spectrumFilled = 0;
-        frames = kSpectrumFft;
-    }
-    const size_t fedFrames = frames;
-    if (std::getenv("NAE_TRACE_SPECTRUM")) {
-        std::fprintf(stderr, "[nae:feed] n=%zu first:", frames);
-        for (size_t i = 0; i < 3 && i < frames; ++i) {
-            std::fprintf(stderr, " %.5f", samples ? samples[i] : 0.0);
-        }
-        std::fprintf(stderr, "  write=%zu filled=%zu totalFed=%llu\n", handle->spectrumWrite,
-                     handle->spectrumFilled,
-                     static_cast<unsigned long long>(handle->spectrumFramesFed));
-    }
-    for (size_t i = 0; i < frames; ++i) {
-        handle->spectrumRing[handle->spectrumWrite] = samples ? samples[i] : 0.0;
-        if (++handle->spectrumWrite == kSpectrumFft) handle->spectrumWrite = 0;
-        if (handle->spectrumFilled < kSpectrumFft) ++handle->spectrumFilled;
-    }
-    // The real count, counted before the clamp above shortened it.
-    //
-    // `framesFed` is the only way a caller tells a live reading from a leftover
-    // one, so it has to count device frames and nothing else. It was reading the
-    // post-clamp value, which on a path that feeds short blocks -- the sine path
-    // feeds 4 to 28 frames at a time -- undercounts by more than two orders of
-    // magnitude. A staleness check built on that would have declared a live
-    // stream dead.
-    handle->spectrumFramesFed += fedFrames;
-
-    // 包络在这里算，而不是交给读者算——否则就得把原始样本交给读者，而那恰恰是整套
-    // 架构要防的事。
-    //
-    // 用平均绝对值而不是 RMS：便宜三分之一，而且起始点是能量事件。前端 `tempo.js`
-    // 选的是同一个，两者一致才能让两条路由的答案**可比**，而不只是「差不多」。
-    if (handle->envelope.empty()) {
-        handle->envelope.assign(kEnvelopeFrames, 0.0f);
-        handle->envelopeFill = 0;
-        handle->envelopeEpoch = 0;
-        // 环重建了，攒了一半的那一帧也扔掉——否则它会跨过一段不属于自己的音频。
-        handle->envelopeAccum = 0.0;
-        handle->envelopeAccumN = 0;
-    }
-    if (handle->envelopeRate != rate) {
-        handle->envelopeRate = rate;
-        handle->envelope.assign(kEnvelopeFrames, 0.0f);
-        handle->envelopeFill = 0;
-        handle->envelopeEpoch = 0;
-        // 环重建了，攒了一半的那一帧也扔掉——否则它会跨过一段不属于自己的音频。
-        handle->envelopeAccum = 0.0;
-        handle->envelopeAccumN = 0;
-    }
-    // 设备速率下的 5 ms。做了保护：速率为零会除零，得出零帧——而零帧读起来是
-    // 「没有包络」，不是一个错误。
-    const size_t hop =
-        rate ? static_cast<size_t>(static_cast<double>(rate) * kEnvelopeHopMs / 1000.0) : 0;
-    if (hop > 0) {
-        // `samples` 为 nullptr 表示静音，而静音是被喂进去而不是跳过的。
-        // 跳过会让包络里留着上一段音乐，于是暂停的播放器会继续报告一首已经停下
-        // 的歌的节拍——而 `framesFed` 也不再推进，读者无法分辨这两者。
-        // **一帧 = 连续的 `hop` 个样本，跨调用攒够才写。**（见 handle 上那两个字
-        // 段的注释：原来每帧都从本次调用的 0 开始，末尾不足一帧也写成帧，于是帧率
-        // 跟着调用频率走而不是跟着采样率走。）
-        //
-        // `samples` 为 nullptr 表示静音，而静音是被喂进去而不是跳过的。跳过会让包络
-        // 里留着上一段音乐，于是暂停的播放器会继续报告一首已经停下的歌的节拍——而
-        // `framesFed` 也不再推进，读者无法分辨这两者。
-        for (size_t i = 0; i < frames; ++i) {
-            if (samples != nullptr) handle->envelopeAccum += std::fabs(samples[i]);
-            if (++handle->envelopeAccumN < hop) continue;
-            handle->envelope[handle->envelopeFill++] = static_cast<float>(
-                handle->envelopeAccum / static_cast<double>(hop));
-            if (handle->envelopeFill >= kEnvelopeFrames) handle->envelopeFill = 0;
-            ++handle->envelopeEpoch;
-            handle->envelopeAccum = 0.0;
-            handle->envelopeAccumN = 0;
-        }
-    }
-}
-
-/// In-place iterative radix-2 Cooley-Tukey on a power-of-two length.
-///
-/// Not the fastest transform available, and it does not need to be: it runs on
-/// whichever thread calls NAE_QuerySpectrum, never on the render thread, at
-/// roughly twenty times a second. A 4096-point transform is about fifty thousand
-/// butterflies, which is under a millisecond.
-///
-/// `re` and `im` must be the same length and a power of two. Anything else leaves
-/// them untouched, so a caller that got the size wrong gets a wrong answer rather
-/// than a wrong answer *and* a corrupted buffer.
-static void fftRadix2(std::vector<double>& re, std::vector<double>& im) {
-    const size_t n = re.size();
-    if (n < 2 || im.size() != n || (n & (n - 1)) != 0) return;
-    for (size_t i = 1, j = 0; i < n; ++i) {
-        size_t bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) {
-            std::swap(re[i], re[j]);
-            std::swap(im[i], im[j]);
-        }
-    }
-    for (size_t len = 2; len <= n; len <<= 1) {
-        const double ang = -2.0 * 3.14159265358979323846 / static_cast<double>(len);
-        const double wr = std::cos(ang);
-        const double wi = std::sin(ang);
-        for (size_t i = 0; i < n; i += len) {
-            double cr = 1.0;
-            double ci = 0.0;
-            for (size_t k = 0; k < len / 2; ++k) {
-                const double ur = re[i + k];
-                const double ui = im[i + k];
-                const double xr = re[i + k + len / 2];
-                const double xi = im[i + k + len / 2];
-                const double vr = xr * cr - xi * ci;
-                const double vi = xr * ci + xi * cr;
-                re[i + k] = ur + vr;
-                im[i + k] = ui + vi;
-                re[i + k + len / 2] = ur - vr;
-                im[i + k + len / 2] = ui - vi;
-                const double ncr = cr * wr - ci * wi;
-                ci = cr * wi + ci * wr;
-                cr = ncr;
-            }
-        }
-    }
-}
-
-int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bins,
-                          int32_t capacity) NAE_NOEXCEPT {
-    if (!info) return NAE_ERR_INVALID_ARGUMENT;
-    // A null buffer is legal only when the capacity is zero -- that is the
-    // documented "tell me the shape" call. Null with a non-zero capacity is a
-    // caller that believes it passed a buffer, and writing through it is a null
-    // dereference on the first element.
-    if (!bins && capacity > 0) return NAE_ERR_INVALID_ARGUMENT;
-    // Local plus a clamped copy, for the reason `NAE_QueryTags` gives: a
-    // smaller declared size must not be overrun by the fields this build added.
-    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_SpectrumInfo));
-    NAE_SpectrumInfo local{};
-    local.struct_size = full;
-    const uint32_t limit = declaredLimit(info->struct_size, full);
-    StructCommit<NAE_SpectrumInfo> commit{info, &local, limit};
-    if (!handle) return NAE_OK;
-
-    std::vector<double> re(kSpectrumFft, 0.0);
-    std::vector<double> im(kSpectrumFft, 0.0);
-    uint64_t fed = 0;
-    size_t filled = 0;
-    size_t write = 0;
-    {
-        std::lock_guard<std::mutex> guard(handle->spectrumLock);
-        if (handle->spectrumRing.empty()) return NAE_OK;
-        fed = handle->spectrumFramesFed;
-        filled = handle->spectrumFilled;
-        write = handle->spectrumWrite;
-        local.sampleRate = handle->spectrumRate;
-        // Read the ring oldest-first. `write` is where the next sample goes, so
-        // the oldest sample is the one currently under it once the ring is full.
-        if (filled == kSpectrumFft) {
-            for (size_t i = 0; i < kSpectrumFft; ++i) {
-                re[i] = handle->spectrumRing[(write + i) % kSpectrumFft];
-            }
-        } else {
-            // Not full yet: the first `filled` entries are the only real ones.
-            for (size_t i = 0; i < filled; ++i) re[i] = handle->spectrumRing[i];
-        }
-    }
-
-    local.fftSize = static_cast<uint32_t>(kSpectrumFft);
-    local.binCount = static_cast<uint32_t>(kSpectrumFft / 2);
-    local.validBits = handle->dither.valid_bits();
-    local.framesFed = fed;
-    if (filled == 0) return NAE_OK;
-
-    // Diagnostic, under NAE_TRACE_SPECTRUM rather than NAE_TRACE: the existing
-    // trace is about the render loop's decisions and this is about the tap's
-    // contents, and they get read for different faults.
-    //
-    // It exists because the tap was wrong twice in a way that looked completely
-    // plausible -- once reading a single ring slot 4096 times, which reported a
-    // clean staircase as if it were audio, and once counting clamped frames as
-    // real ones. Both produced a spectrum display that would have drawn
-    // something. Six sampled positions and the mean are enough to tell a window
-    // holding music from one holding a constant, which is the whole question.
-    if (std::getenv("NAE_TRACE_SPECTRUM") != nullptr) {
-        double mean = 0.0;
-        size_t argmax = 0;
-        double amax = 0.0;
-        for (size_t i = 0; i < filled; ++i) {
-            mean += re[i];
-            if (std::fabs(re[i]) > amax) {
-                amax = std::fabs(re[i]);
-                argmax = i;
-            }
-        }
-        mean /= static_cast<double>(filled);
-        std::fprintf(stderr,
-                     "[nae:spectrum] filled=%zu rate=%u fed=%llu write=%zu mean=%.6f amax=%.6f "
-                     "@%zu\n",
-                     filled, local.sampleRate, (unsigned long long)fed, write, mean, amax, argmax);
-        // The ring itself, walked from `write` exactly as the read path walks it, and
-        // also from index 0. Two walks because they must agree: if they do, the
-        // read path is faithful to the ring and the fault is in what was fed; if
-        // they do not, the fault is in the read.
-        std::fprintf(stderr, "[nae:spectrum] fromWrite:");
-        for (size_t i = 0; i < 12 && i < filled; ++i) {
-            std::fprintf(stderr, " %.5f", handle->spectrumRing[(write + i) % kSpectrumFft]);
-        }
-        std::fprintf(stderr, "\n");
-        std::fprintf(stderr, "[nae:spectrum] fromZero:");
-        for (size_t i = 0; i < 12 && i < filled; ++i) {
-            std::fprintf(stderr, " %.5f", handle->spectrumRing[i]);
-        }
-        std::fprintf(stderr, "\n");
-        // How far apart two identical values are, which is the period whatever
-        // the phase. Searched rather than sampled at a guessed stride: a stride
-        // of 96 at 1 kHz/192 kHz lands on every zero crossing and reports a flat
-        // line for a perfectly good tone, which is the mistake that made the
-        // first two runs of this instrument unreadable.
-        // The period, by counting samples between upward zero crossings.
-        //
-        // Not by looking for a repeat of the first value: a continuous tone's
-        // window essentially never contains two samples equal to within 1e-9, and
-        // the earlier version of this reported a confident "32 samples" for a
-        // tone that was a correct 1 kHz. A detector that cannot be wrong has to
-        // find a feature rather than a coincidence -- zero crossings are a
-        // feature, and averaging several of them beats trusting one.
-        //
-        // Averaged, because a crossing lands between two samples and rounding to
-        // the nearer one costs up to half a sample per crossing.
-        double firstCross = -1.0;
-        double lastCross = -1.0;
-        int crossings = 0;
-        for (size_t i = 1; i < kSpectrumFft; ++i) {
-            const double a = handle->spectrumRing[(write + i - 1) % kSpectrumFft];
-            const double b = handle->spectrumRing[(write + i) % kSpectrumFft];
-            if (a <= 0.0 && b > 0.0) {
-                // Linear interpolation for the sub-sample position.
-                const double frac = (b == a) ? 0.0 : (0.0 - a) / (b - a);
-                const double at = static_cast<double>(i - 1) + frac;
-                if (firstCross < 0.0) firstCross = at;
-                lastCross = at;
-                ++crossings;
-            }
-        }
-        const double measuredHz =
-            (crossings > 1)
-                ? static_cast<double>(crossings - 1) * local.sampleRate /
-                      static_cast<double>(lastCross - firstCross)
-                : 0.0;
-        std::fprintf(stderr,
-                     "[nae:spectrum] crossings=%d measuredHz=%.3f (want 1000.000)\n", crossings,
-                     measuredHz);
-    }
-
-    // Unnormalised level first, so `peak` and `rms` describe the signal rather
-    // than the window that was applied to it.
-    double sumSquares = 0.0;
-    double peak = 0.0;
-    for (size_t i = 0; i < filled; ++i) {
-        const double v = re[i];
-        sumSquares += v * v;
-        const double a = std::fabs(v);
-        if (a > peak) peak = a;
-    }
-    local.peak = peak;
-    local.rms = std::sqrt(sumSquares / static_cast<double>(filled));
-
-    // Hann, over the samples actually present rather than over the full window,
-    // so a partially filled ring is not scaled by a window that assumes more
-    // history than there is.
-    for (size_t i = 0; i < filled; ++i) {
-        const double w =
-            filled < 2 ? 1.0
-                      : 0.5 * (1.0 - std::cos(2.0 * 3.14159265358979323846 *
-                                               static_cast<double>(i) /
-                                               static_cast<double>(filled - 1)));
-        re[i] *= w;
-    }
-
-    fftRadix2(re, im);
-
-    // A real signal's spectrum is symmetric, so the second half carries no
-    // information. The factor of 2/n makes a full-scale sine read 1.0 in its bin,
-    // which is what lets a dB display use 0 dBFS as its reference.
-    const double scale = 2.0 / static_cast<double>(filled);
-    const int32_t want = static_cast<int32_t>(local.binCount);
-    const int32_t give = capacity < want ? capacity : want;
-    for (int32_t k = 0; k < give; ++k) {
-        const double m = std::sqrt(re[static_cast<size_t>(k)] * re[static_cast<size_t>(k)] +
-                                   im[static_cast<size_t>(k)] * im[static_cast<size_t>(k)]) *
-                         scale;
-        bins[k] = static_cast<float>(m);
-    }
-    return NAE_OK;
-}
-
-// `NAE_EnvelopeInfo` 的布局，**写成字面数字**。
-//
-// `rust/src/ffi.rs` 里那组 `offset_of!` 断言的是**同一组数字**。这一组是**这一次补上的**
-// ——它原来一条都没有，而 Rust 那一侧的断言当时写的是「相邻」关系（`a + 4 == b`），
-// **那种形式对字段重排是免疫的**：两边都把 `sample_rate` / `frame_hop_ms` 的位置写反了，
-// 而两边各自的断言都成立、`sizeof` 都是 48，于是编译通过、运行时才开始出垃圾数。
-//
-// 量到的后果：`frame_hop_ms` 读成 2.12e-318（44100 的位模式当 double），`sample_rate`
-// 读成 0，前端那个 BPM 估计器于是永远返回 null——界面上「BPM —」的根因。
-static_assert(offsetof(NAE_EnvelopeInfo, struct_size) == 0, "NAE_EnvelopeInfo 布局变了");
-static_assert(offsetof(NAE_EnvelopeInfo, frame_count) == 4, "NAE_EnvelopeInfo 布局变了");
-static_assert(offsetof(NAE_EnvelopeInfo, frame_hop_ms) == 8, "NAE_EnvelopeInfo 布局变了");
-static_assert(offsetof(NAE_EnvelopeInfo, sample_rate) == 16, "NAE_EnvelopeInfo 布局变了");
-static_assert(offsetof(NAE_EnvelopeInfo, framesFedPad) == 20, "NAE_EnvelopeInfo 布局变了");
-static_assert(offsetof(NAE_EnvelopeInfo, frames_fed) == 24, "NAE_EnvelopeInfo 布局变了");
-static_assert(offsetof(NAE_EnvelopeInfo, window_ms) == 32, "NAE_EnvelopeInfo 布局变了");
-static_assert(offsetof(NAE_EnvelopeInfo, frame_valid) == 40, "NAE_EnvelopeInfo 布局变了");
-static_assert(sizeof(NAE_EnvelopeInfo) == 48, "NAE_EnvelopeInfo 的 sizeof 变了");
-
-int32_t NAE_QueryEnvelope(NAE_Handle* handle, NAE_EnvelopeInfo* info, float* envelope,
-                          int32_t capacity) NAE_NOEXCEPT {
-    if (info == nullptr) return NAE_ERR_INVALID_ARGUMENT;
-    // Null is legal only with a zero capacity, as in NAE_QuerySpectrum.
-    if (!envelope && capacity > 0) return NAE_ERR_INVALID_ARGUMENT;
-    // Local plus a clamped copy, for the reason `NAE_QueryTags` gives.
-    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_EnvelopeInfo));
-    NAE_EnvelopeInfo local{};
-    local.struct_size = full;
-    const uint32_t limit = declaredLimit(info->struct_size, full);
-    StructCommit<NAE_EnvelopeInfo> commit{info, &local, limit};
-    if (handle == nullptr) return NAE_OK;
-
-    // 频谱那边用的同一把锁，因为两者读的都是渲染循环写的状态。包络是从同一个环形
-    // 缓冲推导出来的，所以不能各自加锁——否则读者可能看到一个已经换了采样率而
-    // 另一个还没换。
-    std::lock_guard<std::mutex> guard(handle->spectrumLock);
-    if (handle->envelope.empty()) return NAE_OK;
-
-    local.frame_count = static_cast<uint32_t>(handle->envelope.size());
-    local.frame_hop_ms = kEnvelopeHopMs;
-    local.sample_rate = handle->envelopeRate;
-    // 故意用频谱那个计数器：两者描述的是同一个环形缓冲，所以调用方比较这两个数
-    // 等于拿一个东西跟它自己比。给两个计数器只会引出一个问题——为什么频谱过期了
-    // 而包络没有——而那个问题只可能有一个答案，且答案必然是其中一个有 bug。
-    local.frames_fed = handle->spectrumFramesFed;
-    local.window_ms = static_cast<double>(local.frame_count) * kEnvelopeHopMs;
-
-    // **顺序是有保证的：最老的在前。**
-    //
-    // 这里原来是 `envelope[(envelopeFill + i) % size]`，也就是从**写指针**开始拷。
-    // 写满之后写指针处正好是最老的一帧（对的），**没写满的时候那是还没写过的区域**
-    // ——于是读者拿到的是一个「旋转 + 补零」的数组，而它没办法从 4096 个 float 里
-    // 看出旋转了多少。实测（`scripts/probe-tempo-window.mjs`）：非零段的起点在
-    // 1983 / 1243 / 420 / 0 之间动，节拍估计器在同一段音频上给出的数在 72 ~ 200
-    // 之间跳，置信度从没超过 0.5。
-    //
-    // 环本身仍然是一个环，只是**出口**归一化：没写满时最老的一帧在下标 0，
-    // 写满之后在写指针处。`frame_valid` 把「有几个是真的」一起报出去——原来那个字段
-    // 位置报的是**容量**，而容量和有效帧数在环没写满时不相等。
-    // **`envelopeFill` 不是「写过多少帧」。** 它是环上的一个下标，绕完一圈就回到小值
-    // ——原来这里用 `min(envelopeFill, size)` 当「有几帧是真的」，于是**环绕一圈之后
-    // 「有效帧数」会从四千多掉回几百**（实测 `probe-tempo-window`：11.1 秒那次 3977，
-    // 13.1 秒那次掉到 701）。`envelopeEpoch` 是**累计写过多少帧**，只增不减，那才是
-    // 这个数；`envelopeFill` 只在算「最老的一帧在哪」时有用。
-    const size_t size = handle->envelope.size();
-    const size_t filled = static_cast<size_t>(
-        std::min<uint64_t>(handle->envelopeEpoch, static_cast<uint64_t>(size)));
-    const size_t oldest = handle->envelopeEpoch >= size
-                              ? static_cast<size_t>(handle->envelopeEpoch % size)
-                              : 0;
-    const int32_t valid =
-        capacity < static_cast<int32_t>(filled) ? capacity : static_cast<int32_t>(filled);
-    for (int32_t i = 0; i < valid; ++i) {
-        envelope[i] = handle->envelope[(oldest + static_cast<size_t>(i)) % size];
-    }
-    local.frame_valid = valid > 0 ? static_cast<uint32_t>(valid) : 0u;
-    return NAE_OK;
-}
-
-#ifdef NEIRO_HAVE_FFMPEG
-namespace {
-
-/// 短窗 RMS 的口径：窗 400 ms、跳 100 ms。
-///
-/// **`src/scripts/audio/spectrum.js` 里有一份逐字对齐的镜像**，用的就是这两个数。
-/// 两条路线（引擎那趟整首解码 / Web Audio 手里的 AudioBuffer）要给同一个读数，改这里
-/// 就要改那里——和 peaks 那一份镜像同一个理由（见下面那段注释）。
-constexpr double kMetricsWindowMs = 400.0;
-constexpr double kMetricsHopMs = 100.0;
-
-/// 线性插值分位数（`q` 在 0..1）。输入按值拷贝：调用方要拿同一个数组问好几个 q。
-///
-/// 定义取最普通的那种：把 n 个值排序，位置 `q * (n - 1)`，落在这两个下标之间就插值。
-/// 不是「取第 floor(q*n) 个」——后者在 n 小的时候会把 p95 和 p10 指到同一个值上。
-double percentile(std::vector<double> values, double q) {
-    if (values.empty()) return 0.0;
-    std::sort(values.begin(), values.end());
-    const double pos = q * static_cast<double>(values.size() - 1);
-    const size_t lo = static_cast<size_t>(pos);
-    const size_t hi = std::min(lo + 1, values.size() - 1);
-    const double frac = pos - static_cast<double>(lo);
-    return values[lo] * (1.0 - frac) + values[hi] * frac;
-}
-
-
-// Offline tempo estimate from a 5 ms onset envelope. This is intentionally a
-// separate function from the live envelope tap: the host needs BPM for a file it
-// has not played.
-void estimateBpm(const std::vector<double>& envelope, double hopMs, double* bpm,
-                 double* confidence) {
-    *bpm = 0.0;
-    *confidence = 0.0;
-    if (envelope.size() < 40) return;
-    std::vector<double> onset(envelope.size(), 0.0);
-    for (size_t i = 1; i < envelope.size(); ++i) {
-        onset[i] = std::max(0.0, envelope[i] - envelope[i - 1]);
-    }
-    const double hopSec = hopMs / 1000.0;
-    const int minLag = std::max(1, static_cast<int>(std::lround(60.0 / (200.0 * hopSec))));
-    const int maxLag = std::max(minLag + 1, static_cast<int>(std::lround(60.0 / (60.0 * hopSec))));
-    std::vector<double> score(static_cast<size_t>(maxLag) + 2, 0.0);
-    for (int lag = minLag; lag <= maxLag; ++lag) {
-        double num = 0.0, e1 = 0.0, e2 = 0.0;
-        for (size_t i = 0; i + static_cast<size_t>(lag) < onset.size(); ++i) {
-            num += onset[i] * onset[i + static_cast<size_t>(lag)];
-            e1 += onset[i] * onset[i];
-            e2 += onset[i + static_cast<size_t>(lag)] * onset[i + static_cast<size_t>(lag)];
-        }
-        score[lag] = (e1 > 0.0 && e2 > 0.0) ? num / std::sqrt(e1 * e2) : 0.0;
-    }
-    int best = minLag;
-    for (int lag = minLag + 1; lag <= maxLag; ++lag) {
-        if (score[lag] > score[best]) best = lag;
-    }
-    if (score[best] <= 0.0) return;
-    double lag = static_cast<double>(best);
-    if (best > minLag && best < maxLag) {
-        const double a = score[best - 1];
-        const double b = score[best];
-        const double c = score[best + 1];
-        const double den = a - 2.0 * b + c;
-        if (std::fabs(den) > 1e-12) lag += 0.5 * (a - c) / den;
-    }
-    double beats = 60.0 / (lag * hopSec);
-    // Prefer the musical range; halve/double an octave only when it lands there.
-    while (beats > 180.0 && beats / 2.0 >= 60.0) beats /= 2.0;
-    while (beats < 70.0 && beats * 2.0 <= 200.0) beats *= 2.0;
-    *bpm = beats;
-    *confidence = std::min(1.0, score[best]);
-}
-
-/// 把整个文件解一遍，填出 `buckets` 个交错的 min/max，以及两个短窗响度指标。
-///
-/// 语义与 `src/scripts/audio/spectrum.js` 的 `computePeaks` **逐字对齐**：
-/// 只取**第 0 声道**，每桶的 lo/hi **都从 0 起**，分桶边界按帧数均分。
-///
-/// 为什么要对齐而不是「改好一点」：`paintTimeline` 和导出都用那份 peaks。两条路给出
-/// 不同形状的波形时，**看起来不一样的那个会被当成坏了一个**，而它其实只是另一套
-/// 约定。要改就两边一起改。
-// The cancellation flag is written by the host, on another thread, through
-// whatever its own atomics look like (Rust's AtomicI32 in this repository's
-// host). Reading it with a plain load would be a data race against that store;
-// the relaxed load is the cheapest thing that is not one, and it is all this
-// needs -- the flag is advisory, and a block of extra work is harmless.
-static inline bool cancelRequested(const int32_t* flag) {
-    if (!flag) return false;
-#if defined(__GNUC__) || defined(__clang__)
-    return __atomic_load_n(flag, __ATOMIC_RELAXED) != 0;
-#else
-    return *flag != 0;
-#endif
-}
-
-bool computePeaksFromFile(const std::string& path, uint32_t buckets,
-                          std::vector<float>* out, bool* complete,
-                          NAE_PeaksInfo* meta, NAE_AnalysisInfo* analysis,
-                          std::string* error, const int32_t* cancel = nullptr,
-                          bool* cancelled = nullptr) {
-    if (cancelled) *cancelled = false;
-    neiro::Decoder dec;
-    if (!dec.open(path, error)) return false;
-
-    const auto& info = dec.info();
-    const uint32_t ch = info.out_channels ? info.out_channels : 1;
-    // 分桶边界要用文件自己的帧数，而 `neiro::Decoder` 只报时长和采样率。这里用和
-    // `openExclusiveImpl` 里 `totalSourceFrames` **同一个**公式（那边也向上取了半个
-    // 采样率的帧数），这样两条路的分桶边界落在同一处。
-    const int64_t totalFrames =
-        static_cast<int64_t>(info.duration_ms / 1000.0 * info.sample_rate) +
-        static_cast<int64_t>(info.sample_rate) / 2;
-    if (totalFrames <= 0 || ch == 0) {
-        if (error) *error = "容器没有报时长，分桶边界算不出来";
-        return false;
-    }
-    const double per = static_cast<double>(totalFrames) / static_cast<double>(buckets);
-    if (analysis) {
-        std::memset(analysis, 0, sizeof(*analysis));
-        analysis->structSize = sizeof(*analysis);
-        analysis->analyzerVersion = NAE_ANALYZER_VERSION;
-        analysis->channels = static_cast<int32_t>(ch);
-        analysis->sampleRate = static_cast<int32_t>(info.sample_rate);
-        analysis->bitsPerSample = static_cast<int32_t>(info.bits_per_sample);
-        analysis->durationMs = static_cast<int32_t>(info.duration_ms);
-        std::snprintf(analysis->codec, sizeof(analysis->codec), "%s", info.codec.c_str());
-        const auto copyTag = [](char* dst, size_t cap, const std::string& src) {
-            if (cap == 0) return;
-            const size_t n = std::min(cap - 1, src.size());
-            std::memcpy(dst, src.data(), n);
-            dst[n] = '\0';
-        };
-        copyTag(analysis->title, sizeof(analysis->title), info.title);
-        copyTag(analysis->artist, sizeof(analysis->artist), info.artist);
-        copyTag(analysis->album, sizeof(analysis->album), info.album);
-        copyTag(analysis->albumArtist, sizeof(analysis->albumArtist), info.album_artist);
-        copyTag(analysis->track, sizeof(analysis->track), info.track);
-        copyTag(analysis->disc, sizeof(analysis->disc), info.disc);
-        copyTag(analysis->year, sizeof(analysis->year), info.year);
-        copyTag(analysis->genre, sizeof(analysis->genre), info.genre);
-        copyTag(analysis->composer, sizeof(analysis->composer), info.composer);
-        copyTag(analysis->comment, sizeof(analysis->comment), info.comment);
-        analysis->bitrateKbps = info.bitrate_kbps;
-        analysis->bitrateFromTag = info.bitrate_from_tag ? 1 : 0;
-        analysis->rgTrackValid = info.rg_track_valid ? 1 : 0;
-        analysis->rgTrackGainDb = info.rg_track_gain_db;
-        analysis->rgTrackPeak = info.rg_track_peak;
-        analysis->rgAlbumValid = info.rg_album_valid ? 1 : 0;
-        analysis->rgAlbumGainDb = info.rg_album_gain_db;
-        analysis->rgAlbumPeak = info.rg_album_peak;
-    }
-    if (meta) {
-        meta->duration_ms = info.duration_ms;
-        meta->sample_rate = info.sample_rate;
-        meta->channels = ch;
-        // 先写「没算」。下面每一条出口都可能在填数之前返回，而 0 **在这里**是唯一诚实
-        // 的初值：它说的是「这两个数不存在」，不是「这首歌是 0 dBFS」。
-        meta->metrics_window_ms = 0;
-        meta->metrics_hop_ms = 0;
-        meta->loudness_db = 0.0;
-        meta->dynamic_range_db = 0.0;
-    }
-
-    // ---- 短窗 RMS：和 peaks **同一趟**解码里累加 ----
-    //
-    // 这一趟的主要代价是解码（量过：典型曲目约 0.5 秒），所以顺手算出声级几乎免费。
-    //
-    // 做法是经典的「先按跳长分段、再把几段并成一个窗」：窗 400 ms / 跳 100 ms 就是每段
-    // 100 ms，四个连续段合起来是一个窗。反过来对每一帧开一个 400 ms 的窗，这一趟的内层
-    // 循环会多出四倍。
-    // 整数帧长，而且**四舍五入**：`spectrum.js` 那份镜像用的是 `Math.round`，两边必须
-    // 在同一些帧上分段。一个用 double、一个用整数时，44.1 kHz 上恰好一致，别的采样率上
-    // 会差一个样本——而它只要挪动一个窗，两个读数就都变了。
-    neiro::LoudnessMeter loudnessMeter;
-    const bool measureLoudness =
-        (meta || analysis) && loudnessMeter.configure(ch, static_cast<uint32_t>(info.sample_rate));
-
-    const int64_t hopFrames = std::max<int64_t>(
-        1, static_cast<int64_t>(std::lround(kMetricsHopMs / 1000.0 * info.sample_rate)));
-    std::vector<double> segSq;
-    std::vector<int64_t> segN;
-
-    const int64_t onsetHopFrames = std::max<int64_t>(
-        1, static_cast<int64_t>(std::lround(5.0 / 1000.0 * info.sample_rate)));
-    std::vector<double> onsetEnvelope;
-    double onsetSum = 0.0;
-    int64_t onsetCount = 0;
-
-    int64_t frame = 0;
-    std::vector<float> block;
-    // `read` **流结束时返回 false**，而短读是正常的（一次一个包），所以终止条件是
-    // 「没有新样本」，不是「这一块比预期短」。
-    for (;;) {
-        // Between blocks, not inside one: a block is one packet, so the caller's
-        // worst-case delay is one packet rather than the whole file.
-        //
-        // The flag is read, never written. It exists as a separate export because
-        // the decode call is blocking: without a flag the caller owns, nobody
-        // could reach a decode that is already running.
-        if (cancelRequested(cancel)) {
-            if (cancelled) *cancelled = true;
-            if (error) *error = "cancelled";
-            return false;
-        }
-        block.clear();
-        const bool more = dec.read(&block, error);
-        if (block.empty()) {
-            // 正常结束：false + 空。中途出错也会走到这里，所以顺带看 error 有没有话。
-            *complete = !more && (error == nullptr || error->empty());
-            break;
-        }
-        const size_t frames = block.size() / ch;
-        if (measureLoudness) loudnessMeter.process(block.data(), frames, ch);
-        for (size_t i = 0; i < frames; ++i) {
-            const float v = block[i * ch];
-            uint32_t b = per > 0.0 ? static_cast<uint32_t>(static_cast<double>(frame) / per) : 0u;
-            if (b >= buckets) b = buckets - 1;
-            const size_t k = static_cast<size_t>(b) * 2;
-            if (v < (*out)[k]) (*out)[k] = v;
-            else if (v > (*out)[k + 1]) (*out)[k + 1] = v;
-
-            const size_t seg = static_cast<size_t>(frame / hopFrames);
-            if (seg >= segSq.size()) {
-                segSq.resize(seg + 1, 0.0);
-                segN.resize(seg + 1, 0);
-            }
-            // **所有声道的算术平均**，不是第 0 声道。peaks 只看第 0 声道是「画一条
-            // 波形」的约定（和 JS 那一份逐字对齐），而「这首歌有多响」说的是听者听到的
-            // 那一路：只量左声道，一个人声偏左的混音会读得偏轻或偏响。
-            double mono = 0.0;
-            for (uint32_t c = 0; c < ch; ++c) mono += block[i * ch + c];
-            mono /= static_cast<double>(ch);
-            segSq[seg] += mono * mono;
-            segN[seg] += 1;
-            if (analysis) {
-                onsetSum += std::fabs(mono);
-                if (++onsetCount >= onsetHopFrames) {
-                    onsetEnvelope.push_back(onsetSum / static_cast<double>(onsetCount));
-                    onsetSum = 0.0;
-                    onsetCount = 0;
-                }
-            }
-            ++frame;
-        }
-        if (!more) { *complete = (error == nullptr || error->empty()); break; }
-    }
-
-    // ---- 合成窗、开门限、取分位数 ----
-    //
-    // 只在前一趟**真的解到了东西**时才算。解不开的文件这里段数是 0，于是
-    // `metrics_window_ms` 保持 0（= 没有这两个数），而不是给出一对来自零个窗的
-    // 「0.0 dB」——那读起来是一个测量结果。
-    if ((meta || analysis) && !segSq.empty()) {
-        const int64_t wantSegments =
-            std::max<int64_t>(1, static_cast<int64_t>(std::lround(kMetricsWindowMs / kMetricsHopMs)));
-        const size_t perWindow = static_cast<size_t>(wantSegments);
-        std::vector<double> levels;
-        levels.reserve(segSq.size());
-        for (size_t k = 0; k + perWindow <= segSq.size(); ++k) {
-            double sum = 0.0;
-            int64_t n = 0;
-            for (size_t j = 0; j < perWindow; ++j) {
-                sum += segSq[k + j];
-                n += segN[k + j];
-            }
-            if (n <= 0) continue;
-            const double ms = sum / static_cast<double>(n);
-            // 数字静音的对数是负无穷，而一个 -inf 会把「动态范围」变成无穷大。压在
-            // -120 dBFS 上：那在 16 bit 的底噪之下，真实内容碰不到它。
-            levels.push_back(ms > 0.0 ? std::max(-120.0, 10.0 * std::log10(ms)) : -120.0);
-        }
-        if (!levels.empty()) {
-            // **门限**：丢掉比「最响那 5% 的分位」低 40 dB 以上的窗。片头片尾的数字
-            // 静音和段间底噪都落在这一档下面，而它们会把 p10 拉到 -120 dB——于是
-            // 「动态范围」报出一个 100+ dB 的数，那个数说的是这个文件有多安静，不是
-            // 它有多少动态。
-            const double gate = percentile(levels, 0.95) - 40.0;
-            std::vector<double> kept;
-            kept.reserve(levels.size());
-            for (const double v : levels) {
-                if (v >= gate) kept.push_back(v);
-            }
-            if (!kept.empty()) {
-                const double loudness = percentile(kept, 0.5);
-                const double dynamicRange =
-                    percentile(kept, 0.95) - percentile(kept, 0.10);
-                if (meta) {
-                    meta->metrics_window_ms =
-                        static_cast<uint32_t>(std::lround(kMetricsWindowMs));
-                    meta->metrics_hop_ms =
-                        static_cast<uint32_t>(std::lround(kMetricsHopMs));
-                    // 响度取**中位数**：比均值稳——一段独奏、一段安静的前奏都不至于把它拖走。
-                    meta->loudness_db = loudness;
-                    // 动态范围取两个分位数之差，两端都取分位数而不是极值：单个离群的窗
-                    // （一下爆音、一段两秒的静音）不该定义一整首歌的动态。
-                    meta->dynamic_range_db = dynamicRange;
-                }
-                if (analysis) {
-                    analysis->metricsWindowMs =
-                        static_cast<uint32_t>(std::lround(kMetricsWindowMs));
-                    analysis->metricsHopMs =
-                        static_cast<uint32_t>(std::lround(kMetricsHopMs));
-                    analysis->loudnessDb = loudness;
-                    analysis->dynamicRangeDb = dynamicRange;
-                }
-            }
-        }
-    }
-    if (measureLoudness && (meta || analysis)) {
-        const neiro::LoudnessMeter::Result lr = loudnessMeter.finish();
-        if (meta) {
-            meta->lufs_integrated = lr.integratedLufs;
-            meta->lufs_momentary_max = lr.momentaryMaxLufs;
-            meta->lufs_short_term_max = lr.shortTermMaxLufs;
-            meta->lufs_range = lr.rangeLu;
-            meta->lufs_valid = lr.valid ? 1 : 0;
-            meta->lufs_short_term_valid = lr.shortTermValid ? 1 : 0;
-        }
-        if (analysis) {
-            analysis->lufsIntegrated = lr.integratedLufs;
-            analysis->lufsMomentaryMax = lr.momentaryMaxLufs;
-            analysis->lufsShortTermMax = lr.shortTermMaxLufs;
-            analysis->lufsRange = lr.rangeLu;
-            analysis->lufsValid = lr.valid ? 1 : 0;
-            analysis->lufsShortTermValid = lr.shortTermValid ? 1 : 0;
-        }
-    }
-    if (analysis) {
-        estimateBpm(onsetEnvelope, 5.0, &analysis->bpm, &analysis->bpmConfidence);
-        analysis->bpmValid =
-            (analysis->bpmConfidence >= 0.2 && analysis->bpm >= 30.0 &&
-             analysis->bpm <= 300.0)
-                ? 1
-                : 0;
-    }
-    return true;
-}
-
-}  // namespace
-#endif  // NEIRO_HAVE_FFMPEG
-
-// `NAE_PeaksInfo` 的布局，**写成字面数字**。
-//
-// `rust/src/ffi.rs` 里那组 `offset_of!` 断言的是**同一组数字**。两边各写各的期望值，
-// 所以改了一边而没改另一边时，编译会失败 —— 这才是跨语言那一层的检查。
-//
-// 为什么这个结构体需要它：这一版加了一对 `double` 响度指标（`loudness_db` /
-// `dynamic_range_db`），于是**偏移和 sizeof 全都变了**（40 → 56）。那正是这组断言存在
-// 的场景：只改一边的话，另一边的 `offset_of!` 会当场编译不过，而不是在运行时把
-// 「响度」读成「采样率」。
-static_assert(offsetof(NAE_PeaksInfo, struct_size) == 0, "NAE_PeaksInfo 布局变了");
-static_assert(offsetof(NAE_PeaksInfo, bucket_count) == 4, "NAE_PeaksInfo 布局变了");
-static_assert(offsetof(NAE_PeaksInfo, complete) == 8, "NAE_PeaksInfo 布局变了");
-static_assert(offsetof(NAE_PeaksInfo, reserved0) == 12, "NAE_PeaksInfo 布局变了");
-static_assert(offsetof(NAE_PeaksInfo, duration_ms) == 16, "NAE_PeaksInfo 布局变了");
-static_assert(offsetof(NAE_PeaksInfo, sample_rate) == 24, "NAE_PeaksInfo 布局变了");
-static_assert(offsetof(NAE_PeaksInfo, channels) == 28, "NAE_PeaksInfo 布局变了");
-static_assert(offsetof(NAE_PeaksInfo, metrics_window_ms) == 32, "NAE_PeaksInfo 布局变了");
-static_assert(offsetof(NAE_PeaksInfo, metrics_hop_ms) == 36, "NAE_PeaksInfo 布局变了");
-// 40 是 8 的倍数，所以两个 `double` 之间没有内部 padding；48 + 8 = 56，也没有尾部
-// padding（结构体对齐是 8，56 是 8 的倍数）。
-static_assert(offsetof(NAE_PeaksInfo, loudness_db) == 40, "NAE_PeaksInfo 布局变了");
-static_assert(offsetof(NAE_PeaksInfo, dynamic_range_db) == 48, "NAE_PeaksInfo 布局变了");
-static_assert(offsetof(NAE_PeaksInfo, lufs_integrated) == 56, "NAE_PeaksInfo layout changed");
-static_assert(offsetof(NAE_PeaksInfo, lufs_momentary_max) == 64, "NAE_PeaksInfo layout changed");
-static_assert(offsetof(NAE_PeaksInfo, lufs_short_term_max) == 72, "NAE_PeaksInfo layout changed");
-static_assert(offsetof(NAE_PeaksInfo, lufs_range) == 80, "NAE_PeaksInfo layout changed");
-static_assert(offsetof(NAE_PeaksInfo, lufs_valid) == 88, "NAE_PeaksInfo layout changed");
-static_assert(offsetof(NAE_PeaksInfo, lufs_short_term_valid) == 92, "NAE_PeaksInfo layout changed");
-static_assert(sizeof(NAE_PeaksInfo) == 96,
-              "NAE_PeaksInfo 的 sizeof 变了 —— 尾部 padding 是两边最容易不一致的地方");
-
-int32_t NAE_ComputePeaks(const char* path, uint32_t buckets, NAE_PeaksInfo* info,
-                         float* out, int32_t capacity) NAE_NOEXCEPT {
-    if (info == nullptr) return NAE_ERR_INVALID_ARGUMENT;
-
-    // Local plus a clamped copy, for the reason `NAE_QueryTags` gives.
-    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_PeaksInfo));
-    NAE_PeaksInfo local{};
-    local.struct_size = full;
-    const uint32_t limit = declaredLimit(info->struct_size, full);
-    StructCommit<NAE_PeaksInfo> commit{info, &local, limit};
-
-    // 桶数/容量不够是**调用方的错**，不截断：截断会让它按错的桶数去画，而那看起来
-    // 和「这首歌就是这样」没有区别。
-    //
-    // `buckets * 2` is computed in `uint32_t`, so a value near the top wraps
-    // before the cast: `0x40000001` doubles to `0x80000002`, which casts to a
-    // negative `int32_t`, and the comparison against `capacity` is then false for
-    // every non-negative capacity -- the guard passed and the copy wrote 2^31
-    // floats through the caller's pointer. The bound is checked before any
-    // arithmetic.
-    if (path == nullptr || path[0] == '\0' || buckets == 0 || out == nullptr ||
-        buckets > static_cast<uint32_t>(INT32_MAX / 2) ||
-        capacity < static_cast<int32_t>(buckets * 2)) {
-        return NAE_ERR_INVALID_ARGUMENT;
-    }
-
-#ifdef NEIRO_HAVE_FFMPEG
-    std::vector<float> result(static_cast<size_t>(buckets) * 2, 0.0f);
-    bool complete = false;
-    std::string error;
-    // 打不开路径是**故障**，不是「还没有」——所以报错而不是回清零。回清零会把它
-    // 显示成「这首歌没有波形」，一个关于音乐的陈述。
-    // Into `local`: the commit guard copies it out at the end, so writing to
-    // the caller's buffer here would be overwritten by the local's zeroes.
-    if (!computePeaksFromFile(path, buckets, &result, &complete, &local, nullptr, &error)) {
-        return NAE_ERR_CANNOT_OPEN;
-    }
-
-    std::copy(result.begin(), result.end(), out);
-    local.bucket_count = buckets;
-    local.complete = complete ? 1u : 0u;
-    return NAE_OK;
-#else
-    return NAE_OK;
-#endif
-}
-
-uint32_t NAE_GetAnalyzerVersion(void) NAE_NOEXCEPT { return NAE_ANALYZER_VERSION; }
-
-static int32_t analyzeFileImpl(const char* path, uint32_t buckets,
-                               NAE_AnalysisInfo* info, float* peaks,
-                               int32_t capacity, int32_t* peaksWritten,
-                               const int32_t* cancel) NAE_NOEXCEPT {
-    // The same overflow as NAE_ComputePeaks: `buckets * 2` wraps in uint32_t
-    // before the cast, so a value near the top made the guard pass and the copy
-    // write through the caller's pointer.
-    if (!info || !peaks || !path || !path[0] || buckets == 0 ||
-        buckets > static_cast<uint32_t>(INT32_MAX / 2) ||
-        capacity < static_cast<int32_t>(buckets * 2)) {
-        return NAE_ERR_INVALID_ARGUMENT;
-    }
-
-    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_AnalysisInfo));
-    NAE_AnalysisInfo local{};
-    local.structSize = full;
-    const uint32_t limit = declaredLimit(info->structSize, full);
-    StructCommit<NAE_AnalysisInfo> commit{info, &local, limit};
-    local.analyzerVersion = NAE_ANALYZER_VERSION;
-    if (peaksWritten) *peaksWritten = 0;
-
-#ifdef NEIRO_HAVE_FFMPEG
-    std::vector<float> result(static_cast<size_t>(buckets) * 2, 0.0f);
-    bool complete = false;
-    std::string error;
-    bool cancelled = false;
-    // Into `local`, not into the caller's buffer: the commit guard copies the
-    // local out at the end, so anything written to `info` here would be
-    // overwritten by zeroes -- which is what made every field read as 0.
-    if (!computePeaksFromFile(path, buckets, &result, &complete, nullptr, &local, &error,
-                              cancel, &cancelled)) {
-        g_lastErrorText = error;
-        return cancelled ? NAE_ERR_CANCELLED : NAE_ERR_CANNOT_OPEN;
-    }
-    std::copy(result.begin(), result.end(), peaks);
-    local.bucketCount = buckets;
-    local.complete = complete ? 1u : 0u;
-    if (peaksWritten) *peaksWritten = static_cast<int32_t>(buckets * 2);
-    return NAE_OK;
-#else
-    return NAE_OK;
-#endif
-}
-
-int32_t NAE_AnalyzeFile(const char* path, uint32_t buckets, NAE_AnalysisInfo* info,
-                        float* peaks, int32_t capacity,
-                        int32_t* peaksWritten) NAE_NOEXCEPT {
-    return analyzeFileImpl(path, buckets, info, peaks, capacity, peaksWritten, nullptr);
-}
-
-int32_t NAE_AnalyzeFileCancelable(const char* path, uint32_t buckets,
-                                  NAE_AnalysisInfo* info, float* peaks,
-                                  int32_t capacity, int32_t* peaksWritten,
-                                  const int32_t* cancel) NAE_NOEXCEPT {
-    return analyzeFileImpl(path, buckets, info, peaks, capacity, peaksWritten, cancel);
-}
-
-// `NAE_AnalysisInfo` layout, written as literal numbers. `rust/src/ffi.rs`
-// asserts the same numbers with offset_of!; editing one side without the other
-// fails the build instead of reading a tag as a gain.
-static_assert(offsetof(NAE_AnalysisInfo, structSize) == 0, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, analyzerVersion) == 4, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, complete) == 8, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, bucketCount) == 12, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, channels) == 16, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, sampleRate) == 20, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, bitsPerSample) == 24, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, durationMs) == 28, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, codec) == 32, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, title) == 64, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, artist) == 192, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, album) == 320, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, albumArtist) == 448, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, track) == 576, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, disc) == 592, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, year) == 608, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, genre) == 624, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, composer) == 688, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, comment) == 816, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, bitrateKbps) == 1072, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, bitrateFromTag) == 1076, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, rgTrackValid) == 1080, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, rgTrackGainDb) == 1088, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, rgTrackPeak) == 1096, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, rgAlbumValid) == 1104, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, rgAlbumGainDb) == 1112, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, rgAlbumPeak) == 1120, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, loudnessDb) == 1128, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, dynamicRangeDb) == 1136, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, metricsWindowMs) == 1144, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, metricsHopMs) == 1148, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, bpm) == 1152, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, bpmConfidence) == 1160, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, bpmValid) == 1168, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, lufsIntegrated) == 1176, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, lufsMomentaryMax) == 1184, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, lufsShortTermMax) == 1192, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, lufsRange) == 1200, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, lufsValid) == 1208, "NAE_AnalysisInfo layout changed");
-static_assert(offsetof(NAE_AnalysisInfo, lufsShortTermValid) == 1212, "NAE_AnalysisInfo layout changed");
-static_assert(sizeof(NAE_AnalysisInfo) == 1216, "NAE_AnalysisInfo layout changed");
-
-static_assert(offsetof(NAE_SignalPath, seamHistogramMax) == 672,
-              "NAE_SignalPath layout changed");
-static_assert(offsetof(NAE_SignalPath, channelDelayMaxFrames) == 676,
-              "NAE_SignalPath layout changed");
-static_assert(offsetof(NAE_SignalPath, tailPad) == 680, "NAE_SignalPath layout changed");
-static_assert(offsetof(NAE_SignalPath, tailPad2) == 684, "NAE_SignalPath layout changed");
-static_assert(sizeof(NAE_SignalPath) == 688, "NAE_SignalPath layout changed");
-
-// Session structs the Rust Base mirrors. Same rule: literal offsets on both
-// sides, so a field inserted here fails the Rust build rather than turning a
-// render-path flag into a position.
-static_assert(offsetof(NAE_SessionConfig, structSize) == 0, "NAE_SessionConfig layout changed");
-static_assert(offsetof(NAE_SessionConfig, deviceId) == 8, "NAE_SessionConfig layout changed");
-static_assert(offsetof(NAE_SessionConfig, path) == 16, "NAE_SessionConfig layout changed");
-static_assert(offsetof(NAE_SessionConfig, outputMode) == 24, "NAE_SessionConfig layout changed");
-static_assert(offsetof(NAE_SessionConfig, fixedRate) == 28, "NAE_SessionConfig layout changed");
-static_assert(offsetof(NAE_SessionConfig, quality) == 32, "NAE_SessionConfig layout changed");
-static_assert(offsetof(NAE_SessionConfig, shareMode) == 36, "NAE_SessionConfig layout changed");
-static_assert(offsetof(NAE_SessionConfig, sliceMs) == 40, "NAE_SessionConfig layout changed");
-static_assert(sizeof(NAE_SessionConfig) == 48, "NAE_SessionConfig layout changed");
-
-static_assert(offsetof(NAE_SessionState, structSize) == 0, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, state) == 4, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, position) == 8, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, duration) == 16, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, sampleRate) == 24, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, sourceRate) == 28, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, channels) == 32, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, bitsPerSample) == 36, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, validBits) == 40, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, isFloat) == 44, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, bitPerfect) == 48, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, reason) == 52, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, resampling) == 56, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, dithered) == 60, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, fileChannels) == 64, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, latencyMs) == 72, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, volume) == 80, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, eqEnabled) == 88, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, crossfeedEnabled) == 92, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, replayGainEnabled) == 96, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, convolverEnabled) == 100, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, crossfadeEnabled) == 104, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, rgTrackValid) == 108, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, rgAlbumValid) == 112, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, rgTrackGainDb) == 120, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, rgAlbumGainDb) == 128, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, rgAppliedGain) == 136, "NAE_SessionState layout changed");
-static_assert(offsetof(NAE_SessionState, trackSerial) == 144, "NAE_SessionState layout changed");
-static_assert(sizeof(NAE_SessionState) == 152, "NAE_SessionState layout changed");
-
-static_assert(offsetof(NAE_EqBand, type) == 0, "NAE_EqBand layout changed");
-static_assert(offsetof(NAE_EqBand, freqHz) == 8, "NAE_EqBand layout changed");
-static_assert(offsetof(NAE_EqBand, gainDb) == 16, "NAE_EqBand layout changed");
-static_assert(offsetof(NAE_EqBand, q) == 24, "NAE_EqBand layout changed");
-static_assert(offsetof(NAE_EqBand, enabled) == 32, "NAE_EqBand layout changed");
-static_assert(offsetof(NAE_EqBand, channelMask) == 36, "NAE_EqBand layout changed");
-static_assert(sizeof(NAE_EqBand) == 40, "NAE_EqBand layout changed");
-static_assert(offsetof(NAE_EqParams, structSize) == 0, "NAE_EqParams layout changed");
-static_assert(offsetof(NAE_EqParams, enabled) == 4, "NAE_EqParams layout changed");
-static_assert(offsetof(NAE_EqParams, preampDb) == 8, "NAE_EqParams layout changed");
-static_assert(offsetof(NAE_EqParams, bandCount) == 16, "NAE_EqParams layout changed");
-static_assert(offsetof(NAE_EqParams, bands) == 24, "NAE_EqParams layout changed");
-static_assert(offsetof(NAE_EqParams, phase) == 1304, "NAE_EqParams layout changed");
-static_assert(sizeof(NAE_EqParams) == 1312, "NAE_EqParams layout changed");
-static_assert(offsetof(NAE_CrossfeedParams, structSize) == 0, "NAE_CrossfeedParams layout changed");
-static_assert(offsetof(NAE_CrossfeedParams, enabled) == 4, "NAE_CrossfeedParams layout changed");
-static_assert(offsetof(NAE_CrossfeedParams, amount) == 8, "NAE_CrossfeedParams layout changed");
-static_assert(offsetof(NAE_CrossfeedParams, delayMs) == 16, "NAE_CrossfeedParams layout changed");
-static_assert(offsetof(NAE_CrossfeedParams, cutoffHz) == 24, "NAE_CrossfeedParams layout changed");
-static_assert(sizeof(NAE_CrossfeedParams) == 32, "NAE_CrossfeedParams layout changed");
-static_assert(offsetof(NAE_ReplayGainParams, structSize) == 0, "NAE_ReplayGainParams layout changed");
-static_assert(offsetof(NAE_ReplayGainParams, mode) == 4, "NAE_ReplayGainParams layout changed");
-static_assert(offsetof(NAE_ReplayGainParams, preampDb) == 8, "NAE_ReplayGainParams layout changed");
-static_assert(offsetof(NAE_ReplayGainParams, preventClipping) == 16, "NAE_ReplayGainParams layout changed");
-static_assert(offsetof(NAE_ReplayGainParams, fallbackDb) == 24, "NAE_ReplayGainParams layout changed");
-static_assert(sizeof(NAE_ReplayGainParams) == 32, "NAE_ReplayGainParams layout changed");
-static_assert(offsetof(NAE_ConvolverParams, structSize) == 0, "NAE_ConvolverParams layout changed");
-static_assert(offsetof(NAE_ConvolverParams, enabled) == 4, "NAE_ConvolverParams layout changed");
-static_assert(offsetof(NAE_ConvolverParams, irPath) == 8, "NAE_ConvolverParams layout changed");
-static_assert(offsetof(NAE_ConvolverParams, wet) == 520, "NAE_ConvolverParams layout changed");
-static_assert(offsetof(NAE_ConvolverParams, dry) == 528, "NAE_ConvolverParams layout changed");
-static_assert(offsetof(NAE_ConvolverParams, gainDb) == 536, "NAE_ConvolverParams layout changed");
-static_assert(offsetof(NAE_ConvolverParams, normalize) == 544, "NAE_ConvolverParams layout changed");
-static_assert(sizeof(NAE_ConvolverParams) == 552, "NAE_ConvolverParams layout changed");
-static_assert(offsetof(NAE_CrossfadeParams, structSize) == 0, "NAE_CrossfadeParams layout changed");
-static_assert(offsetof(NAE_CrossfadeParams, enabled) == 4, "NAE_CrossfadeParams layout changed");
-static_assert(offsetof(NAE_CrossfadeParams, durationMs) == 8, "NAE_CrossfadeParams layout changed");
-static_assert(offsetof(NAE_CrossfadeParams, curve) == 16, "NAE_CrossfadeParams layout changed");
-static_assert(sizeof(NAE_CrossfadeParams) == 24, "NAE_CrossfadeParams layout changed");
 
 int32_t NAE_PlaySine(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
-    if (!handle || !handle->client) return NAE_ERR_NOT_OPEN;
+    if (!handle || !handle->stream) return NAE_ERR_NOT_OPEN;
 
-    const int32_t channels = static_cast<int32_t>(handle->fmt.Format.nChannels);
-    const uint32_t deviceRate = handle->fmt.Format.nSamplesPerSec;
+    const int32_t channels = static_cast<int32_t>(handle->fmt.channels);
+    const uint32_t deviceRate = handle->fmt.rate;
     // The tone is generated at the SOURCE rate, not the device rate, so the
     // converter is genuinely exercised rather than bypassed.
     const uint32_t sourceRate = handle->sourceRate ? handle->sourceRate : deviceRate;
-    const bool isFloat = handle->fmt.SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-    const uint32_t containerBits = handle->fmt.Format.wBitsPerSample;
-    const uint32_t validBits = handle->fmt.Samples.wValidBitsPerSample
-                                   ? handle->fmt.Samples.wValidBitsPerSample
+    const bool isFloat = handle->fmt.isFloat;
+    const uint32_t containerBits = handle->fmt.containerBits;
+    const uint32_t validBits = handle->fmt.validBits
+                                   ? handle->fmt.validBits
                                    : containerBits;
 
     static const bool trace = getenv("NAE_TRACE") != nullptr;
@@ -5435,17 +3807,20 @@ int32_t NAE_PlaySine(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
     // device never sees a gap.
     const bool firstStartOfStream = !handle->streamEverStarted;
     handle->streamEverStarted = true;
-    if (handle->render && firstStartOfStream) {
-        const uint32_t bpf = handle->fmt.Format.nBlockAlign;
-        const UINT32 prefill = std::max<UINT32>(1, handle->bufferFrames / 2);
-        BYTE* prefillData = nullptr;
-        UINT32 prefillChunk = 0;
-        const HRESULT getHr = neiro::wasapi::getRenderBuffer(
-            handle->render.Get(), prefill, &prefillData, &prefillChunk);
-        if (bpf > 0 && SUCCEEDED(getHr) && prefillData && prefillChunk > 0) {
+    const bool haveDevice = handle->stream != nullptr;
+    if (haveDevice && firstStartOfStream) {
+        const uint32_t bpf = handle->fmt.blockAlign;
+        const uint32_t prefill = std::max<uint32_t>(1, handle->bufferFrames / 2);
+        neiro::OutputStream& prefillStream = *handle->stream;
+        uint8_t* prefillData = nullptr;
+        uint32_t prefillChunk = 0;
+        if (bpf > 0 &&
+            prefillStream.acquire(prefill, &prefillData, &prefillChunk) ==
+                neiro::StreamStatus::Ok &&
+            prefillData && prefillChunk > 0) {
             std::memset(prefillData, 0,
                         static_cast<size_t>(prefillChunk) * static_cast<size_t>(bpf));
-            remember(handle->render->ReleaseBuffer(prefillChunk, AUDCLNT_BUFFERFLAGS_SILENT));
+            prefillStream.commit(prefillChunk, true);
         }
     }
 
@@ -5463,14 +3838,14 @@ int32_t NAE_PlaySine(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
         // Nothing to do. The stream is already running and its buffer is the
         // one the device is draining.
     } else {
-    const HRESULT startHr = neiro::wasapi::startClient(handle->client.Get());
-    if (FAILED(startHr)) {
+    const auto startStatus = handle->stream->start();
+    if (startStatus != neiro::StreamStatus::Ok) {
         // The device can vanish between a successful Initialize and Start -- a
         // narrow window, but a USB removal inside it is a real event and it used
         // to be reported as "the stream could not be initialised", which is both
         // untrue and unactionable. Same treatment as the three call sites in the
         // render loop.
-        if (deviceIsGone(startHr)) {
+        if (startStatus == neiro::StreamStatus::DeviceLost) {
             g_lastErrorText =
                 "the output device was removed or is being used by another program";
             return NAE_ERR_DEVICE_LOST;
@@ -5531,6 +3906,9 @@ int32_t NAE_PlaySine(NAE_Handle* handle, int32_t milliseconds) NAE_NOEXCEPT {
 // feed and the ring were all correct, and the only wrong thing was the number
 // multiplying the phase. Reading "the ring holds a ramp" as "the tap is broken"
 // would have sent the work into the tap, which was never at fault.
+static constexpr size_t kSpectrumFft = 4096;
+
+
 static constexpr double kToneHz = 1000.0;
 const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
                               static_cast<double>(sourceRate);
@@ -5580,7 +3958,7 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
     }
 #endif
 
-    const uint32_t bytesPerFrame = handle->fmt.Format.nBlockAlign;
+    const uint32_t bytesPerFrame = handle->fmt.blockAlign;
     const uint32_t bytesPerSample = containerBits / 8;
     const size_t ch = static_cast<size_t>(channels);
 
@@ -6078,46 +4456,25 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
             if (!atBoundary()) break;
         }
 
-        UINT32 padding = 0;
         ensureAudioThreadQos();
 
-        // Wait for the period before measuring padding. The padding is what tells
-        // us how much room is left, and asking a moment before the period rolls
-        // over is how the request lands on the wrong side of the deadline.
-        if (handle->renderEvent) {
-            if (WaitForSingleObject(handle->renderEvent, 2000) != WAIT_OBJECT_0) {
-                ++handle->underrunCount;
-            }
-            if (sourceDone && fifo.size() / ch == 0) {
-                if (!atBoundary()) break;
-            }
+        // Wait for the period, then ask how much room there is. The wait is the
+        // device's own notification where the backend has one -- a high-resolution
+        // timer or `Sleep(1)` cannot see inside a 5.7 ms buffer -- and asking a
+        // moment before the period rolls over is how the request lands on the
+        // wrong side of the deadline.
+        if (!handle->stream->waitForRoom(2000)) ++handle->underrunCount;
+        if (sourceDone && fifo.size() / ch == 0) {
+            if (!atBoundary()) break;
         }
 
-        const HRESULT padHr = remember(handle->client->GetCurrentPadding(&padding));        if (FAILED(padHr)) {
-            // The same device-lost handling as GetBuffer and ReleaseBuffer below.
-            //
-            // This call site was the one that was missed, and it is the one that
-            // fires first in practice. GetCurrentPadding asks how many frames are
-            // sitting in the device buffer; a device that has been disabled or
-            // unplugged cannot answer, and it is reached at the top of every
-            // iteration -- before the buffer is ever requested. So a disabled
-            // device produced AUDCLNT_E_RESOURCES_INVALIDATED here, fell through
-            // to the short-render check, and came back as NAE_ERR_INITIALIZE with
-            // the HRESULT buried in the text. The two calls that *were* wrapped
-            // never got the chance to run.
-            //
-            // Found by the device-loss test rather than by reading the code,
-            // which is the argument for having run it: every reasoning pass over
-            // "which calls can fail when the device disappears" had listed the
-            // two that write audio and skipped the one that measures.
-            if (deviceIsGone(padHr)) {
-                deviceLost = true;
-                g_lastErrorText = "the output device was removed or is being used by "
-                                  "another program; playback is paused at the current "
-                                  "position";
-            }
-            break;
-        }
+        // Frames the device still has queued.
+        //
+        // This is also the first thing a lost device is visible through: the
+        // stream cannot read its own padding once the endpoint is disabled, so it
+        // answers zero and the `acquire` below fails with AUDCLNT_E_RESOURCES_
+        // INVALIDATED, which is where the device-lost verdict is reached.
+        const uint32_t padding = handle->stream->queuedFrames();
 
         // The runway, and the clock that judges it.
         //
@@ -6139,9 +4496,9 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
         // decoder runs on its own thread. This loop calls `readExact` from inside
         // the period, so whatever the decode costs is spent out of the runway.
         const double runwayMs =
-            (handle->fmt.Format.nSamplesPerSec > 0)
+            (handle->fmt.rate > 0)
                 ? (static_cast<double>(padding) * 1000.0 /
-                   static_cast<double>(handle->fmt.Format.nSamplesPerSec))
+                   static_cast<double>(handle->fmt.rate))
                 : 0.0;
         const double fillStartMs = neiro::wasapi::nowMsHr();
 
@@ -6276,26 +4633,20 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
         // buffer are then never read, so this cannot be the "prefill seam" the seam
         // instrument is blind to -- there is no seam, there is no audio there.
         if (handle->silencing) {
-            BYTE* silentRaw = nullptr;
-            UINT32 silentChunk = 0;
-            const HRESULT silentHr = neiro::wasapi::getRenderBuffer(
-                handle->render.Get(), capacity, &silentRaw, &silentChunk);
-            if (silentHr == AUDCLNT_E_BUFFER_TOO_LARGE || silentHr == S_FALSE) {
-                if (handle->renderEvent) {
-                    if (WaitForSingleObject(handle->renderEvent, 2000) != WAIT_OBJECT_0) {
-                        ++handle->underrunCount;
-                    }
-                } else {
-                    spinForBuffer();
-                }
+            neiro::OutputStream& stream = *handle->stream;
+            uint8_t* silentRaw = nullptr;
+            uint32_t silentChunk = 0;
+            const auto silentStatus = stream.acquire(capacity, &silentRaw, &silentChunk);
+            if (silentStatus == neiro::StreamStatus::NoRoom) {
+                if (!stream.waitForRoom(2000)) ++handle->underrunCount;
                 if (++stalledIterations > 2000) {
                     g_lastErrorText = "the output device stopped accepting audio";
                     break;
                 }
                 continue;
             }
-            if (FAILED(silentHr)) {
-                if (deviceIsGone(silentHr)) {
+            if (silentStatus != neiro::StreamStatus::Ok) {
+                if (silentStatus == neiro::StreamStatus::DeviceLost) {
                     deviceLost = true;
                     g_lastErrorText = "the output device was removed or is being used by "
                                       "another program; playback is paused at the current "
@@ -6303,9 +4654,7 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
                 }
                 break;
             }
-            const HRESULT relHr =
-                handle->render->ReleaseBuffer(silentChunk, AUDCLNT_BUFFERFLAGS_SILENT);
-            if (FAILED(relHr) && deviceIsGone(relHr)) {
+            if (stream.commit(silentChunk, true) == neiro::StreamStatus::DeviceLost) {
                 deviceLost = true;
                 g_lastErrorText = "the output device was removed or is being used by "
                                   "another program; playback is paused at the current "
@@ -6365,42 +4714,30 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
             continue;
         }
 
-        BYTE* raw = nullptr;
-        UINT32 chunk = 0;
-        const HRESULT bufHr =
-            neiro::wasapi::getRenderBuffer(handle->render.Get(), capacity, &raw, &chunk);
-        if (bufHr == AUDCLNT_E_BUFFER_TOO_LARGE || bufHr == S_FALSE) {
+        neiro::OutputStream& stream = *handle->stream;
+        uint8_t* raw = nullptr;
+        uint32_t chunk = 0;
+        const auto bufStatus = stream.acquire(capacity, &raw, &chunk);
+        if (bufStatus == neiro::StreamStatus::NoRoom) {
             // "Not right now", not "never again".
             //
-            // Asking for a full buffer before the engine has one free is the
+            // Asking for the whole buffer before the engine has one free is the
             // normal case in exclusive mode, and WASAPI says so with
             // AUDCLNT_E_BUFFER_TOO_LARGE rather than by blocking. Treating it as
             // fatal is what stopped the loop after exactly one buffer: the trace
             // read `devWritten=9728 budget=288000` with an hresult of zero, which
             // is a renderer that gave up rather than one that failed.
             //
-            // The other half of the fix is asking for the whole buffer. The old
-            // code asked for `bufferFrames - GetCurrentPadding`, and padding is a
-            // shared-mode quantity with no meaning here; on this endpoint it came
-            // back at about 89% of the buffer, so every buffer was one ninth
-            // written and the device played back the previous fill's leftovers.
-            // That was the bubbling.
             // Wait to be told, rather than asking. Two seconds is a backstop, not a cadence:
             // with the event available the wait ends when the device says so.
-            if (handle->renderEvent) {
-                if (WaitForSingleObject(handle->renderEvent, 2000) != WAIT_OBJECT_0) {
-                    ++handle->underrunCount;
-                }
-            } else {
-                spinForBuffer();
-            }
+            if (!stream.waitForRoom(2000)) ++handle->underrunCount;
             if (++stalledIterations > 2000) {
                 g_lastErrorText = "the output device stopped accepting audio";
                 break;
             }
             continue;
         }
-        if (FAILED(bufHr)) {
+        if (bufStatus != neiro::StreamStatus::Ok) {
             // A device that is gone ends the stream now, with its own error code,
             // rather than being folded into the short-render check below. That
             // check already returned an error for this case, so the difference is
@@ -6409,7 +4746,7 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
             // knows to keep the handle, tell the user, and wait; a host that sees
             // NAE_ERR_INITIALIZE would tear the stream down, and the user would
             // lose their place to an unplugged cable.
-            if (deviceIsGone(bufHr)) {
+            if (bufStatus == neiro::StreamStatus::DeviceLost) {
                 deviceLost = true;
                 g_lastErrorText = "the output device was removed or is being used by "
                                   "another program; playback is paused at the current "
@@ -6883,8 +5220,8 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
             }
         }
 
-        const HRESULT relHr = handle->render->ReleaseBuffer(static_cast<UINT32>(framesToWrite), 0);
-        if (FAILED(remember(relHr))) {
+        const auto relStatus = stream.commit(static_cast<uint32_t>(framesToWrite), false);
+        if (relStatus != neiro::StreamStatus::Ok) {
             // The same distinction as GetBuffer above. ReleaseBuffer is where a
             // preemption actually tends to surface: the device accepted the
             // request and then lost the endpoint before the buffer was handed
@@ -6893,7 +5230,7 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
             // because those frames are counted as consumed -- which is exactly
             // why this needs its own code rather than being left to the
             // short-render check to notice.
-            if (deviceIsGone(relHr)) {
+            if (relStatus == neiro::StreamStatus::DeviceLost) {
                 deviceLost = true;
                 g_lastErrorText =
                     "the output device was removed or is being used by another program; "
@@ -6992,10 +5329,14 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
         (deviceFramesWritten < targetFrames && sourcePos < sourceLimit);
     const bool shouldStop = sourceFinished || cannotContinue || deviceLost;
 
-    HRESULT stopHr = S_OK;
+    // 0 = the device accepted the stop, 1 = it refused. A plain int rather than
+    // HRESULT because this line is shared with macOS, where no such type exists;
+    // the only consumer is the trace below.
+    int stopRefused = 0;
     if (shouldStop) {
-        if (handle->clientRunning) {
-            stopHr = neiro::wasapi::stopClient(handle->client.Get());
+        if (handle->stream && handle->stream->running()) {
+            const auto st = handle->stream->stop();
+            stopRefused = st == neiro::StreamStatus::Ok ? 0 : 1;
             handle->clientRunning = false;
             ++handle->clientRestartCount;
         }
@@ -7085,10 +5426,10 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
     }
 
     if (trace)
-        std::fprintf(stderr, "[nae] done source=%lld/%lld device=%lld iters=%d stopHr=0x%08X\n",
+        std::fprintf(stderr, "[nae] done source=%lld/%lld device=%lld iters=%d stopRefused=%d\n",
                      static_cast<long long>(sourcePos),
                      static_cast<long long>(sourceLimit),
-                     static_cast<long long>(deviceFramesWritten), iterations, stopHr);
+                     static_cast<long long>(deviceFramesWritten), iterations, stopRefused);
     // A call that delivered its whole budget after the device had previously been
     // lost. That pairing is what "it came back by itself" means, and the host
     // needs both numbers to say it: a lost device with no recovery is a device
@@ -7102,29 +5443,56 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
     ++handle->callbackCount;
     return NAE_OK;
 }
-
-void NAE_Close(NAE_Handle* handle) NAE_NOEXCEPT {
-    if (!handle) return;
-    // The one place the resampler may be flushed. A filter holds its last frames
-    // back until it is told the source has ended, and this is the only point at
-    // which that is true.
-    //
-    // The result is discarded: a stream is being torn down and there is nowhere
-    // left to deliver the tail to. Draining it would only delay the close.
-    if (handle->resampler.ready()) {
-        std::vector<float> discard;
-        std::string err;
-        handle->resampler.flush(&discard, &err);
+static void fftRadix2(std::vector<double>& re, std::vector<double>& im) {
+    const size_t n = re.size();
+    if (n < 2 || im.size() != n || (n & (n - 1)) != 0) return;
+    for (size_t i = 1, j = 0; i < n; ++i) {
+        size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            std::swap(re[i], re[j]);
+            std::swap(im[i], im[j]);
+        }
     }
-    if (handle) {
-        stopDecodeThread(handle);
-        handle->dopDsf.reset();
-        handle->dopDff.reset();
+    for (size_t len = 2; len <= n; len <<= 1) {
+        const double ang = -2.0 * 3.14159265358979323846 / static_cast<double>(len);
+        const double wr = std::cos(ang);
+        const double wi = std::sin(ang);
+        for (size_t i = 0; i < n; i += len) {
+            double cr = 1.0;
+            double ci = 0.0;
+            for (size_t k = 0; k < len / 2; ++k) {
+                const double ur = re[i + k];
+                const double ui = im[i + k];
+                const double xr = re[i + k + len / 2];
+                const double xi = im[i + k + len / 2];
+                const double vr = xr * cr - xi * ci;
+                const double vi = xr * ci + xi * cr;
+                re[i + k] = ur + vr;
+                im[i + k] = ui + vi;
+                re[i + k + len / 2] = ur - vr;
+                im[i + k + len / 2] = ui - vi;
+                const double ncr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = ncr;
+            }
+        }
     }
-    delete handle;
 }
 
+#ifdef _WIN32
+void NAE_Shutdown(void) NAE_NOEXCEPT {
+    neiro::wasapi::shutdownCom();
+}
+#else
+// Nothing to tear down: there is no COM apartment on this platform. The device
+// is released when the last stream is destroyed.
+void NAE_Shutdown(void) NAE_NOEXCEPT {}
+#endif
 
+
+#ifdef _WIN32
 int32_t NAE_QueryDeviceCaps(const char* deviceId, int32_t shareMode,
                             NAE_DeviceCaps* out) NAE_NOEXCEPT {
     if (!out || out->structSize != sizeof(NAE_DeviceCaps)) return NAE_ERR_INVALID_ARGUMENT;
@@ -7244,57 +5612,719 @@ int32_t NAE_QueryDeviceCaps(const char* deviceId, int32_t shareMode,
     out->capsGeneration = ++g_capsGeneration;
     return NAE_OK;
 }
-
-void NAE_Shutdown(void) NAE_NOEXCEPT {
-    if (!g_comReady) return;
-    g_comReady = false;
-    CoUninitialize();
-}
-
-// Copies a std::string onto the heap with malloc, so it pairs with
-// NAE_FreeString's free. The two allocators must match: the host may well have
-// a different CRT, and freeing across that boundary is undefined.
-char* duplicateString(const std::string& in) {
-    char* out = static_cast<char*>(std::malloc(in.size() + 1));
-    if (!out) return nullptr;
-    std::memcpy(out, in.c_str(), in.size() + 1);
-    return out;
-}
-
-char* NAE_GetDefaultDeviceId(void) NAE_NOEXCEPT {
-    try {
-        if (FAILED(ensureCom())) return nullptr;
-
-        ComPtr<IMMDeviceEnumerator> enumerator;
-        if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
-                                   IID_PPV_ARGS(&enumerator))) ||
-            !enumerator) {
-            return nullptr;
-        }
-
-        // eConsole, not eMultimedia: this is the endpoint a user means by
-        // "the sound", and it is what a music player should follow.
-        ComPtr<IMMDevice> device;
-        const HRESULT hr = remember(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device));
-        if (FAILED(hr) || !device) return nullptr;
-
-        // deviceId wraps GetId, which allocates with CoTaskMem; it copies into
-        // a std::wstring and frees it, so nothing leaks across the boundary.
-        std::wstring id;
-        if (FAILED(neiro::wasapi::deviceId(device.Get(), id)) || id.empty()) return nullptr;
-
-        const int needed =
-            WideCharToMultiByte(CP_UTF8, 0, id.c_str(), -1, nullptr, 0, nullptr, nullptr);
-        if (needed <= 1) return nullptr;
-
-        std::string utf8(static_cast<size_t>(needed - 1), '\0');
-        WideCharToMultiByte(CP_UTF8, 0, id.c_str(), -1, utf8.data(), needed, nullptr, nullptr);
-        // WideCharToMultiByte wrote a terminating NUL at index needed-1, which
-        // is one past the string, so the std::string stays well-formed.
-        return duplicateString(utf8);
-    } catch (...) {
-        return nullptr;
+#else
+// macOS: the backend already knows how to ask the HAL. Threading through it
+// keeps one copy of the device knowledge, so the caps this returns and the ones
+// `backend_check` prints cannot disagree.
+int32_t NAE_QueryDeviceCaps(const char* deviceId, int32_t shareMode,
+                            NAE_DeviceCaps* out) NAE_NOEXCEPT {
+    if (!out || out->structSize != sizeof(NAE_DeviceCaps)) return NAE_ERR_INVALID_ARGUMENT;
+    auto backend = neiro::createPlatformBackend();
+    if (!backend) {
+        g_lastErrorText = "no audio backend on this platform";
+        return NAE_ERR_NO_DEVICE;
     }
+    std::string error;
+    if (!backend->queryCaps(deviceId ? deviceId : "", shareMode, out, &error)) {
+        g_lastErrorText = error.empty() ? "no such output device" : error;
+        return NAE_ERR_NO_DEVICE;
+    }
+    return NAE_OK;
 }
+#endif
+
+
+
+int32_t NAE_QuerySupportedRates(NAE_Handle* handle, uint32_t* rates, uint32_t capacity,
+                                uint32_t* outCount) NAE_NOEXCEPT {
+    if (outCount) *outCount = 0;
+
+#ifdef _WIN32
+    std::vector<uint32_t> cached;
+    bool probed = false;
+    {
+        std::lock_guard<std::mutex> lock(rateCacheMutex());
+        const RateCache& cache = rateCache();
+        probed = cache.probed;
+        cached = cache.rates;
+    }
+#else
+    // No probe cache here: the rate list comes from the device's own
+    // `NAE_DeviceCaps`, which `queryCaps` reads on demand. A second cache would
+    // be a second answer to the same question.
+    std::vector<uint32_t> cached;
+    bool probed = false;
+    {
+        NAE_DeviceCaps caps{};
+        caps.structSize = sizeof(caps);
+        auto backend = neiro::createPlatformBackend();
+        std::string error;
+        if (backend && backend->queryCaps("", NAE_SHARE_MODE_EXCLUSIVE, &caps, &error)) {
+            probed = caps.rateCount > 0;
+            for (uint32_t i = 0; i < caps.rateCount; ++i) cached.push_back(caps.rates[i]);
+        }
+    }
+#endif
+    if (probed && !cached.empty()) {
+        if (outCount) *outCount = static_cast<uint32_t>(cached.size());
+        if (rates && capacity > 0) {
+            const uint32_t n = cached.size() < capacity
+                                   ? static_cast<uint32_t>(cached.size())
+                                   : capacity;
+            std::memcpy(rates, cached.data(), n * sizeof(uint32_t));
+        }
+        return NAE_OK;
+    }
+
+    // Not probed yet, or the probe found nothing at all -- which is contention
+    // rather than a capability answer. NAE_OK with a count of zero, and the
+    // engine keeps its previous behaviour. A hard error here would be wrong: the
+    // caller has no way to distinguish "this device supports no rates" from "I
+    // could not ask", and treating the second as the first stops playback.
+    if (!handle) return NAE_OK;
+
+    return NAE_OK;
+}
+int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bins,
+                          int32_t capacity) NAE_NOEXCEPT {
+    if (!info) return NAE_ERR_INVALID_ARGUMENT;
+    // A null buffer is legal only when the capacity is zero -- that is the
+    // documented "tell me the shape" call. Null with a non-zero capacity is a
+    // caller that believes it passed a buffer, and writing through it is a null
+    // dereference on the first element.
+    if (!bins && capacity > 0) return NAE_ERR_INVALID_ARGUMENT;
+    // Local plus a clamped copy, for the reason `NAE_QueryTags` gives: a
+    // smaller declared size must not be overrun by the fields this build added.
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_SpectrumInfo));
+    NAE_SpectrumInfo local{};
+    local.struct_size = full;
+    const uint32_t limit = declaredLimit(info->struct_size, full);
+    StructCommit<NAE_SpectrumInfo> commit{info, &local, limit};
+    if (!handle) return NAE_OK;
+
+    std::vector<double> re(kSpectrumFft, 0.0);
+    std::vector<double> im(kSpectrumFft, 0.0);
+    uint64_t fed = 0;
+    size_t filled = 0;
+    size_t write = 0;
+    {
+        std::lock_guard<std::mutex> guard(handle->spectrumLock);
+        if (handle->spectrumRing.empty()) return NAE_OK;
+        fed = handle->spectrumFramesFed;
+        filled = handle->spectrumFilled;
+        write = handle->spectrumWrite;
+        local.sampleRate = handle->spectrumRate;
+        // Read the ring oldest-first. `write` is where the next sample goes, so
+        // the oldest sample is the one currently under it once the ring is full.
+        if (filled == kSpectrumFft) {
+            for (size_t i = 0; i < kSpectrumFft; ++i) {
+                re[i] = handle->spectrumRing[(write + i) % kSpectrumFft];
+            }
+        } else {
+            // Not full yet: the first `filled` entries are the only real ones.
+            for (size_t i = 0; i < filled; ++i) re[i] = handle->spectrumRing[i];
+        }
+    }
+
+    local.fftSize = static_cast<uint32_t>(kSpectrumFft);
+    local.binCount = static_cast<uint32_t>(kSpectrumFft / 2);
+    local.validBits = handle->dither.valid_bits();
+    local.framesFed = fed;
+    if (filled == 0) return NAE_OK;
+
+    // Diagnostic, under NAE_TRACE_SPECTRUM rather than NAE_TRACE: the existing
+    // trace is about the render loop's decisions and this is about the tap's
+    // contents, and they get read for different faults.
+    //
+    // It exists because the tap was wrong twice in a way that looked completely
+    // plausible -- once reading a single ring slot 4096 times, which reported a
+    // clean staircase as if it were audio, and once counting clamped frames as
+    // real ones. Both produced a spectrum display that would have drawn
+    // something. Six sampled positions and the mean are enough to tell a window
+    // holding music from one holding a constant, which is the whole question.
+    if (std::getenv("NAE_TRACE_SPECTRUM") != nullptr) {
+        double mean = 0.0;
+        size_t argmax = 0;
+        double amax = 0.0;
+        for (size_t i = 0; i < filled; ++i) {
+            mean += re[i];
+            if (std::fabs(re[i]) > amax) {
+                amax = std::fabs(re[i]);
+                argmax = i;
+            }
+        }
+        mean /= static_cast<double>(filled);
+        std::fprintf(stderr,
+                     "[nae:spectrum] filled=%zu rate=%u fed=%llu write=%zu mean=%.6f amax=%.6f "
+                     "@%zu\n",
+                     filled, local.sampleRate, (unsigned long long)fed, write, mean, amax, argmax);
+        // The ring itself, walked from `write` exactly as the read path walks it, and
+        // also from index 0. Two walks because they must agree: if they do, the
+        // read path is faithful to the ring and the fault is in what was fed; if
+        // they do not, the fault is in the read.
+        std::fprintf(stderr, "[nae:spectrum] fromWrite:");
+        for (size_t i = 0; i < 12 && i < filled; ++i) {
+            std::fprintf(stderr, " %.5f", handle->spectrumRing[(write + i) % kSpectrumFft]);
+        }
+        std::fprintf(stderr, "\n");
+        std::fprintf(stderr, "[nae:spectrum] fromZero:");
+        for (size_t i = 0; i < 12 && i < filled; ++i) {
+            std::fprintf(stderr, " %.5f", handle->spectrumRing[i]);
+        }
+        std::fprintf(stderr, "\n");
+        // How far apart two identical values are, which is the period whatever
+        // the phase. Searched rather than sampled at a guessed stride: a stride
+        // of 96 at 1 kHz/192 kHz lands on every zero crossing and reports a flat
+        // line for a perfectly good tone, which is the mistake that made the
+        // first two runs of this instrument unreadable.
+        // The period, by counting samples between upward zero crossings.
+        //
+        // Not by looking for a repeat of the first value: a continuous tone's
+        // window essentially never contains two samples equal to within 1e-9, and
+        // the earlier version of this reported a confident "32 samples" for a
+        // tone that was a correct 1 kHz. A detector that cannot be wrong has to
+        // find a feature rather than a coincidence -- zero crossings are a
+        // feature, and averaging several of them beats trusting one.
+        //
+        // Averaged, because a crossing lands between two samples and rounding to
+        // the nearer one costs up to half a sample per crossing.
+        double firstCross = -1.0;
+        double lastCross = -1.0;
+        int crossings = 0;
+        for (size_t i = 1; i < kSpectrumFft; ++i) {
+            const double a = handle->spectrumRing[(write + i - 1) % kSpectrumFft];
+            const double b = handle->spectrumRing[(write + i) % kSpectrumFft];
+            if (a <= 0.0 && b > 0.0) {
+                // Linear interpolation for the sub-sample position.
+                const double frac = (b == a) ? 0.0 : (0.0 - a) / (b - a);
+                const double at = static_cast<double>(i - 1) + frac;
+                if (firstCross < 0.0) firstCross = at;
+                lastCross = at;
+                ++crossings;
+            }
+        }
+        const double measuredHz =
+            (crossings > 1)
+                ? static_cast<double>(crossings - 1) * local.sampleRate /
+                      static_cast<double>(lastCross - firstCross)
+                : 0.0;
+        std::fprintf(stderr,
+                     "[nae:spectrum] crossings=%d measuredHz=%.3f (want 1000.000)\n", crossings,
+                     measuredHz);
+    }
+
+    // Unnormalised level first, so `peak` and `rms` describe the signal rather
+    // than the window that was applied to it.
+    double sumSquares = 0.0;
+    double peak = 0.0;
+    for (size_t i = 0; i < filled; ++i) {
+        const double v = re[i];
+        sumSquares += v * v;
+        const double a = std::fabs(v);
+        if (a > peak) peak = a;
+    }
+    local.peak = peak;
+    local.rms = std::sqrt(sumSquares / static_cast<double>(filled));
+
+    // Hann, over the samples actually present rather than over the full window,
+    // so a partially filled ring is not scaled by a window that assumes more
+    // history than there is.
+    for (size_t i = 0; i < filled; ++i) {
+        const double w =
+            filled < 2 ? 1.0
+                      : 0.5 * (1.0 - std::cos(2.0 * 3.14159265358979323846 *
+                                               static_cast<double>(i) /
+                                               static_cast<double>(filled - 1)));
+        re[i] *= w;
+    }
+
+    fftRadix2(re, im);
+
+    // A real signal's spectrum is symmetric, so the second half carries no
+    // information. The factor of 2/n makes a full-scale sine read 1.0 in its bin,
+    // which is what lets a dB display use 0 dBFS as its reference.
+    const double scale = 2.0 / static_cast<double>(filled);
+    const int32_t want = static_cast<int32_t>(local.binCount);
+    const int32_t give = capacity < want ? capacity : want;
+    for (int32_t k = 0; k < give; ++k) {
+        const double m = std::sqrt(re[static_cast<size_t>(k)] * re[static_cast<size_t>(k)] +
+                                   im[static_cast<size_t>(k)] * im[static_cast<size_t>(k)]) *
+                         scale;
+        bins[k] = static_cast<float>(m);
+    }
+    return NAE_OK;
+}
+int32_t NAE_QueryEnvelope(NAE_Handle* handle, NAE_EnvelopeInfo* info, float* envelope,
+                          int32_t capacity) NAE_NOEXCEPT {
+    if (info == nullptr) return NAE_ERR_INVALID_ARGUMENT;
+    // Null is legal only with a zero capacity, as in NAE_QuerySpectrum.
+    if (!envelope && capacity > 0) return NAE_ERR_INVALID_ARGUMENT;
+    // Local plus a clamped copy, for the reason `NAE_QueryTags` gives.
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_EnvelopeInfo));
+    NAE_EnvelopeInfo local{};
+    local.struct_size = full;
+    const uint32_t limit = declaredLimit(info->struct_size, full);
+    StructCommit<NAE_EnvelopeInfo> commit{info, &local, limit};
+    if (handle == nullptr) return NAE_OK;
+
+    // 频谱那边用的同一把锁，因为两者读的都是渲染循环写的状态。包络是从同一个环形
+    // 缓冲推导出来的，所以不能各自加锁——否则读者可能看到一个已经换了采样率而
+    // 另一个还没换。
+    std::lock_guard<std::mutex> guard(handle->spectrumLock);
+    if (handle->envelope.empty()) return NAE_OK;
+
+    local.frame_count = static_cast<uint32_t>(handle->envelope.size());
+    local.frame_hop_ms = kEnvelopeHopMs;
+    local.sample_rate = handle->envelopeRate;
+    // 故意用频谱那个计数器：两者描述的是同一个环形缓冲，所以调用方比较这两个数
+    // 等于拿一个东西跟它自己比。给两个计数器只会引出一个问题——为什么频谱过期了
+    // 而包络没有——而那个问题只可能有一个答案，且答案必然是其中一个有 bug。
+    local.frames_fed = handle->spectrumFramesFed;
+    local.window_ms = static_cast<double>(local.frame_count) * kEnvelopeHopMs;
+
+    // **顺序是有保证的：最老的在前。**
+    //
+    // 这里原来是 `envelope[(envelopeFill + i) % size]`，也就是从**写指针**开始拷。
+    // 写满之后写指针处正好是最老的一帧（对的），**没写满的时候那是还没写过的区域**
+    // ——于是读者拿到的是一个「旋转 + 补零」的数组，而它没办法从 4096 个 float 里
+    // 看出旋转了多少。实测（`scripts/probe-tempo-window.mjs`）：非零段的起点在
+    // 1983 / 1243 / 420 / 0 之间动，节拍估计器在同一段音频上给出的数在 72 ~ 200
+    // 之间跳，置信度从没超过 0.5。
+    //
+    // 环本身仍然是一个环，只是**出口**归一化：没写满时最老的一帧在下标 0，
+    // 写满之后在写指针处。`frame_valid` 把「有几个是真的」一起报出去——原来那个字段
+    // 位置报的是**容量**，而容量和有效帧数在环没写满时不相等。
+    // **`envelopeFill` 不是「写过多少帧」。** 它是环上的一个下标，绕完一圈就回到小值
+    // ——原来这里用 `min(envelopeFill, size)` 当「有几帧是真的」，于是**环绕一圈之后
+    // 「有效帧数」会从四千多掉回几百**（实测 `probe-tempo-window`：11.1 秒那次 3977，
+    // 13.1 秒那次掉到 701）。`envelopeEpoch` 是**累计写过多少帧**，只增不减，那才是
+    // 这个数；`envelopeFill` 只在算「最老的一帧在哪」时有用。
+    const size_t size = handle->envelope.size();
+    const size_t filled = static_cast<size_t>(
+        std::min<uint64_t>(handle->envelopeEpoch, static_cast<uint64_t>(size)));
+    const size_t oldest = handle->envelopeEpoch >= size
+                              ? static_cast<size_t>(handle->envelopeEpoch % size)
+                              : 0;
+    const int32_t valid =
+        capacity < static_cast<int32_t>(filled) ? capacity : static_cast<int32_t>(filled);
+    for (int32_t i = 0; i < valid; ++i) {
+        envelope[i] = handle->envelope[(oldest + static_cast<size_t>(i)) % size];
+    }
+    local.frame_valid = valid > 0 ? static_cast<uint32_t>(valid) : 0u;
+    return NAE_OK;
+}
+constexpr double kMetricsWindowMs = 400.0;
+constexpr double kMetricsHopMs = 100.0;
+
+static inline bool cancelRequested(const int32_t* flag) {
+    if (!flag) return false;
+#if defined(__GNUC__) || defined(__clang__)
+    return __atomic_load_n(flag, __ATOMIC_RELAXED) != 0;
+#else
+    return *flag != 0;
+#endif
+}
+
+double percentile(std::vector<double> values, double q) {
+    if (values.empty()) return 0.0;
+    std::sort(values.begin(), values.end());
+    const double pos = q * static_cast<double>(values.size() - 1);
+    const size_t lo = static_cast<size_t>(pos);
+    const size_t hi = std::min(lo + 1, values.size() - 1);
+    const double frac = pos - static_cast<double>(lo);
+    return values[lo] * (1.0 - frac) + values[hi] * frac;
+}
+void estimateBpm(const std::vector<double>& envelope, double hopMs, double* bpm,
+                 double* confidence) {
+    *bpm = 0.0;
+    *confidence = 0.0;
+    if (envelope.size() < 40) return;
+    std::vector<double> onset(envelope.size(), 0.0);
+    for (size_t i = 1; i < envelope.size(); ++i) {
+        onset[i] = std::max(0.0, envelope[i] - envelope[i - 1]);
+    }
+    const double hopSec = hopMs / 1000.0;
+    const int minLag = std::max(1, static_cast<int>(std::lround(60.0 / (200.0 * hopSec))));
+    const int maxLag = std::max(minLag + 1, static_cast<int>(std::lround(60.0 / (60.0 * hopSec))));
+    std::vector<double> score(static_cast<size_t>(maxLag) + 2, 0.0);
+    for (int lag = minLag; lag <= maxLag; ++lag) {
+        double num = 0.0, e1 = 0.0, e2 = 0.0;
+        for (size_t i = 0; i + static_cast<size_t>(lag) < onset.size(); ++i) {
+            num += onset[i] * onset[i + static_cast<size_t>(lag)];
+            e1 += onset[i] * onset[i];
+            e2 += onset[i + static_cast<size_t>(lag)] * onset[i + static_cast<size_t>(lag)];
+        }
+        score[lag] = (e1 > 0.0 && e2 > 0.0) ? num / std::sqrt(e1 * e2) : 0.0;
+    }
+    int best = minLag;
+    for (int lag = minLag + 1; lag <= maxLag; ++lag) {
+        if (score[lag] > score[best]) best = lag;
+    }
+    if (score[best] <= 0.0) return;
+    double lag = static_cast<double>(best);
+    if (best > minLag && best < maxLag) {
+        const double a = score[best - 1];
+        const double b = score[best];
+        const double c = score[best + 1];
+        const double den = a - 2.0 * b + c;
+        if (std::fabs(den) > 1e-12) lag += 0.5 * (a - c) / den;
+    }
+    double beats = 60.0 / (lag * hopSec);
+    // Prefer the musical range; halve/double an octave only when it lands there.
+    while (beats > 180.0 && beats / 2.0 >= 60.0) beats /= 2.0;
+    while (beats < 70.0 && beats * 2.0 <= 200.0) beats *= 2.0;
+    *bpm = beats;
+    *confidence = std::min(1.0, score[best]);
+}
+
+bool computePeaksFromFile(const std::string& path, uint32_t buckets,
+                          std::vector<float>* out, bool* complete,
+                          NAE_PeaksInfo* meta, NAE_AnalysisInfo* analysis,
+                          std::string* error, const int32_t* cancel = nullptr,
+                          bool* cancelled = nullptr) {
+    if (cancelled) *cancelled = false;
+    neiro::Decoder dec;
+    if (!dec.open(path, error)) return false;
+
+    const auto& info = dec.info();
+    const uint32_t ch = info.out_channels ? info.out_channels : 1;
+    // 分桶边界要用文件自己的帧数，而 `neiro::Decoder` 只报时长和采样率。这里用和
+    // `openExclusiveImpl` 里 `totalSourceFrames` **同一个**公式（那边也向上取了半个
+    // 采样率的帧数），这样两条路的分桶边界落在同一处。
+    const int64_t totalFrames =
+        static_cast<int64_t>(info.duration_ms / 1000.0 * info.sample_rate) +
+        static_cast<int64_t>(info.sample_rate) / 2;
+    if (totalFrames <= 0 || ch == 0) {
+        if (error) *error = "容器没有报时长，分桶边界算不出来";
+        return false;
+    }
+    const double per = static_cast<double>(totalFrames) / static_cast<double>(buckets);
+    if (analysis) {
+        std::memset(analysis, 0, sizeof(*analysis));
+        analysis->structSize = sizeof(*analysis);
+        analysis->analyzerVersion = NAE_ANALYZER_VERSION;
+        analysis->channels = static_cast<int32_t>(ch);
+        analysis->sampleRate = static_cast<int32_t>(info.sample_rate);
+        analysis->bitsPerSample = static_cast<int32_t>(info.bits_per_sample);
+        analysis->durationMs = static_cast<int32_t>(info.duration_ms);
+        std::snprintf(analysis->codec, sizeof(analysis->codec), "%s", info.codec.c_str());
+        const auto copyTag = [](char* dst, size_t cap, const std::string& src) {
+            if (cap == 0) return;
+            const size_t n = std::min(cap - 1, src.size());
+            std::memcpy(dst, src.data(), n);
+            dst[n] = '\0';
+        };
+        copyTag(analysis->title, sizeof(analysis->title), info.title);
+        copyTag(analysis->artist, sizeof(analysis->artist), info.artist);
+        copyTag(analysis->album, sizeof(analysis->album), info.album);
+        copyTag(analysis->albumArtist, sizeof(analysis->albumArtist), info.album_artist);
+        copyTag(analysis->track, sizeof(analysis->track), info.track);
+        copyTag(analysis->disc, sizeof(analysis->disc), info.disc);
+        copyTag(analysis->year, sizeof(analysis->year), info.year);
+        copyTag(analysis->genre, sizeof(analysis->genre), info.genre);
+        copyTag(analysis->composer, sizeof(analysis->composer), info.composer);
+        copyTag(analysis->comment, sizeof(analysis->comment), info.comment);
+        analysis->bitrateKbps = info.bitrate_kbps;
+        analysis->bitrateFromTag = info.bitrate_from_tag ? 1 : 0;
+        analysis->rgTrackValid = info.rg_track_valid ? 1 : 0;
+        analysis->rgTrackGainDb = info.rg_track_gain_db;
+        analysis->rgTrackPeak = info.rg_track_peak;
+        analysis->rgAlbumValid = info.rg_album_valid ? 1 : 0;
+        analysis->rgAlbumGainDb = info.rg_album_gain_db;
+        analysis->rgAlbumPeak = info.rg_album_peak;
+    }
+    if (meta) {
+        meta->duration_ms = info.duration_ms;
+        meta->sample_rate = info.sample_rate;
+        meta->channels = ch;
+        // 先写「没算」。下面每一条出口都可能在填数之前返回，而 0 **在这里**是唯一诚实
+        // 的初值：它说的是「这两个数不存在」，不是「这首歌是 0 dBFS」。
+        meta->metrics_window_ms = 0;
+        meta->metrics_hop_ms = 0;
+        meta->loudness_db = 0.0;
+        meta->dynamic_range_db = 0.0;
+    }
+
+    // ---- 短窗 RMS：和 peaks **同一趟**解码里累加 ----
+    //
+    // 这一趟的主要代价是解码（量过：典型曲目约 0.5 秒），所以顺手算出声级几乎免费。
+    //
+    // 做法是经典的「先按跳长分段、再把几段并成一个窗」：窗 400 ms / 跳 100 ms 就是每段
+    // 100 ms，四个连续段合起来是一个窗。反过来对每一帧开一个 400 ms 的窗，这一趟的内层
+    // 循环会多出四倍。
+    // 整数帧长，而且**四舍五入**：`spectrum.js` 那份镜像用的是 `Math.round`，两边必须
+    // 在同一些帧上分段。一个用 double、一个用整数时，44.1 kHz 上恰好一致，别的采样率上
+    // 会差一个样本——而它只要挪动一个窗，两个读数就都变了。
+    neiro::LoudnessMeter loudnessMeter;
+    const bool measureLoudness =
+        (meta || analysis) && loudnessMeter.configure(ch, static_cast<uint32_t>(info.sample_rate));
+
+    const int64_t hopFrames = std::max<int64_t>(
+        1, static_cast<int64_t>(std::lround(kMetricsHopMs / 1000.0 * info.sample_rate)));
+    std::vector<double> segSq;
+    std::vector<int64_t> segN;
+
+    const int64_t onsetHopFrames = std::max<int64_t>(
+        1, static_cast<int64_t>(std::lround(5.0 / 1000.0 * info.sample_rate)));
+    std::vector<double> onsetEnvelope;
+    double onsetSum = 0.0;
+    int64_t onsetCount = 0;
+
+    int64_t frame = 0;
+    std::vector<float> block;
+    // `read` **流结束时返回 false**，而短读是正常的（一次一个包），所以终止条件是
+    // 「没有新样本」，不是「这一块比预期短」。
+    for (;;) {
+        // Between blocks, not inside one: a block is one packet, so the caller's
+        // worst-case delay is one packet rather than the whole file.
+        //
+        // The flag is read, never written. It exists as a separate export because
+        // the decode call is blocking: without a flag the caller owns, nobody
+        // could reach a decode that is already running.
+        if (cancelRequested(cancel)) {
+            if (cancelled) *cancelled = true;
+            if (error) *error = "cancelled";
+            return false;
+        }
+        block.clear();
+        const bool more = dec.read(&block, error);
+        if (block.empty()) {
+            // 正常结束：false + 空。中途出错也会走到这里，所以顺带看 error 有没有话。
+            *complete = !more && (error == nullptr || error->empty());
+            break;
+        }
+        const size_t frames = block.size() / ch;
+        if (measureLoudness) loudnessMeter.process(block.data(), frames, ch);
+        for (size_t i = 0; i < frames; ++i) {
+            const float v = block[i * ch];
+            uint32_t b = per > 0.0 ? static_cast<uint32_t>(static_cast<double>(frame) / per) : 0u;
+            if (b >= buckets) b = buckets - 1;
+            const size_t k = static_cast<size_t>(b) * 2;
+            if (v < (*out)[k]) (*out)[k] = v;
+            else if (v > (*out)[k + 1]) (*out)[k + 1] = v;
+
+            const size_t seg = static_cast<size_t>(frame / hopFrames);
+            if (seg >= segSq.size()) {
+                segSq.resize(seg + 1, 0.0);
+                segN.resize(seg + 1, 0);
+            }
+            // **所有声道的算术平均**，不是第 0 声道。peaks 只看第 0 声道是「画一条
+            // 波形」的约定（和 JS 那一份逐字对齐），而「这首歌有多响」说的是听者听到的
+            // 那一路：只量左声道，一个人声偏左的混音会读得偏轻或偏响。
+            double mono = 0.0;
+            for (uint32_t c = 0; c < ch; ++c) mono += block[i * ch + c];
+            mono /= static_cast<double>(ch);
+            segSq[seg] += mono * mono;
+            segN[seg] += 1;
+            if (analysis) {
+                onsetSum += std::fabs(mono);
+                if (++onsetCount >= onsetHopFrames) {
+                    onsetEnvelope.push_back(onsetSum / static_cast<double>(onsetCount));
+                    onsetSum = 0.0;
+                    onsetCount = 0;
+                }
+            }
+            ++frame;
+        }
+        if (!more) { *complete = (error == nullptr || error->empty()); break; }
+    }
+
+    // ---- 合成窗、开门限、取分位数 ----
+    //
+    // 只在前一趟**真的解到了东西**时才算。解不开的文件这里段数是 0，于是
+    // `metrics_window_ms` 保持 0（= 没有这两个数），而不是给出一对来自零个窗的
+    // 「0.0 dB」——那读起来是一个测量结果。
+    if ((meta || analysis) && !segSq.empty()) {
+        const int64_t wantSegments =
+            std::max<int64_t>(1, static_cast<int64_t>(std::lround(kMetricsWindowMs / kMetricsHopMs)));
+        const size_t perWindow = static_cast<size_t>(wantSegments);
+        std::vector<double> levels;
+        levels.reserve(segSq.size());
+        for (size_t k = 0; k + perWindow <= segSq.size(); ++k) {
+            double sum = 0.0;
+            int64_t n = 0;
+            for (size_t j = 0; j < perWindow; ++j) {
+                sum += segSq[k + j];
+                n += segN[k + j];
+            }
+            if (n <= 0) continue;
+            const double ms = sum / static_cast<double>(n);
+            // 数字静音的对数是负无穷，而一个 -inf 会把「动态范围」变成无穷大。压在
+            // -120 dBFS 上：那在 16 bit 的底噪之下，真实内容碰不到它。
+            levels.push_back(ms > 0.0 ? std::max(-120.0, 10.0 * std::log10(ms)) : -120.0);
+        }
+        if (!levels.empty()) {
+            // **门限**：丢掉比「最响那 5% 的分位」低 40 dB 以上的窗。片头片尾的数字
+            // 静音和段间底噪都落在这一档下面，而它们会把 p10 拉到 -120 dB——于是
+            // 「动态范围」报出一个 100+ dB 的数，那个数说的是这个文件有多安静，不是
+            // 它有多少动态。
+            const double gate = percentile(levels, 0.95) - 40.0;
+            std::vector<double> kept;
+            kept.reserve(levels.size());
+            for (const double v : levels) {
+                if (v >= gate) kept.push_back(v);
+            }
+            if (!kept.empty()) {
+                const double loudness = percentile(kept, 0.5);
+                const double dynamicRange =
+                    percentile(kept, 0.95) - percentile(kept, 0.10);
+                if (meta) {
+                    meta->metrics_window_ms =
+                        static_cast<uint32_t>(std::lround(kMetricsWindowMs));
+                    meta->metrics_hop_ms =
+                        static_cast<uint32_t>(std::lround(kMetricsHopMs));
+                    // 响度取**中位数**：比均值稳——一段独奏、一段安静的前奏都不至于把它拖走。
+                    meta->loudness_db = loudness;
+                    // 动态范围取两个分位数之差，两端都取分位数而不是极值：单个离群的窗
+                    // （一下爆音、一段两秒的静音）不该定义一整首歌的动态。
+                    meta->dynamic_range_db = dynamicRange;
+                }
+                if (analysis) {
+                    analysis->metricsWindowMs =
+                        static_cast<uint32_t>(std::lround(kMetricsWindowMs));
+                    analysis->metricsHopMs =
+                        static_cast<uint32_t>(std::lround(kMetricsHopMs));
+                    analysis->loudnessDb = loudness;
+                    analysis->dynamicRangeDb = dynamicRange;
+                }
+            }
+        }
+    }
+    if (measureLoudness && (meta || analysis)) {
+        const neiro::LoudnessMeter::Result lr = loudnessMeter.finish();
+        if (meta) {
+            meta->lufs_integrated = lr.integratedLufs;
+            meta->lufs_momentary_max = lr.momentaryMaxLufs;
+            meta->lufs_short_term_max = lr.shortTermMaxLufs;
+            meta->lufs_range = lr.rangeLu;
+            meta->lufs_valid = lr.valid ? 1 : 0;
+            meta->lufs_short_term_valid = lr.shortTermValid ? 1 : 0;
+        }
+        if (analysis) {
+            analysis->lufsIntegrated = lr.integratedLufs;
+            analysis->lufsMomentaryMax = lr.momentaryMaxLufs;
+            analysis->lufsShortTermMax = lr.shortTermMaxLufs;
+            analysis->lufsRange = lr.rangeLu;
+            analysis->lufsValid = lr.valid ? 1 : 0;
+            analysis->lufsShortTermValid = lr.shortTermValid ? 1 : 0;
+        }
+    }
+    if (analysis) {
+        estimateBpm(onsetEnvelope, 5.0, &analysis->bpm, &analysis->bpmConfidence);
+        analysis->bpmValid =
+            (analysis->bpmConfidence >= 0.2 && analysis->bpm >= 30.0 &&
+             analysis->bpm <= 300.0)
+                ? 1
+                : 0;
+    }
+    return true;
+}
+
+int32_t NAE_ComputePeaks(const char* path, uint32_t buckets, NAE_PeaksInfo* info,
+                         float* out, int32_t capacity) NAE_NOEXCEPT {
+    if (info == nullptr) return NAE_ERR_INVALID_ARGUMENT;
+
+    // Local plus a clamped copy, for the reason `NAE_QueryTags` gives.
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_PeaksInfo));
+    NAE_PeaksInfo local{};
+    local.struct_size = full;
+    const uint32_t limit = declaredLimit(info->struct_size, full);
+    StructCommit<NAE_PeaksInfo> commit{info, &local, limit};
+
+    // 桶数/容量不够是**调用方的错**，不截断：截断会让它按错的桶数去画，而那看起来
+    // 和「这首歌就是这样」没有区别。
+    //
+    // `buckets * 2` is computed in `uint32_t`, so a value near the top wraps
+    // before the cast: `0x40000001` doubles to `0x80000002`, which casts to a
+    // negative `int32_t`, and the comparison against `capacity` is then false for
+    // every non-negative capacity -- the guard passed and the copy wrote 2^31
+    // floats through the caller's pointer. The bound is checked before any
+    // arithmetic.
+    if (path == nullptr || path[0] == '\0' || buckets == 0 || out == nullptr ||
+        buckets > static_cast<uint32_t>(INT32_MAX / 2) ||
+        capacity < static_cast<int32_t>(buckets * 2)) {
+        return NAE_ERR_INVALID_ARGUMENT;
+    }
+
+#ifdef NEIRO_HAVE_FFMPEG
+    std::vector<float> result(static_cast<size_t>(buckets) * 2, 0.0f);
+    bool complete = false;
+    std::string error;
+    // 打不开路径是**故障**，不是「还没有」——所以报错而不是回清零。回清零会把它
+    // 显示成「这首歌没有波形」，一个关于音乐的陈述。
+    // Into `local`: the commit guard copies it out at the end, so writing to
+    // the caller's buffer here would be overwritten by the local's zeroes.
+    if (!computePeaksFromFile(path, buckets, &result, &complete, &local, nullptr, &error)) {
+        return NAE_ERR_CANNOT_OPEN;
+    }
+
+    std::copy(result.begin(), result.end(), out);
+    local.bucket_count = buckets;
+    local.complete = complete ? 1u : 0u;
+    return NAE_OK;
+#else
+    return NAE_OK;
+#endif
+}
+static int32_t analyzeFileImpl(const char* path, uint32_t buckets,
+                               NAE_AnalysisInfo* info, float* peaks,
+                               int32_t capacity, int32_t* peaksWritten,
+                               const int32_t* cancel) NAE_NOEXCEPT {
+    // The same overflow as NAE_ComputePeaks: `buckets * 2` wraps in uint32_t
+    // before the cast, so a value near the top made the guard pass and the copy
+    // write through the caller's pointer.
+    if (!info || !peaks || !path || !path[0] || buckets == 0 ||
+        buckets > static_cast<uint32_t>(INT32_MAX / 2) ||
+        capacity < static_cast<int32_t>(buckets * 2)) {
+        return NAE_ERR_INVALID_ARGUMENT;
+    }
+
+    const uint32_t full = static_cast<uint32_t>(sizeof(NAE_AnalysisInfo));
+    NAE_AnalysisInfo local{};
+    local.structSize = full;
+    const uint32_t limit = declaredLimit(info->structSize, full);
+    StructCommit<NAE_AnalysisInfo> commit{info, &local, limit};
+    local.analyzerVersion = NAE_ANALYZER_VERSION;
+    if (peaksWritten) *peaksWritten = 0;
+
+#ifdef NEIRO_HAVE_FFMPEG
+    std::vector<float> result(static_cast<size_t>(buckets) * 2, 0.0f);
+    bool complete = false;
+    std::string error;
+    bool cancelled = false;
+    // Into `local`, not into the caller's buffer: the commit guard copies the
+    // local out at the end, so anything written to `info` here would be
+    // overwritten by zeroes -- which is what made every field read as 0.
+    if (!computePeaksFromFile(path, buckets, &result, &complete, nullptr, &local, &error,
+                              cancel, &cancelled)) {
+        g_lastErrorText = error;
+        return cancelled ? NAE_ERR_CANCELLED : NAE_ERR_CANNOT_OPEN;
+    }
+    std::copy(result.begin(), result.end(), peaks);
+    local.bucketCount = buckets;
+    local.complete = complete ? 1u : 0u;
+    if (peaksWritten) *peaksWritten = static_cast<int32_t>(buckets * 2);
+    return NAE_OK;
+#else
+    return NAE_OK;
+#endif
+}
+
+int32_t NAE_AnalyzeFile(const char* path, uint32_t buckets, NAE_AnalysisInfo* info,
+                        float* peaks, int32_t capacity,
+                        int32_t* peaksWritten) NAE_NOEXCEPT {
+    return analyzeFileImpl(path, buckets, info, peaks, capacity, peaksWritten, nullptr);
+}
+int32_t NAE_AnalyzeFileCancelable(const char* path, uint32_t buckets,
+                                  NAE_AnalysisInfo* info, float* peaks,
+                                  int32_t capacity, int32_t* peaksWritten,
+                                  const int32_t* cancel) NAE_NOEXCEPT {
+    return analyzeFileImpl(path, buckets, info, peaks, capacity, peaksWritten, cancel);
+}
+uint32_t NAE_GetAnalyzerVersion(void) NAE_NOEXCEPT { return NAE_ANALYZER_VERSION; }
+
+
 
 }  // extern "C"
+
+// ---- restored from git HEAD after an accidental deletion ----

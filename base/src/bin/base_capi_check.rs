@@ -425,7 +425,111 @@ fn main() {
     let favourites = wait_for_event("favourites_changed");
     assert_eq!(favourites["paths"][0], "/music/a.flac", "{favourites}");
 
+    // ---- tags over the wire ---------------------------------------------
+    //
+    // The tag commands are the ones a host needs and the ones that had no entry
+    // point before: read, write, and the field names each family accepts. Driven
+    // as JSON, because that is how a host reaches them.
+    assert_eq!(send(base, r#"{"command":"list_tag_keys"}"#), 0);
+    let keys = wait_for_event("tag_keys_changed");
+    let lists = keys["lists"].as_array().expect("lists is an array");
+    assert!(!lists.is_empty(), "every family answers: {keys}");
+    for list in lists {
+        let family = list["family"].as_str().expect("a family name");
+        let names = list["keys"].as_array().expect("keys is an array");
+        assert!(!names.is_empty(), "{family} names no fields: {list}");
+    }
+
+    // A tag file beside the library file, written by this check and read back
+    // through the same two commands a host uses.
+    let tag_path = dir.join("tagged.wav");
+    {
+        // A data chunk of zero bytes is a file the backend refuses to parse,
+        // and a read that fails for that reason says nothing about tags.
+        let frames: u32 = 44_100;
+        let mut wav = Vec::with_capacity(44 + (frames as usize) * 2);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&44_100u32.to_le_bytes());
+        wav.extend_from_slice(&(44_100u32 * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 2).to_le_bytes());
+        for i in 0..frames {
+            let v = ((i as f32 * 0.01).sin() * 8000.0) as i16;
+            wav.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(&tag_path, wav).expect("write a wav");
+    }
+
+    let read = format!(
+        r#"{{"command":"read_tags","path":{}}}"#,
+        serde_json::to_string(tag_path.to_str().expect("UTF-8")).unwrap()
+    );
+    assert_eq!(send(base, &read), 0);
+    let tags = wait_for_event("tags_read");
+    let writable = tags["writable"].as_array().expect("writable is an array");
+    assert!(!writable.is_empty(), "a WAV reports a writable family: {tags}");
+    // `families` and `writable` are different questions, so an empty file
+    // answers one of them with a family it can be written with and the other
+    // with what it carries now.
+    assert!(
+        tags["families"].as_array().expect("families is an array").is_empty(),
+        "an untagged file carries no families: {tags}"
+    );
+
+    // A write the container cannot take is an error event, not a silent no-op.
+    let impossible = format!(
+        r#"{{"command":"write_tags","path":{},"fields":[{{"family":"vorbis_comments","key":"TrackTitle","name":"TITLE","value":"x"}}],"policy":{{"write":["vorbis_comments"]}}}}"#,
+        serde_json::to_string(tag_path.to_str().expect("UTF-8")).unwrap()
+    );
+    assert_eq!(send(base, &impossible), 0);
+    let refused = wait_for_event_where("error", |v| v["op"] == "tags");
+    let message = refused["message"].as_str().unwrap_or("");
+    assert!(
+        message.to_lowercase().contains("vorbis"),
+        "the refusal names the family: {refused}"
+    );
+
+    // The same identity writes into the family this container does have.
+    let write = format!(
+        r#"{{"command":"write_tags","path":{},"fields":[{{"family":"riff_info","key":"TrackTitle","name":"INAM","value":"Probe Title"}}],"policy":{{"write":["riff_info"]}}}}"#,
+        serde_json::to_string(tag_path.to_str().expect("UTF-8")).unwrap()
+    );
+    assert_eq!(send(base, &write), 0);
+    let changed = wait_for_event("tags_changed");
+    let after = changed["families"].as_array().expect("families is an array");
+    assert!(
+        after.iter().any(|f| f == "riff_info"),
+        "the file carries what was written: {changed}"
+    );
+
+    // Read back through the wire: the value a host would show is the value the
+    // file now holds, and it names the family it came from.
+    assert_eq!(send(base, &read), 0);
+    let back = wait_for_event_where("tags_read", |v| {
+        v["fields"]
+            .as_array()
+            .map(|f| f.iter().any(|x| x["value"] == "Probe Title"))
+            .unwrap_or(false)
+    });
+    let found = back["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["value"] == "Probe Title")
+        .expect("the written field");
+    assert_eq!(found["family"], "riff_info", "{back}");
+    assert_eq!(found["key"], "TrackTitle", "the wire carries the identity: {back}");
+    assert_eq!(found["name"], "INAM", "and the format's name for it: {back}");
+
     NAE_BaseShutdown(base);
+    let _ = std::fs::remove_file(&tag_path);
     let _ = std::fs::remove_dir_all(&dir);
     println!("All Base C ABI checks passed.");
 }

@@ -50,7 +50,10 @@ fn wait_for(client: &mut Client, want: impl Fn(&Event) -> bool) -> Option<Event>
 }
 
 fn main() {
-    let pipe = r"\\.\pipe\neiro-base-transport-check";
+    // Derived rather than hardcoded: the name is a Windows pipe path there and a
+    // socket path here, and a literal `\\.\pipe\...` becomes a file with
+    // backslashes in its name on Unix.
+    let pipe = format!("{}-transport-check", transport::default_pipe_name());
     // The library has to be open: `ListPlaylists` answers with the list, and
     // without a library it answers with an error instead -- the check waited
     // for an event that was never coming, which looked like a hung transport.
@@ -63,14 +66,14 @@ fn main() {
     )
     .expect("start Base");
     let handle = base.handle();
-    let mut server = transport::Transport::start(handle.clone(), pipe).expect("start transport");
+    let mut server = transport::Transport::start(handle.clone(), &pipe).expect("start transport");
 
     // ---- a command takes effect over the wire ---------------------------
     //
     // The command is a request for the playlist list, which needs no device and
     // no library: it answers with an empty list, and the answer arriving at all
     // is what proves the round trip.
-    let mut client = connect_with_retry(pipe);
+    let mut client = connect_with_retry(&pipe);
     client
         .send(&Command::ListPlaylists)
         .expect("send a command over the pipe");
@@ -190,7 +193,7 @@ fn main() {
             String::new(),
         );
         // Restart for the reconnect check below.
-        server = transport::Transport::start(handle.clone(), pipe).expect("restart transport");
+        server = transport::Transport::start(handle.clone(), &pipe).expect("restart transport");
     }
 
     // ---- the listener is reachable again --------------------------------
@@ -198,7 +201,7 @@ fn main() {
     // A UI that restarts has to be able to reconnect. The server accepts one
     // client at a time, so the slot has to come back when the first leaves.
     drop(client);
-    let mut second = connect_with_retry(pipe);
+    let mut second = connect_with_retry(&pipe);
     second
         .send(&Command::ListPlaylists)
         .expect("send from a second client");

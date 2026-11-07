@@ -122,17 +122,22 @@ fn finish(batches: &Batches, path: &Path, events: &EventBus) {
     let done = batch.total - batch.pending.len();
     let total = batch.total;
     let complete = batch.pending.is_empty();
-    // The batch is dropped outside the loop below, so the borrow ends first.
-    let finished = complete;
-    if finished {
+    if complete {
         guard.retain(|b| !b.pending.is_empty());
     }
-    drop(guard);
+    // Emitted while the batch lock is still held, and that is the point.
+    //
+    // The count was computed here and published after the guard was dropped, so
+    // two workers could compute 2 and 3 in that order and publish them the other
+    // way round. A host painting progress from the stream saw it move backwards
+    // -- "1 after 2", caught by the probe -- with nothing wrong in the arithmetic.
+    // `emit` only queues, so holding the lock across it costs a channel send.
     events.emit(Event::PreanalysisProgress {
         done,
         total,
         complete,
     });
+    drop(guard);
 }
 
 pub(crate) fn new_registry() -> CancelRegistry {

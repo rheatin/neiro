@@ -98,6 +98,16 @@ int main(int argc, char** argv) {
     check(ok, "opens into READY", stateName(st.state));
     const int32_t openPerfect = st.bitPerfect;
     check(st.duration > 0.0, "reports a duration", std::to_string(st.duration) + " s");
+    // The position wait below asks for 0.20 s of playback. A file shorter than
+    // that can never reach it and the failure would read as "position does not
+    // advance", which is about the fixture.
+    if (st.duration > 0.0 && st.duration < 0.25) {
+        std::fprintf(stderr,
+                     "fixture too short: %.3f s; this check waits for the position to "
+                     "reach 0.20 s, so it needs at least 0.25 s.\n",
+                     st.duration);
+        return 2;
+    }
     check(st.sampleRate > 0 && st.channels > 0, "reports the device format",
           std::to_string(st.sampleRate) + " Hz / " + std::to_string(st.channels) + " ch");
 

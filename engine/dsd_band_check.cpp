@@ -204,6 +204,14 @@ int main(int argc, char** argv) {
     // 但这条检查确实起了作用：它让人注意到交错缓冲区必须先拆开才能分析。所以保留它，
     // 换成正确的期望：真失同步会让差异远大于 +6 dB（两个不相干的信号平均起来比单声道更响），
     // 而正常的立体声差异在几 dB 量级。
+    // Channel 1 is read unconditionally below. A mono DSD file would index past
+    // the end of the window, so the premise is stated rather than assumed.
+    if (channels < 2) {
+        std::fprintf(stderr,
+                     "fixture is mono (%zu channels); the stereo correlation needs two\n",
+                     static_cast<size_t>(channels));
+        return 2;
+    }
     {
         double diff = 0.0, mag = 0.0;
         for (size_t i = 0; i < kWindow; ++i) {

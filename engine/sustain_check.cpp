@@ -241,6 +241,17 @@ int main(int argc, char** argv) {
 
     std::printf("[sustain] %-10s  %u->%u Hz  %dch %d-bit  resample=%d  %.1f s of audio\n",
                 label, srcRate, rate, channels, bits, resampling, durationSec);
+    // The verdicts are slopes fitted over the requested window. On a file that
+    // ends first, the fit runs on a truncated series -- a trend through four
+    // points reads like a drift. Refuse rather than report one.
+    if (durationSec > 0.0 && durationSec < wantSeconds + 1.0) {
+        std::fprintf(stderr,
+                     "[sustain] fixture too short: %.1f s of audio, but %d s were "
+                     "requested. Pass --seconds %d or use a longer file.\n",
+                     durationSec, wantSeconds, static_cast<int>(durationSec));
+        NAE_Close(h);
+        return 2;
+    }
     std::printf("[sustain] want %d s of wall time, sampled every %d ms\n", wantSeconds,
                 sampleMs);
     if (overfeed <= 1)

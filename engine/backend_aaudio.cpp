@@ -30,11 +30,16 @@ struct AAudioStream final : BackendStream {
                                                       int32_t numFrames) {
         auto* self = static_cast<AAudioStream*>(user);
         if (!self || !self->render) return AAUDIO_CALLBACK_RESULT_CONTINUE;
-        auto* out = static_cast<float*>(audioData);
+        // The core writes final device bytes; this backend only moves them.
+        // Casting to float* was correct while the callback returned floats, and
+        // silently wrong afterwards: it would have written the padding at four
+        // times the right stride and read the core's int16 output as floats.
+        auto* out = static_cast<uint8_t*>(audioData);
         const size_t got = self->render(out, static_cast<size_t>(numFrames));
         if (got < static_cast<size_t>(numFrames)) {
-            std::memset(out + got * self->channels, 0,
-                        (static_cast<size_t>(numFrames) - got) * self->channels * sizeof(float));
+            const size_t bytesPerFrame = self->channels * sizeof(float);
+            std::memset(out + got * bytesPerFrame, 0,
+                        (static_cast<size_t>(numFrames) - got) * bytesPerFrame);
         }
         return AAUDIO_CALLBACK_RESULT_CONTINUE;
     }

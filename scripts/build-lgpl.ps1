@@ -25,7 +25,10 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $engineDir = Join-Path $repoRoot "engine"
-$workDir = Join-Path $env:TEMP "neiro-lgpl"
+# The tree the default build links. CMake prefers this directory over the
+# system package, so running this script once is what makes LGPL the default.
+$vendorDir = Join-Path $repoRoot "vendor\ffmpeg-lgpl"
+$stageDir = Join-Path $env:TEMP "neiro-lgpl-stage"
 
 if (-not $Prefix) {
     if ($SkipDownload) {
@@ -38,12 +41,16 @@ if (-not $Prefix) {
     Write-Host "downloading $url"
     Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
 
-    if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir }
-    New-Item -ItemType Directory -Path $workDir | Out-Null
-    Expand-Archive -Path $zip -DestinationPath $workDir -Force
+    if (Test-Path $stageDir) { Remove-Item -Recurse -Force $stageDir }
+    New-Item -ItemType Directory -Path $stageDir | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $stageDir -Force
 
-    $inner = Get-ChildItem -Path $workDir -Directory | Select-Object -First 1
-    $Prefix = $inner.FullName
+    $inner = Get-ChildItem -Path $stageDir -Directory | Select-Object -First 1
+    if (Test-Path $vendorDir) { Remove-Item -Recurse -Force $vendorDir }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $vendorDir) -Force | Out-Null
+    Move-Item -Path $inner.FullName -Destination $vendorDir
+    Remove-Item -Recurse -Force $stageDir
+    $Prefix = $vendorDir
 }
 
 Write-Host "FFmpeg prefix: $Prefix"
@@ -69,10 +76,19 @@ if (Test-Path $buildPath) { Remove-Item -Recurse -Force $buildPath }
 
 $toolchain = Join-Path $engineDir "cmake/mingw-ucrt.cmake"
 
+# The compiler is named explicitly when the environment supplies one. CMake
+# reads CC/CXX from the environment on first configure, but a scoop MinGW has no
+# gcc.exe -- the driver is cc.exe -- so a bare "gcc" from a shell is a path that
+# does not exist, and the failure reads as "the C compiler is not a full path".
+$compilerArgs = @()
+if ($env:CC)  { $compilerArgs += "-DCMAKE_C_COMPILER=$env:CC" }
+if ($env:CXX) { $compilerArgs += "-DCMAKE_CXX_COMPILER=$env:CXX" }
+
 & cmake -S $engineDir -B $buildPath -G Ninja `
     "-DCMAKE_TOOLCHAIN_FILE=$toolchain" `
     -DCMAKE_BUILD_TYPE=Release `
-    "-DNEIRO_FFMPEG_ROOT=$Prefix"
+    "-DNEIRO_FFMPEG_ROOT=$Prefix" `
+    @compilerArgs
 if ($LASTEXITCODE -ne 0) { Write-Error "configure failed" }
 
 & cmake --build $buildPath

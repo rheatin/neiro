@@ -473,6 +473,17 @@ int main(int argc, char** argv) {
         return 1;
     }
     const dsf::Format& fmt = dsf.fmt;
+    // The decimation filters below were designed for DSD64: their passbands are
+    // named after the 22.05 kHz audio band and their transition bands assume the
+    // 2.8224 MHz bit rate. A DSD128 file would run them at the wrong rate and the
+    // output is not a measurement of anything. State the premise.
+    if (fmt.dsdRate != 2822400u) {
+        std::fprintf(stderr,
+                     "%s is %u Hz bit rate; this check's filter designs are DSD64 "
+                     "(2822400 Hz).\n",
+                     path, fmt.dsdRate);
+        return 2;
+    }
     const double inRate = static_cast<double>(fmt.dsdRate);
     const int channels = static_cast<int>(fmt.channels);
     int blocks = wantBlocks;

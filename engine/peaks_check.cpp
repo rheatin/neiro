@@ -108,6 +108,16 @@ int main(int argc, char** argv) {
         std::printf("  机读摘要：SUMMARY buckets=%u rc=%d fail=%d\n", buckets, first.rc, g_fail);
         return 1;
     }
+    // 3 s 长是 short-term 窗口的定义，短于它的文件不可能有这一项。这里**拒绝**夹具，
+    // 而不是把「夹具不够长」记成一条失败：前者是换一个文件，后者读起来像引擎坏了。
+    if (first.info.duration_ms > 0.0 && first.info.duration_ms < 3000.0) {
+        std::fprintf(stderr,
+                     "fixture too short: %s is %.0f ms; the short-term window is 3 s, "
+                     "so this check needs at least 3000 ms.\n",
+                     path, first.info.duration_ms);
+        return 2;
+    }
+
     check(first.info.bucket_count == buckets, "拿到的桶数就是请求的桶数",
           "拿了 " + std::to_string(first.info.bucket_count) + "，要了 " + std::to_string(buckets));
     std::printf("        第一次 %.1f ms   complete=%u   duration=%.0f ms   rate=%u   ch=%u\n",

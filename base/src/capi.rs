@@ -72,6 +72,14 @@ pub extern "C" fn NAE_BaseStartWithLibrary(path: *const c_char) -> *mut NAE_Base
     }
     let library = catch_unwind(AssertUnwindSafe(|| {
         let text = unsafe { CStr::from_ptr(path) }.to_str().ok()?;
+        // An empty path is not "no library": SQLite reads it as a private
+        // temporary database, so a host that passed the wrong variable would
+        // get a library that vanishes when the process exits and would lose
+        // every playlist the listener made. `NAE_BaseStart` is the way to ask
+        // for no library, and it says so.
+        if text.is_empty() {
+            return None;
+        }
         crate::library::Library::open(std::path::Path::new(text)).ok()
     }))
     .ok()

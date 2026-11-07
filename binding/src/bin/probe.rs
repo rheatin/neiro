@@ -160,7 +160,15 @@ fn main() {
     match audio::capabilities() {
         Ok(json) => {
             println!("  {}", json);
-            fail(json.contains("wasapi"), "capabilities mention wasapi", "");
+            // The backend that answered, whatever it is called here. Naming
+            // WASAPI outright made this pass on Windows and fail on every other
+            // platform for the only reason that mattered least: the string.
+            let backend = if cfg!(target_os = "macos") { "coreaudio" } else { "wasapi" };
+            fail(
+                json.to_lowercase().contains(backend),
+                &format!("capabilities mention {backend}"),
+                "",
+            );
         }
         Err(e) => fail(false, "capabilities readable", &e.to_string()),
     }
@@ -428,23 +436,35 @@ fail(
             mode: OutputMode,
             want_bit_perfect: Option<bool>,
         }
+        // What Native mode can promise depends on the route the platform gives
+        // us. WASAPI can hand the device a format that matches the file, so an
+        // untouched signal is possible. CoreAudio here has one route -- float32
+        // -- so an integer file is converted before it reaches the device and
+        // bit-perfect is impossible at any rate. That is the bit-depth gap, not a
+        // negotiation result, and asserting `true` would be asserting parity the
+        // platform cannot back.
+        let native_bit_perfect = if cfg!(target_os = "macos") {
+            Some(false)
+        } else {
+            Some(true)
+        };
         let cases = [
             Case {
                 label: "Native, source == device",
                 source_rate: 0,
                 mode: OutputMode::Native,
-                want_bit_perfect: Some(true),
+                want_bit_perfect: native_bit_perfect,
             },
             Case {
                 label: "Native, 44.1k source",
                 source_rate: 44100,
                 mode: OutputMode::Native,
-                // Still bit-perfect, and this is the point of the mode: the
-                // device is reformatted to 44.1 kHz, so the file's samples reach
-                // it untouched. An earlier version of this test expected false
-                // here, on the reasoning that a rate change implies processing.
-                // It does not — it implies the device changed shape instead.
-                want_bit_perfect: Some(true),
+                // Still bit-perfect on WASAPI, and this is the point of the mode:
+                // the device is reformatted to 44.1 kHz, so the file's samples
+                // reach it untouched. An earlier version of this test expected
+                // false here, on the reasoning that a rate change implies
+                // processing. It does not — it implies the device changed shape.
+                want_bit_perfect: native_bit_perfect,
             },
             Case {
                 label: "Device, 44.1k source",

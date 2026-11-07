@@ -56,8 +56,16 @@ int main(int argc, char** argv) {
     r.structSize = sizeof(r);
     check(NAE_SessionGetResolvedSignalPath(session, &r) == NAE_OK,
           "resolved path after policy open");
-    check(r.sampleRate == 44100, "native policy keeps 44.1k",
-          std::to_string(r.sampleRate));
+    // The rate to expect is the file's own, read from the session rather than
+    // written here. It was `== 44100`, so the same check reported an engine
+    // failure for any file that was not 44.1 kHz while nothing was wrong.
+    NAE_SessionState st{};
+    st.structSize = sizeof(st);
+    NAE_SessionGetState(session, &st);
+    check(st.sourceRate > 0 && r.sampleRate == st.sourceRate,
+          "native policy keeps the source rate",
+          std::to_string(r.sampleRate) + " Hz device vs " + std::to_string(st.sourceRate) +
+              " Hz source");
     check(r.resampling == 0, "native policy does not resample");
     check(r.ditherActive == 0, "dither off is reflected in the actual path");
     check(r.clipGuardMode == NAE_CLIP_GUARD_OFF && r.clipGuardActive == 0,

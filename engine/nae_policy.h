@@ -434,6 +434,19 @@ typedef struct NAE_DeviceCaps {
     uint32_t supportedShareModes;  // bitmask of NAE_SHARE_MODE_*
     int32_t exclusiveSupported;
     int32_t sharedSupported;
+    /// This backend can take the device away from other processes.
+    ///
+    /// Deliberately separate from `exclusiveSupported`, because the two are not
+    /// the same promise. Windows' exclusive mode means both "nobody else may
+    /// open it" *and* "the samples are not converted on the way to the device".
+    /// macOS `kAudioDevicePropertyHogMode` gives only the first: the HAL can
+    /// still convert if the stream format or the nominal rate differs from the
+    /// physical one. Reporting hog as exclusivity would let a host draw a switch
+    /// whose name promises something this platform does not deliver.
+    ///
+    /// A host that wants "nobody else may take this device" reads this field;
+    /// one that wants the Windows semantics reads `exclusiveSupported`.
+    int32_t hogSupported;
 } NAE_DeviceCaps;
 
 // ---- source description -----------------------------------------------------

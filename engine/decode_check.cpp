@@ -146,11 +146,18 @@ int main(int argc, char** argv) {
         }
 
         // Seek, then confirm playback resumes and lands somewhere plausible.
-        if (dec.seek(1.0, &err)) {
+        //
+        // Inside the file, because a fixed 1.0 s is not inside every file. A
+        // one-second fixture puts the seek exactly on the last frame, so the read
+        // that follows returns nothing and the failure reads as "the decoder
+        // cannot resume after a seek" when the truth is that there was nothing
+        // left to read. The target comes from what was decoded above.
+        const double seekTo = seconds > 2.0 ? 1.0 : seconds * 0.5;
+        if (dec.seek(seekTo, &err)) {
             block.clear();
             const bool got = dec.read(&block, &err);
-            check("read after seek", got, got ? fmt("%zu samples", block.size())
-                                              : err);
+            check("read after seek", got,
+                  got ? fmt("%zu samples from %.2f s", block.size(), seekTo) : err);
         } else {
             check("seek", false, err);
         }

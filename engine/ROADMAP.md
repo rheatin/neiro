@@ -34,6 +34,26 @@ Stream.deviceLost / close
 The interface returns `NAE_DeviceCaps`; it does not know about routing, DSD
 policy, EQ, diagnostics or Base.
 
+**Progress (2026-11-07):** `NAE_Handle` is in `engine/nae_internal.h`, and the
+macOS device open plus the default-device lookup are in
+`engine/open_coreaudio.cpp`, a translation unit Windows does not compile. What is
+left of the platform code in `nae.cpp` is the Windows backend (which still talks
+to WASAPI directly), forty lines of macOS JSON assembly, and the adapter struct
+that turns `neiro::OutputStream` into the status the render loop reads.
+
+`backend_wasapi.cpp` is gone: it was not a backend. Every method called back into
+the DLL's own exports, its "stream" pumped `NAE_Play` on a thread, and nothing in
+the engine used it -- it was linked into `nae` for no reason and used only by
+`backend_check`. The adapter now lives inside that check, where its only caller
+is, and the engine's source list is back to `nae.cpp` + `session.cpp`.
+
+The real Windows backend exists now: `backend_wasapi.cpp` owns the
+`IAudioClient` and presents the same "room, window, commit" stream the CoreAudio
+one does, and both open paths are the same function shape. `NAE_Play` has one
+device path on both platforms. See `PORT-HANDOVER.md` for what the port had to
+get right (the `SetEventHandle` order, and the event-driven exclusive fallback on
+this endpoint).
+
 ### B. Platform-neutral core target
 
 - `neiro_core` is now a static target with `policy.cpp`, `hilbert.cpp`,
@@ -57,9 +77,19 @@ policy, EQ, diagnostics or Base.
 ### D. CoreAudio backend (macOS)
 
 - Implemented: enumeration, default device, caps, HAL AudioUnit output, pull
-  render callback, backend selection in CMake.
-- Still open: device-change notifications, interruption/route lifecycle, DoP
-  carrier probing, native DSD.
+  render callback, backend selection in CMake, exclusive access through
+  `kAudioDevicePropertyHogMode` (shared never takes the device), the resampler
+  wired at open, and the device's sample rate restored on close.
+- Implemented since: device loss. A listener on
+  `kAudioDevicePropertyDeviceIsAlive` sets the stream's lost flag, and a failed
+  `AudioOutputUnitStart` on a device the HAL no longer knows does the same, so
+  the engine's `NAE_ERR_DEVICE_LOST` path is reachable here instead of being dead
+  code. Verified only for the absence of false positives: the firing path needs
+  a device to be unplugged mid-stream.
+- Still open: interruption/route lifecycle (there is no AVAudioSession on macOS;
+  a default-device change is answered by the next query, because the C ABI is
+  pull-based), DoP carrier probing, native DSD, bit depth (the route is float32
+  only, so `bit_perfect` cannot be true).
 
 ### E. iOS shell
 

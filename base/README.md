@@ -8,6 +8,7 @@ UI / remote client
     ↕  commands + events (serializable)
 Base (Rust)
     ├─ library: favourites, playlists, play counts (SQLite)
+    ├─ tags: read/write per container family, atomic replace
     ├─ transport: play/pause/seek/stop, queue, endpoint choice
     ├─ output policy: rate mode, resampler quality, share mode
     ├─ analysis scheduler + LRU cache
@@ -24,6 +25,303 @@ an audio scheduler. `Session` already owns the playback thread, the stream, the
 position, the queue and the DSP. Base uses `Session`; it must not build a second
 render loop around `Stream`. The `Stream` wrapper remains in `neiro-audio` for
 the harnesses and low-level probes.
+
+## Tags belong to the file, not to a cache
+
+A tag write replaces the file: the edit lands in a sibling temp file, the audio
+stream is copied through untouched, and the temp file is renamed over the
+original. The samples are not decoded or re-encoded, and a check decodes the
+file before and after and compares the bytes.
+
+Which families a file can carry is asked of the file (`writable_families`), not
+assumed from its extension. `writable_keys` reports the fields a family can
+hold, so a UI draws a form for this file rather than a generic one; ID3v1 has a
+fixed eight-field block and reports those eight rather than an empty list.
+
+`TagPolicy::id3v2_only_when_id3v1_overflows` is read both ways. Text that fits
+ID3v1 gets an ID3v1 tag and no ID3v2 block. Text that does not fit -- over 30
+bytes, or outside ISO-8859-1, which is every CJK title -- drops ID3v1 and is
+written to ID3v2 alone. Writing ID3v1 truncated, or failing the edit because one
+family cannot hold the text, are both worse than leaving that family out.
+
+### Over the wire
+
+| Command | Answer | Notes |
+|---|---|---|
+| `read_tags { path }` | `tags_read` | `families` is what the file carries now; `writable` is what its container can be written with. Two questions: a WAV may carry an ID3v2 chunk and still have no ID3v1 to write. |
+| `write_tags { path, fields, policy }` | `tags_changed` / `error { op: "tags" }` | The policy has no default. Which families to write is the caller's decision, and a preset would make it here. |
+| `list_tag_keys { families }` | `tag_keys_changed` | Empty asks for every family. The answer depends on the family and on no file, so it is asked once, not per selection. |
+| `read_artwork { path, index? }` | `artwork_read` | Without an index: every picture's role, mime and size, no bytes. With one: that picture's bytes, base64. |
+| `set_artwork { path, family, index?, data, mime?, kind?, description? }` | `artwork_changed` | `index` replaces a picture in that family's list; absent appends. |
+| `remove_artwork { path, family, index }` | `artwork_changed` | The count must fall by one; the re-read is the assertion. |
+
+Every artwork command names a family, because pictures live in one. A file can
+carry the same cover in ID3v2 and in APE, each with its own list, so an index
+without a family addresses nothing — the flattened listing is for display, and
+each entry carries its family so the caller can address it.
+
+A family that is eight fixed text fields (ID3v1) or text chunks (RIFF INFO,
+AIFF text) has nowhere to put a picture. That is a different question from
+whether the container is writable, and it is asked separately: offering "add a
+cover" for a container that cannot hold one is a promise the file cannot keep.
+
+The two modes of `read_artwork` are separate because they run at different
+frequencies. A track change asks "is there a cover, and how big" and must not
+move a hundred kilobytes of JPEG through a JSON string; a view that has to draw
+one asks for it by index. A listing that carried the bytes would make the cheap
+question as expensive as the rare one.
+
+`mime` comes from the tag and may be absent. A file that does not say what its
+picture is has not told us, and sniffing the first bytes here would be a second
+opinion the file never gave.
+
+`tags_read` carries every field with the family it came from, because two
+families in one file can disagree about the same key: an MP3 whose ID3v2 says
+2019 and whose APEv2 says 2018 is a real file. Flattening them would have to
+pick a winner, and that winner would be a value nobody owns.
+
+A field on the wire carries two names, and they are not interchangeable:
+
+| Field | Example | Purpose |
+|---|---|---|
+| `key` | `TrackTitle` | The identity: the `ItemKey` variant name. Stable across formats, and the only thing a write is resolved by. |
+| `name` | `TIT2`, `TITLE`, `Title` | How that family spells the field. Display only. |
+
+The identity exists because a family spells several keys the same way. ID3v2
+puts the track number and the track total in one `TRCK` frame; `TIPL` holds
+producer, engineer and five other roles under one name; APE calls both
+`TrackNumber` and `TrackTotal` "Track"; MP4 calls `Lyrics` and `UnsyncLyrics`
+both `©lyr`. Resolving a write by the display name would pick one of them and
+write the wrong field — silently, since the write would still succeed.
+
+A name no family maps, and a value that is not text (an embedded picture), are
+refused before the file is opened: a write that dropped a field would report
+success for an edit that did not happen.
+
+A policy with `clear` and an empty `write` erases those families and writes
+nothing — Picard's "remove ID3 tags from FLAC files". It is a real edit, and it
+goes through the same copy-and-rename; the saved file is read back to confirm
+each named family is gone, so a backend that left the bytes in place cannot be
+reported as a success. Erasing goes through an *empty* tag rather than a
+removal: the backend does not write empty tags, and dropping the tag from its
+list leaves the original bytes untouched — measured, not assumed.
+
+## Local folders
+
+| Command | Answer | Notes |
+|---|---|---|
+| `scan_folder { root }` | `scan_started`, then `scan_done` | A walk compared against the index, not a list of the tree. |
+| `watch_folder { root }` | `folder_watched { roots }` | Recursive. Watching one twice is not an error. |
+| `unwatch_folder { root }` | `folder_unwatched { roots }` | |
+| `set_reconcile_interval { seconds }` | `reconcile_changed` | 0 turns it off. |
+| — | `files_changed { changes }` | Coalesced per worker tick. |
+
+This layer used to say it did not scan, on the grounds that a host supplying
+paths kept Base from growing into a media library. A folder the listener added
+is a fact about the music, not about the host, and two hosts would disagree
+about it — so it lives here, next to the favourites that name the same files.
+
+### A scan is a difference, not a listing
+
+`scan_done` carries `added`, `modified`, `removed` and `moved`. The whole tree
+would make every launch a re-import, which is worse than not scanning at all.
+
+The index is `files(path, root, size, mtime_ms)` in the same SQLite file as the
+favourites. It belongs there for two reasons: it is the only way to answer "what
+left?" when a directory is removed, and it is what makes the comparison cheap.
+It is derived — every row can be rebuilt by walking — so a file that disappears
+loses its row and keeps its star.
+
+### A move is detected, not guessed
+
+Within one reconciliation, a removed file and an added file that share a size
+and a timestamp are the same file under a new name. Base then rewrites the path
+in `tracks` and `playlist_entries`, so the star, the play count and the playlist
+membership follow the file, and it carries the analysis cache entry over.
+
+That last part is not an optimisation detail. The analysis key is
+path + size + mtime + analyzer version, and a rename changes only the first:
+without the carry-over, moving an album costs one decode per file and produces
+the same numbers as before. `folder_probe` measures it — first analysis is a
+miss, the move is detected, the second analysis is a hit.
+
+The host gets `moved { from, to }` and moves whatever else it caches by path.
+
+Two candidates on either side of the pairing means ambiguity, and ambiguity is
+not resolved by picking one: a wrong pairing hands one file another's history,
+while a missed pairing only costs what not detecting moves cost. Uniqueness of
+the fingerprint is not enough either — two rips of one master can share a size
+and a timestamp — so a pairing also requires the file name or the directory to be
+unchanged. A rename that changes both is reported as a removal and an addition,
+which is the same loss the old behaviour had and never a wrong star.
+
+The index compares paths the way the platform does: ASCII case-folded. Two
+spellings of one share are one share. Before that rule existed, a host that
+reached the library as `\\server\Music` after having reached it as
+`\\SERVER\Music` re-imported all 3,585 files and then held two rows for each. If the
+destination is already known to the library the move is refused outright and
+reported, rather than merging two files.
+
+This is why the crate needs no persistent id column. Navidrome needs one because
+its pipeline stages run across separate scans; here both halves of the pairing
+are in one diff, and the pairing rule is the identity.
+
+### A scheduled reconciliation is the only thing that sees a silent loss
+
+A watcher reports the failures it is told about. A network share loses events
+without telling anyone: no error, no gap, just a library that drifts. The only
+mechanism that can see that is walking the tree again, and on the library this
+was measured against it costs six seconds for 3,585 files over SMB.
+
+`set_reconcile_interval` runs the same `scan_folder` a host sends, through the
+same comparison, so there is one place a diff can come from. It is off until the
+host asks for it, because the interval is a policy decision and this layer does
+not make those.
+
+A round that could not stat part of the tree does not report removals. A file
+that could not be read looks exactly like a file that was deleted, and reporting
+it as gone is the one answer the source did not give.
+
+### The watcher never implies it knows
+
+`files_changed` carries `rescan` when the watcher cannot name what changed: a
+directory was removed (its contents were never enumerated), or the backend
+reported lost events — a full buffer, a handle that stopped working. Silence
+would be indistinguishable from "nothing changed", which is the one thing a
+watcher must not imply when it does not know.
+
+### A write from this process is not an import
+
+`tag.rs` replaces a file by staging a copy beside it and renaming over it, which
+the watcher sees as a file appearing. The control thread therefore marks the path
+it is about to write, and the watcher consults the same set; the mark survives
+two seconds past the write because the backend delivers the rename late. Jellyfin
+needs a 45-second heuristic for the same problem because its writers are other
+processes; here the writer is in this one, so the window is exact.
+
+The rule that came out of the same measurement: a leading dot is skipped
+everywhere — walking, watching, listing. That removes the tag writer's staged
+copy and macOS's `._track.flac` resource forks, which have audio extensions and
+are not audio at all.
+
+### What is deliberately not here
+
+- **No scheduled full scan.** It guards against network mounts dropping events,
+  which is a server's problem: the engine only plays local paths, and local
+  events are pushed by the kernel. The real gap — changes while the process was
+  closed — is what the launch reconciliation covers.
+- **No percentage progress.** `scan_started` and `scan_done` only. A library
+  big enough that the silence hurts is big enough to deserve moving the walk off
+  the worker, and a progress bar would hide that.
+- **No second thread for watching.** notify drains the kernel buffer on its own
+  thread, so a slow scan only grows the in-process queue; it does not lose
+  events. Splitting would buy latency during a scan and cost an interleaving
+  problem between two event sources.
+- **Roots are not in SQLite.** SQLite holds derived data that can be rebuilt; a
+  root is a user setting, and it belongs with the other settings where the host
+  already keeps the output device. Base only has to make `watch_folder`
+  idempotent, which it is.
+
+`cargo run --bin folder_probe` builds a tree, scans it twice (the second diff
+must be empty), renames a file (one move, not a removal and an addition), watches
+it, creates and deletes files, removes a directory, writes a tag and asserts the
+write is *not* reported as a file change, and unwatches.
+
+## Remote libraries (Jellyfin and Navidrome)
+
+Two protocols, one shape. `set_remote` takes a tagged server, `list_remote`
+returns tracks either way, `fetch_remote` downloads and hands back a local path.
+
+| | Jellyfin | Navidrome (Subsonic) |
+|---|---|---|
+| Auth | token or password sign-in, both ending in a token header | per-request salt, `t = md5(password + salt)` |
+| Listing | `GET /Items?IncludeItemTypes=Audio` | `GET /rest/search3.view?query=&songCount=` |
+| Download | `GET /Items/{id}/Download` | `GET /rest/stream.view?id=&format=raw` |
+| Extension | `MediaSources[0].Container` | `song.suffix` |
+| Cover | `GET /Items/{id}/Images/Primary?maxHeight=600` | `GET /rest/getCoverArt.view?id=&size=600` |
+| Playlists | `GET /Items?IncludeItemTypes=Playlist` | `GET /rest/getPlaylists.view` |
+| Entries | `GET /Items?ParentId={id}` | `GET /rest/getPlaylist.view?id=` |
+
+Covers are cached in two layers. Memory answers the second look within one run;
+a directory under `cache_dir/artwork/<server>/` answers the *first* look after a
+restart, which is the one that costs the listener bandwidth and makes a first
+browse feel slow.
+
+The directory is keyed by server because a cover id is only meaningful on the
+server that issued it — two servers can both have `cover-1` and mean different
+pictures. Configuring a server drops the memory layer and keeps the directory,
+so a host that re-sends `set_remote` on every launch keeps its cache; that is
+the common case, and wiping on configure would make the persistence useless.
+
+Each file is named `<cover id>.<mime with / replaced by _>`, so the type
+survives with the bytes without a sidecar or a second index. The directory is
+bounded at 512 files, oldest by modification time first.
+
+A cover that the server does not have is `remote_artwork` with no `data`, not an
+error: a track without a picture is a normal track. Jellyfin answers 404 for it,
+Subsonic answers a JSON error inside a 200 — the same trap the stream endpoint
+has, handled the same way.
+
+Jellyfin takes either a key minted in the dashboard or a username and password.
+The password is exchanged for an access token through
+`/Users/AuthenticateByName` when the server is configured, and replaced in
+place: nothing below that point holds a password, and a wrong one fails at
+connect time instead of on the first listing.
+
+A download is as big as the track, and the HTTP client caps a response body at
+10 MiB by default — a perfectly ordinary 40 MB FLAC came back as "the response
+body is larger than request limit" against a real server. The cap is one gibibyte
+here: far above any single track, still a bound.
+
+`format=raw` on the Subsonic stream is not decoration. Without it the server may
+transcode to something the client advertises, the download still succeeds, and
+every bit-perfect claim about that track is false. `maxBitRate=0` goes with it
+for the same reason.
+
+A Subsonic server reports a refused stream as a JSON error document inside an
+**HTTP 200**. Reading that as audio writes the error into the cache under a
+`.flac` name and calls it a download, so the content type is checked before the
+bytes are believed.
+
+The MD5 is pinned against the protocol's own example (`md5("sesame" + "c19b2d")
+= 26719a1196d2a940705a59634eb18eab`) rather than against this crate's output: a hash that
+disagreed with every other client would still be a stable string here.
+
+
+A remote track is downloaded into a local cache and then played as a file.
+Streaming was rejected on purpose: the engine decodes from paths, its DSD path
+opens a file, its analyser decodes a file, and the library keys favourites and
+playlists on paths. A URL would decode fine and quietly fail everywhere else —
+DSD would fall back to the generic decoder, the analysis cache would lose its
+key (a URL has no size and no mtime), and the render path would still claim
+bit-perfect about a stream nobody measured.
+
+| Command | Answer | Notes |
+|---|---|---|
+| `set_remote { base_url, token, cache_dir }` | `remote_changed` | An empty token disconnects. The event never carries the token. |
+| `list_remote { start, limit }` | `remote_listed` | `limit` defaults to 200: a page, not the library. |
+| `fetch_remote { id }` | `remote_fetched { track, path }` | `path` goes to `play`. |
+
+The cache name is derived from the item id and the container, so it is the same
+on every run — a path that moved would orphan the favourite and the playlist
+entry that name it. A download lands as `<id>.<ext>.part` and is renamed only
+when the transfer finished and the length agrees with what the server announced;
+a partial file carrying the final name would be played as if it were whole.
+
+`fetch_remote` resolves its id against the last listing. A guessed id would put
+a file in the cache under a name the caller never saw.
+
+One worker, not a pool: a download saturates the link and a listing is one
+request, so a second concurrent transfer would only halve the first.
+
+The client speaks three endpoints — `/Items`, `/Items/{id}/Download` — and the
+token goes in both `Authorization: MediaBrowser Token="..."` and
+`X-Emby-Token`, because Jellyfin has accepted one or the other across versions
+and the server decides which is good.
+
+`cargo run --bin jellyfin_probe` starts a stub server on loopback and exercises
+all of it, including the refusals. What it cannot prove is that Jellyfin's real
+answers match the stub; that needs a server.
 
 ## The render path is an engine fact
 
@@ -127,6 +425,44 @@ Positions inside a playlist stay dense: the UI addresses entries by index, and a
 hole would make `entry[3]` and `position 3` disagree. Deleting a playlist takes
 its entries with it through the schema's cascade.
 
+### The browsing index
+
+The library also holds what a list needs to draw itself: title, artist, album,
+album artist, disc and track number, year, genre, duration, sample rate, bit
+depth and channel count. These are a cache of the file's own tags, read with one
+open, and never written back to the file.
+
+Why it exists: an album view that read tags per row would open and parse every
+file on every launch. Ten thousand tracks is ten thousand opens before the first
+row appears. The index turns that into one query.
+
+| Command | Event | Notes |
+|---|---|---|
+| `list_tracks { offset, limit }` | `tracks_listed` | album/artist/disc/track order, paged |
+| `list_albums` | `albums_listed` | one row per album with its credited artist and count |
+| `list_artists` | `artists_listed` | track and album counts per artist |
+| `search { query, limit }` | `search_results` | substring over title, artist, album, album artist |
+| `index_tags { paths }` | `tags_indexed` | read these files now; a scan does it automatically |
+
+Who fills it: the scan, after each walk, for the files it added or modified; and
+a tag write, which drops its row and asks for it again so the next list shows the
+new title. The worker is one thread, because this is a header read and two of
+them would make a spinning disk seek between them.
+
+Search is `LIKE`, not FTS5: the bundled SQLite may or may not carry the FTS5
+module, and a search that silently returns nothing when it does not is worse than
+one table scan. A host that searches as the listener types should debounce.
+
+What a query is matched against is a `search_text` column folded in Rust, not the
+raw fields: SQLite's `LIKE` folds ASCII only, so `bela` would never find `Béla`.
+`%` and `_` in the query are escaped, not treated as wildcards.
+
+A page is capped at 500 rows. The answer is one JSON event on the control
+thread's channel, and ten thousand rows is megabytes of it; a host that wants
+everything pages through. When Base was started without a library location the
+four browse queries report an error rather than an empty list, because a host
+cannot tell a misconfigured start from a library with nothing in it.
+
 ## Output policy
 
 `PlaybackPolicy` is the one description of how a stream is opened:
@@ -207,7 +543,37 @@ $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
 cargo run --bin base_probe
 cargo run --bin base_capi_check
 cargo run --bin library_check
+cargo run --bin base_tag_probe -- <file>
+cargo run --bin tag_check -- <file>
 ```
+
+The header has one check that does not go through Rust at all:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File test/run-c-check.ps1
+```
+
+It compiles `test/nae_base_c_check.c` against `include/nae_base.h` with the
+MinGW `cc` and calls every export the header declares, from a C host. That is
+the only check that sees the header as a consumer does: the Rust probes share
+the serialized types with the crate, so a type that failed to serialize would
+fail to compile on both sides at once and never reach the wire. The script
+copies `nae.dll` beside the executable, because the crate links the engine and
+Windows resolves that import before `main` runs.
+
+What it pinned down that the Rust checks could not:
+
+| Behaviour | Why it matters |
+|---|---|
+| `NAE_BaseStartWithLibrary("")` must return NULL | SQLite reads an empty filename as a private temporary database. Accepting it handed back a library that vanished on exit, so a host with an uninitialised settings variable would lose the listener's playlists and never see an error. |
+| `NAE_BaseStartWithShare(2)` must return NULL | A mode the header does not define is the caller's mistake. Defaulting it would take the endpoint away from another process. |
+| a second `NAE_BaseSubscribe` is `-4` | Otherwise a host that opens two windows gets one callback thread that reports the same event twice. |
+| `NAE_BaseFreeString(NULL)` and `NAE_BaseShutdown(NULL)` are safe | Both take a NULL by contract; the check asserts the live handle still works afterwards, which is the consequence that matters. |
+
+`base_tag_probe` drives the tag commands through the protocol and needs one
+audio file it may modify (it works on a copy). `tag_check` decodes the file
+before and after the write and compares the samples, so it needs `ffmpeg` on
+PATH.
 
 The library layer pulls in `rusqlite` with the `bundled` feature, so cc-rs
 compiles SQLite from source. cc-rs looks for `gcc` by name and this machine's

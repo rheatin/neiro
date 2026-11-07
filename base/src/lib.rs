@@ -33,10 +33,19 @@ use neiro_audio::{
 mod analysis;
 mod cache;
 pub mod library;
+pub mod tag;
 pub mod capi;
 mod control;
 pub mod protocol;
+pub mod remote;
+pub mod scan;
 #[cfg(windows)]
+pub mod transport;
+// The same module on Unix: same public names, same wire format, different
+// primitive. `mod.rs` is Windows-only because it is built around a
+// non-blocking `PeekNamedPipe` pump; this is the socket counterpart.
+#[cfg(unix)]
+#[path = "transport/unix.rs"]
 pub mod transport;
 
 use cache::Cache;
@@ -49,6 +58,9 @@ pub enum BaseError {
     Closed,
     /// A worker thread could not be started.
     Spawn(String),
+    /// A tag read or write failed. Carries the tag layer's own message rather
+    /// than a re-worded one: the reason a write was refused is the whole point.
+    Tag(crate::tag::TagError),
 }
 
 impl fmt::Display for BaseError {
@@ -57,6 +69,7 @@ impl fmt::Display for BaseError {
             BaseError::Engine(e) => write!(f, "{e}"),
             BaseError::Closed => write!(f, "Base audio thread is not running"),
             BaseError::Spawn(why) => write!(f, "could not start Base worker: {why}"),
+            BaseError::Tag(e) => write!(f, "{e}"),
         }
     }
 }
@@ -65,6 +78,7 @@ impl std::error::Error for BaseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             BaseError::Engine(e) => Some(e),
+            BaseError::Tag(e) => Some(e),
             _ => None,
         }
     }
@@ -244,6 +258,51 @@ impl BaseHandle {
         self.dispatch(Command::Next)
     }
 
+    /// Read the tag families and fields the file carries now.
+    ///
+    /// This runs on the caller's thread: it opens one file and reads its
+    /// headers, with no decode and no device. A UI calls it when it selects a
+    /// track, not ten times a second.
+    pub fn read_tags(&self, path: impl AsRef<std::path::Path>) -> Result<tag::TagSnapshot, BaseError> {
+        tag::read_tags(path.as_ref()).map_err(BaseError::Tag)
+    }
+
+    /// Which tag families this container can write.
+    ///
+    /// Asked before offering the checkboxes: naming a family the file cannot
+    /// hold would be refused at write time, and a UI that drew the box anyway
+    /// has promised something the file cannot do.
+    pub fn writable_tag_families(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Vec<tag::TagFamily>, BaseError> {
+        tag::writable_families(path.as_ref()).map_err(BaseError::Tag)
+    }
+
+    /// Write tags, replacing the file atomically, then publish the result.
+    ///
+    /// The write happens on this thread and can take a file copy's worth of
+    /// time; the alternative is a queue whose only job is to serialise edits
+    /// the listener makes by hand. The event is emitted only after the rename,
+    /// so a subscriber that hears about it can re-read the file and see the new
+    /// tags.
+    pub fn write_tags(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        fields: &[tag::TagField],
+        policy: &tag::TagPolicy,
+    ) -> Result<(), BaseError> {
+        let path = path.as_ref().to_path_buf();
+        tag::write_tags(&path, fields, policy).map_err(BaseError::Tag)?;
+        if let Ok(snapshot) = tag::read_tags(&path) {
+            self.events.emit(Event::TagsChanged {
+                path,
+                families: snapshot.families,
+            });
+        }
+        Ok(())
+    }
+
     pub fn analyze(&self, path: impl Into<PathBuf>) -> Result<(), BaseError> {
         self.dispatch(Command::Analyze {
             path: path.into(),
@@ -392,6 +451,170 @@ impl BaseHandle {
         self.dispatch(Command::ListMostPlayed { limit })
     }
 
+    /// Ask the control thread to read one file's tags.
+    ///
+    /// `read_tags` above runs on the caller's thread and returns the answer
+    /// now. This hands the same work to the control thread and answers with a
+    /// `TagsRead` event. The two exist because a host that owns a `Base` can
+    /// take the answer inline, and a host on the far side of the C ABI cannot.
+    pub fn request_tags(&self, path: impl Into<PathBuf>) -> Result<(), BaseError> {
+        self.dispatch(Command::ReadTags { path: path.into() })
+    }
+
+    /// Ask the control thread to write tags. Answered as `TagsChanged`.
+    ///
+    /// The write goes through a copy and a rename, so it costs a file copy's
+    /// worth of time; that is why it belongs on the control thread and not in
+    /// the caller's, next to a running stream.
+    pub fn request_tag_write(
+        &self,
+        path: impl Into<PathBuf>,
+        fields: Vec<tag::TagFieldValue>,
+        policy: tag::TagPolicy,
+    ) -> Result<(), BaseError> {
+        self.dispatch(Command::WriteTags {
+            path: path.into(),
+            fields,
+            policy,
+        })
+    }
+
+    /// Ask for the field names each family accepts. Answered as `TagKeysChanged`.
+    ///
+    /// Passing no families asks for all of them. The answer depends on the
+    /// family and on no file, so this is a once-per-session call.
+    pub fn request_tag_keys(&self, families: Vec<tag::TagFamily>) -> Result<(), BaseError> {
+        self.dispatch(Command::ListTagKeys { families })
+    }
+
+    /// Ask for a file's embedded pictures. Answered as `ArtworkRead`.
+    ///
+    /// With no index this lists them and carries no bytes; with one it also
+    /// carries that picture's bytes, base64. A track change asks the first and
+    /// a view that has to draw the cover asks the second.
+    pub fn request_artwork(
+        &self,
+        path: impl Into<PathBuf>,
+        index: Option<usize>,
+    ) -> Result<(), BaseError> {
+        self.dispatch(Command::ReadArtwork {
+            path: path.into(),
+            index,
+        })
+    }
+
+    /// Put a picture into one family. Answered as `ArtworkChanged`.
+    ///
+    /// The bytes are base64, the same form [`Base::request_artwork`] answers
+    /// with. `index` replaces a picture in the family's list; `None` appends.
+    pub fn request_set_artwork(
+        &self,
+        path: impl Into<PathBuf>,
+        family: tag::TagFamily,
+        index: Option<usize>,
+        data: impl Into<String>,
+        mime: Option<String>,
+        kind: Option<String>,
+        description: Option<String>,
+    ) -> Result<(), BaseError> {
+        self.dispatch(Command::SetArtwork {
+            path: path.into(),
+            family,
+            index,
+            data: data.into(),
+            mime,
+            kind,
+            description,
+        })
+    }
+
+    /// Remove one picture from one family. Answered as `ArtworkChanged`.
+    pub fn request_remove_artwork(
+        &self,
+        path: impl Into<PathBuf>,
+        family: tag::TagFamily,
+        index: usize,
+    ) -> Result<(), BaseError> {
+        self.dispatch(Command::RemoveArtwork {
+            path: path.into(),
+            family,
+            index,
+        })
+    }
+
+    /// Point the remote worker at a server. Answered as `RemoteChanged`.
+    ///
+    /// `None` disconnects. `cache_dir` must be stable across runs: favourites
+    /// and playlists are stored by path.
+    pub fn set_remote(
+        &self,
+        server: Option<remote::Server>,
+        cache_dir: impl Into<PathBuf>,
+    ) -> Result<(), BaseError> {
+        self.dispatch(Command::SetRemote {
+            server,
+            cache_dir: cache_dir.into(),
+        })
+    }
+
+    /// Ask the server for audio items. Answered as `RemoteListed`.
+    pub fn list_remote(&self, start: usize, limit: usize) -> Result<(), BaseError> {
+        self.dispatch(Command::ListRemote { start, limit })
+    }
+
+    /// Download one listed item. Answered as `RemoteFetched`, carrying the
+    /// local path to hand to `play`.
+    pub fn fetch_remote(&self, id: impl Into<String>) -> Result<(), BaseError> {
+        self.dispatch(Command::FetchRemote { id: id.into() })
+    }
+
+    /// Ask for one track's cover. Answered as `RemoteArtwork`.
+    pub fn fetch_remote_artwork(&self, id: impl Into<String>) -> Result<(), BaseError> {
+        self.dispatch(Command::FetchRemoteArtwork { id: id.into() })
+    }
+
+    /// Ask for the server's playlists. Answered as `RemotePlaylists`.
+    pub fn list_remote_playlists(&self) -> Result<(), BaseError> {
+        self.dispatch(Command::ListRemotePlaylists)
+    }
+
+    /// Ask for one playlist's entries. Answered as `RemotePlaylistItems`.
+    pub fn list_remote_playlist_items(
+        &self,
+        id: impl Into<String>,
+        start: usize,
+        limit: usize,
+    ) -> Result<(), BaseError> {
+        self.dispatch(Command::ListRemotePlaylistItems {
+            id: id.into(),
+            start,
+            limit,
+        })
+    }
+
+    /// Walk one folder. Answered as `FolderScanned` with every audio file
+    /// under it.
+    pub fn scan_folder(&self, root: impl Into<PathBuf>) -> Result<(), BaseError> {
+        self.dispatch(Command::ScanFolder { root: root.into() })
+    }
+
+    /// Start reporting changes under a folder. Answered as `FolderWatched`.
+    pub fn watch_folder(&self, root: impl Into<PathBuf>) -> Result<(), BaseError> {
+        self.dispatch(Command::WatchFolder { root: root.into() })
+    }
+
+    pub fn unwatch_folder(&self, root: impl Into<PathBuf>) -> Result<(), BaseError> {
+        self.dispatch(Command::UnwatchFolder { root: root.into() })
+    }
+
+    /// Reconcile the watched roots automatically. Zero turns it off.
+    ///
+    /// A watcher reports the failures it is told about; a network share loses
+    /// events silently. This is the only mechanism that can see a silent loss.
+    pub fn set_reconcile_interval(&self, seconds: u64) -> Result<(), BaseError> {
+        self.dispatch(Command::SetReconcileInterval { seconds })
+    }
+
     /// Start or stop forwarding visualiser frames. `None` stops.
     ///
     /// The interval is what the host can draw: 16 ms for a 60 Hz view, 33 for
@@ -459,6 +682,11 @@ const MAX_ANALYSIS_WORKERS: usize = 4;
 pub struct Base {
     handle: BaseHandle,
     control_thread: Option<JoinHandle<()>>,
+    /// The remote worker. Joined last: it is the only thread that can block for
+    /// as long as a download takes, and the channel closing is what ends it.
+    remote_thread: Option<JoinHandle<()>>,
+    /// The folder worker: scans and the file watcher.
+    folder_thread: Option<JoinHandle<()>>,
     analysis_threads: analysis::Threads,
     registry: analysis::CancelRegistry,
 }
@@ -512,6 +740,12 @@ impl Base {
 
         let (command_tx, command_rx) = mpsc::channel();
         let (analysis_tx, analysis_rx) = mpsc::channel();
+        let (remote_tx, remote_rx) = mpsc::channel();
+        let (folder_tx, folder_rx) = mpsc::channel();
+        let (scan_tx, scan_rx) = mpsc::channel();
+        // One set of "paths this process is writing", shared by the thread that
+        // writes and the thread that watches. Two sets would disagree.
+        let suppressed = scan::Suppressed::new();
         let registry = analysis::new_registry();
         let batches = analysis::new_batches();
 
@@ -576,6 +810,22 @@ impl Base {
             })
         };
 
+        let remote_events = events.clone();
+        let remote_thread = thread::Builder::new()
+            .name("neiro-base-remote".into())
+            .spawn(move || remote::run(remote_rx, remote_events))
+            .map_err(|e| BaseError::Spawn(e.to_string()))?;
+
+        let folder_events = events.clone();
+        let folder_suppressed = suppressed.clone();
+        let folder_thread = thread::Builder::new()
+            .name("neiro-base-folders".into())
+            .spawn(move || {
+                let suppressed = folder_suppressed.clone();
+                scan::run(folder_rx, scan_tx, folder_events, suppressed)
+            })
+            .map_err(|e| BaseError::Spawn(e.to_string()))?;
+
         let audio_events = events.clone();
         let audio_state = state.clone();
         let registry_for_control = registry.clone();
@@ -601,6 +851,10 @@ impl Base {
                     target: target_for_control,
                     spawn: spawn_for_control,
                     live: live_for_control,
+                    remote: remote_tx,
+                    folders: folder_tx,
+                    scans: scan_rx,
+                    suppressed: suppressed.clone(),
                 });
             })
             .map_err(|e| BaseError::Spawn(e.to_string()))?;
@@ -619,6 +873,8 @@ impl Base {
             },
             control_thread: Some(control_thread),
             analysis_threads,
+            remote_thread: Some(remote_thread),
+            folder_thread: Some(folder_thread),
             registry,
         })
     }
@@ -637,6 +893,15 @@ impl Base {
         analysis::cancel_all(&self.registry);
         let _ = self.handle.commands.send(Command::Shutdown);
         if let Some(thread) = self.control_thread.take() {
+            let _ = thread.join();
+        }
+        // Dropping the sender ends the remote worker's loop; joining it after
+        // the control thread means an in-flight download is reported rather
+        // than abandoned silently.
+        if let Some(thread) = self.remote_thread.take() {
+            let _ = thread.join();
+        }
+        if let Some(thread) = self.folder_thread.take() {
             let _ = thread.join();
         }
         let threads: Vec<_> = self

@@ -14,11 +14,29 @@ neiro-audio = { path = "../binding" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Embedded artwork crosses the C ABI as text, because the whole bridge is one
+# JSON string. Base64 costs a third in size and cannot be mistaken for anything
+# else; writing a codec by hand to save the dependency would be a place to get
+# padding wrong on the one path that handles a listener's pictures.
+base64 = "0.22"
+
 # The library layer. `bundled` compiles SQLite from source into the crate, which
 # is what makes it link on iOS: the App Store build is a static library, and a
 # system SQLite that has to be linked by the host is one more thing to get wrong
 # per platform. It costs a C compile on every clean build.
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Tag write-back. Every container the engine decodes -- MP3, FLAC, Ogg/Opus,
+# MP4/ALAC, WAV, AIFF, APE, WavPack, DSD -- is a tag format too, and each one
+# carries a different family (ID3v1/v2, APEv2, Vorbis comment, ilst, RIFF INFO,
+# AIFF text). Writing six container parsers by hand would be six chances to
+# corrupt a listener's file; this crate is the maintained version of the same
+# knowledge. It is used from base, never from the engine: the engine stays
+# audio-only.
+lofty = "0.25"
+ureq = { version = "3.5.1", features = ["rustls"] }
+notify = "8.2.1"
+md-5 = "0.11.0"
 
 
 [target.'cfg(windows)'.dependencies]

@@ -21,9 +21,9 @@
       "displayName": "macOS: platform-neutral core and checks",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-macos",
-      "toolchainFile": "${sourceDir}/cmake/mingw-ucrt.cmake",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "NEIRO_BACKEND": "COREAUDIO"
       }
     }
   ],

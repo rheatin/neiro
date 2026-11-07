@@ -55,6 +55,9 @@ All commands run from `build/`. Latest result: **all pass**.
 | `channel_check.exe` | channel trim/balance/polarity/delay API validation | PASS |
 | `buffer_policy_check.exe <file>` | Auto/LowLatency/Fixed buffer open and reported latency | PASS |
 | `bass_check.exe` | LFE low-pass: 40 Hz passes, 5 kHz rejected | PASS |
+| `skip_check.exe <A> <B>` | manual skip discards the rest of the current track and advances the serial to B, state stays PLAYING | PASS |
+| `dsd_path_ab.exe <file.dsf>` | FFmpeg decoder vs the self-written cascade on one engine and one device: both hand the engine a 176400 Hz source and the cascade is clearly lower above 80 kHz. **Requires DSD64**; generate one with `make_dsd128 out.dsf 6 dsd64` | PASS |
+| `pause_edge_check.exe <A> <B>` | pause is silence, not a stop: silence fed while paused, position holds, seek while paused replaces the fifo, and a track change while paused does not move B to A's position. **Both files must be at least 5 s**; it refuses shorter ones rather than reporting failures that are about exhaustion | PASS |
 | `partitioned_convolver_check.exe` | FFT convolution matches direct FIR; 1, 2 and 6 channels; identity channel; mono-IR form | PASS |
 | `loudness_check.exe` | BS.1770 calibration, both gates, momentary/short-term/LRA, per-rate filters | PASS |
 | `linear_phase_eq_check.exe` | symmetric impulse response, constant group delay, per-channel mask, identity delay | PASS |
@@ -71,6 +74,8 @@ All commands run from `build/`. Latest result: **all pass**.
 | `session_policy_check.exe <file>` | policy-driven session: rate/dither, unsupported warnings | PASS |
 | `caps_check.exe` | WASAPI `NAE_QueryDeviceCaps`: native format, exclusive rates, layouts, export | PASS |
 | `backend_check.exe` | backend interface: enumerate, caps, WASAPI adapter | PASS |
+| `output_stream_check [seconds]` (macOS) | opens the CoreAudio device through the engine's `OutputStream` primitive and measures the clock: frames the device consumes per second of wall clock must match the format rate within 5%. Measured on the built-in output: 48091 frames/s against 48000 (+0.2%) | PASS |
+| `backend_check[.exe] [--rate N]` | device caps from the real device: native format, advertised rates, physical formats, buffer range, DoP carriers; then asks for each rate and reads back whether the device moved. **macOS: open** — the readback lags one `open` behind on this hardware, so what it measures is unresolved; Windows passes with a note because its `open` is still a forwarder onto the engine | OPEN on macOS |
 | `base_probe.exe` | Base snapshot carries engine resolved path/diagnostics; per-track refresh | PASS |
 | `volume_check.exe` | unity vs 0.5 on a constant tone, reason 8 | PASS, ratio 0.500000 |
 | `eq_check.exe` | −12 dB peaking band at the tone's bin, reason 9 | PASS, ratio 0.251189 |
@@ -78,7 +83,7 @@ All commands run from `build/`. Latest result: **all pass**.
 | `replaygain_check.exe <tagged.flac>` | track −6 dB / album −3 dB tags, reason 11 | PASS, 0.501187 / 0.707946 |
 | `gapless_check.exe <a> <b>` | same-format seam, underrun and padded-frame counters | PASS, 0 → 0 |
 | `convolver_check.exe` | 0.5 delta IR, reason 12 | PASS, ratio 0.499969 |
-| `crossfade_check.exe <a> <b>` | both tones mid-fade, next position, counters | PASS |
+| `crossfade_check.exe <a> <b>` | both tones mid-fade, next position, counters. The two pitches are measured from the files, so any two 1 s files of different pitch work | PASS |
 | `param_check.exe <file>` | registry: 107 entries, typed round-trip, open-time refusal | PASS |
 | `dop_check.exe <file.dff\|dsf>` | markers, payload bit order, carrier, downrate packing, no device | PASS |
 | `dsd_filter_check.exe` | two-stage decimation against a whole-block reference; passband/stopband | PASS |

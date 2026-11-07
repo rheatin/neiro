@@ -45,6 +45,15 @@ pub(crate) struct Start {
     pub target: crate::analysis::Target,
     pub spawn: crate::analysis::Spawner,
     pub live: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<usize>>>,
+    /// The remote worker's inbox. One thread, because a download saturates the
+    /// link and a listing is one request.
+    pub remote: Sender<crate::remote::Job>,
+    /// The folder worker's inbox: scans and the live watcher.
+    pub folders: Sender<crate::scan::Job>,
+    /// Finished walks, coming back so the index is compared on this thread.
+    pub scans: Receiver<crate::scan::ScanResult>,
+    /// Paths this process is writing, shared with the watcher.
+    pub suppressed: std::sync::Arc<crate::scan::Suppressed>,
 }
 
 pub(crate) fn run(start: Start) {
@@ -62,7 +71,27 @@ pub(crate) fn run(start: Start) {
         target,
         spawn,
         live,
+        remote,
+        folders,
+        scans,
+        suppressed,
     } = start;
+    let (tag_in, tag_jobs) = std::sync::mpsc::channel::<PathBuf>();
+    let (tag_tx, tag_out) =
+        std::sync::mpsc::channel::<(PathBuf, Option<crate::library::StoredTags>)>();
+    // One thread: this is a stat and a read of a header, and two of them in
+    // parallel would make a spinning disk seek between them for no gain.
+    let _ = std::thread::Builder::new()
+        .name("neiro-base-index".into())
+        .spawn(move || {
+            for path in tag_jobs {
+                let row = crate::tag::read_index_row(&path).ok();
+                if tag_tx.send((path, row)).is_err() {
+                    return;
+                }
+            }
+        });
+
     let mut control = Control {
         commands,
         analysis,
@@ -82,6 +111,10 @@ pub(crate) fn run(start: Start) {
         live,
         devices: Vec::new(),
         library,
+        remote,
+        folders,
+        scans,
+        suppressed,
         most_played_watched: None,
         visual_interval: None,
         last_visual_emit: Instant::now(),
@@ -91,8 +124,13 @@ pub(crate) fn run(start: Start) {
         last_render: None,
         resolved: None,
         last_position_emit: Instant::now(),
+        tag_in,
+        tag_out,
+        tag_total: 0,
+        tag_done: 0,
     };
     control.loop_until_shutdown();
+    control.finish_indexing();
     control.close_session();
     // The control thread may have asked for the default endpoint id, which
     // initialises COM on this thread. Release it after the session is closed.
@@ -100,6 +138,14 @@ pub(crate) fn run(start: Start) {
 }
 
 struct Control {
+    /// The index worker: paths in, rows back.
+    ///
+    /// A row is written to the library on this thread, because the connection
+    /// belongs to it. The worker only opens the file, which is the slow part.
+    tag_in: Sender<PathBuf>,
+    tag_out: Receiver<(PathBuf, Option<crate::library::StoredTags>)>,
+    tag_total: usize,
+    tag_done: usize,
     commands: Receiver<crate::protocol::Command>,
     analysis: Sender<crate::analysis::Request>,
     events: EventBus,
@@ -125,6 +171,16 @@ struct Control {
     /// without a library location -- the rest of Base works, and every library
     /// command reports that instead of pretending the answer is empty.
     library: Option<Library>,
+    /// Where the remote worker is told what to do. The worker owns the server
+    /// config and the listing; this end only forwards.
+    remote: Sender<crate::remote::Job>,
+    /// Where the folder worker is told what to do.
+    folders: Sender<crate::scan::Job>,
+    /// Walks that finished in the worker, waiting to be compared.
+    scans: Receiver<crate::scan::ScanResult>,
+    /// Paths this process is writing right now. The watcher consults the same
+    /// set, so a tag write does not look like an import.
+    suppressed: std::sync::Arc<crate::scan::Suppressed>,
     /// How often to publish a visualiser frame, or `None` when nothing is
     /// watching. `None` is the default: forwarding a spectrum costs a copy per
     /// frame, and a UI that has no spectrum view should not pay for it.
@@ -146,6 +202,37 @@ struct Control {
     last_position_emit: Instant,
 }
 
+/// Said by every browse query when Base was started without a library.
+///
+/// An empty list is not the same answer: a host cannot tell a misconfigured
+/// start from a library with nothing in it, and paints a permanent empty state.
+/// The largest page a browse query will return.
+///
+/// The answer is one JSON event on the control thread's channel; ten thousand
+/// rows is megabytes of it, and the host that asked for them blocks the same
+/// thread while it parses. A host that wants everything pages through.
+const MAX_PAGE: usize = 500;
+
+const NO_LIBRARY_LOCATION: &str = "no library location was given; browse queries need one";
+
+fn to_track_row(tags: &crate::library::StoredTags) -> crate::protocol::TrackRow {
+    crate::protocol::TrackRow {
+        path: tags.path.clone(),
+        title: tags.title.clone(),
+        artist: tags.artist.clone(),
+        album: tags.album.clone(),
+        album_artist: tags.album_artist.clone(),
+        disc_no: tags.disc_no,
+        track_no: tags.track_no,
+        year: tags.year,
+        genre: tags.genre.clone(),
+        duration_ms: tags.duration_ms,
+        sample_rate: tags.sample_rate,
+        bits: tags.bits,
+        channels: tags.channels,
+    }
+}
+
 impl Control {
     fn loop_until_shutdown(&mut self) {
         loop {
@@ -158,6 +245,12 @@ impl Control {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
+            // A walk finishes on the worker and comes back here, because the
+            // index is compared on the thread that owns it.
+            while let Ok(result) = self.scans.try_recv() {
+                self.finish_scan(result);
+            }
+            self.drain_index();
             self.poll();
         }
     }
@@ -288,6 +381,47 @@ impl Control {
             Command::SetVisualiser { interval_ms } => self.set_visualiser(interval_ms),
             Command::SetAnalysisWorkers { count } => self.set_analysis_workers(count),
             Command::ListMostPlayed { limit } => self.publish_most_played(limit),
+            Command::ReadTags { path } => self.read_tags(path),
+            Command::WriteTags {
+                path,
+                fields,
+                policy,
+            } => self.write_tags(path, fields, policy),
+            Command::ListTagKeys { families } => self.publish_tag_keys(families),
+            Command::ListTracks { offset, limit } => self.list_tracks(offset, limit),
+            Command::ListAlbums => self.list_albums(),
+            Command::ListArtists => self.list_artists(),
+            Command::Search { query, limit } => self.search(query, limit),
+            Command::IndexTags { paths } => self.reindex_paths(paths),
+            Command::ReadArtwork { path, index } => self.read_artwork(path, index),
+            Command::SetRemote { server, cache_dir } => self.set_remote(server, cache_dir),
+            Command::ListRemote { start, limit } => self.list_remote(start, limit),
+            Command::FetchRemote { id } => self.fetch_remote(id),
+            Command::FetchRemoteArtwork { id } => {
+                self.send_remote(crate::remote::Job::FetchArtwork { id })
+            }
+            Command::ListRemotePlaylists => self.send_remote(crate::remote::Job::ListPlaylists),
+            Command::ListRemotePlaylistItems { id, start, limit } => {
+                self.send_remote(crate::remote::Job::ListPlaylistItems { id, start, limit })
+            }
+            Command::ScanFolder { root } => self.scan_folder(root),
+            Command::WatchFolder { root } => self.watch_folder(root),
+            Command::UnwatchFolder { root } => self.unwatch_folder(root),
+            Command::SetReconcileInterval { seconds } => self.set_reconcile_interval(seconds),
+            Command::SetArtwork {
+                path,
+                family,
+                index,
+                data,
+                mime,
+                kind,
+                description,
+            } => self.set_artwork(path, family, index, data, mime, kind, description),
+            Command::RemoveArtwork {
+                path,
+                family,
+                index,
+            } => self.remove_artwork(path, family, index),
             Command::Shutdown => {
                 analysis::cancel_all(&self.registry);
                 self.close_session();
@@ -632,6 +766,402 @@ impl Control {
         self.events.emit(Event::PlaylistsContainingChanged { path, playlists });
     }
 
+
+    /// Point the remote worker at a server, or at none.
+    ///
+    /// The worker owns the remote session, so this only forwards. An empty
+    /// token is how a host disconnects: there is no separate verb for it, and a
+    /// second verb would be a second way to reach the same state.
+    fn set_remote(&mut self, server: Option<crate::remote::Server>, cache_dir: PathBuf) {
+        let config = server.filter(|s| !s.base_url().is_empty());
+        if let Err(e) = self.remote.send(crate::remote::Job::Configure {
+            config,
+            cache_dir: Some(cache_dir),
+        }) {
+            self.emit_error("remote", &e.to_string());
+        }
+    }
+
+    fn list_remote(&mut self, start: usize, limit: usize) {
+        if let Err(e) = self.remote.send(crate::remote::Job::List { start, limit }) {
+            self.emit_error("remote", &e.to_string());
+        }
+    }
+
+    /// Forward a job to the remote worker, reporting a closed channel the same
+    /// way every other remote command does.
+    fn send_remote(&mut self, job: crate::remote::Job) {
+        if let Err(e) = self.remote.send(job) {
+            self.emit_error("remote", &e.to_string());
+        }
+    }
+
+    fn fetch_remote(&mut self, id: String) {
+        if let Err(e) = self.remote.send(crate::remote::Job::Fetch { id }) {
+            self.emit_error("remote", &e.to_string());
+        }
+    }
+
+
+    /// Compare a finished walk against the index and publish the difference.
+    ///
+    /// The index is what makes this cheap and what makes a deleted directory
+    /// answerable: it remembers which files were under the root, so "gone" is a
+    /// list rather than "look again". A scan that cannot open the library still
+    /// reports what it found -- it just cannot say what changed.
+    fn finish_scan(&mut self, result: crate::scan::ScanResult) {
+        let crate::scan::ScanResult {
+            root,
+            present,
+            unreadable,
+            error,
+        } = result;
+        if let Some(error) = error {
+            return self.emit_error("folders", &error);
+        }
+
+        let indexed = match self.library.as_mut() {
+            Some(library) => match library.files_under(&root) {
+                Ok(indexed) => indexed,
+                Err(e) => return self.emit_error("folders", &e.to_string()),
+            },
+            None => {
+                // No index: everything the walk found is new, and nothing can
+                // be said about what left. That is what a host with no library
+                // location gets, and it is honest rather than wrong.
+                let added = present.iter().map(|f| f.path.clone()).collect();
+                return self.events.emit(Event::ScanDone {
+                    root,
+                    added,
+                    modified: Vec::new(),
+                    removed: Vec::new(),
+                    moved: Vec::new(),
+                });
+            }
+        };
+
+        let mut diff = crate::scan::reconcile(&indexed, &present);
+        if unreadable > 0 {
+            // Part of the tree could not be stat'ed, so a file missing from the
+            // walk proves nothing about whether it is still there. Report the
+            // additions and changes, and say why the rest is not being claimed.
+            diff.removed.clear();
+            diff.moved.clear();
+            self.emit_error(
+                "folders",
+                &format!(
+                    "{unreadable} file(s) under {} could not be read; removals are not being reported this round",
+                    root.display()
+                ),
+            );
+        }
+        // An unchanged tree has nothing to write. Upserting every row anyway
+        // cost 80 ms of the control thread on a 3,585-file library -- measured
+        // -- for a diff the host will see as empty either way.
+        let skipped = if diff.is_empty() {
+            Vec::new()
+        } else {
+            match self.library.as_mut() {
+                Some(library) => {
+                    match library.apply_scan(&root, &present, &diff.removed, &diff.moved) {
+                        Ok(skipped) => skipped,
+                        Err(e) => return self.emit_error("folders", &e.to_string()),
+                    }
+                }
+                None => Vec::new(),
+            }
+        };
+        // The analysis key is path + size + mtime + analyzer version, and a
+        // rename changes only the first. Carrying the entry over is what stops
+        // a library reorganisation from costing one decode per file.
+        {
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            for (from, to) in &diff.moved {
+                cache.rename_path(from, to);
+            }
+        }
+
+        if !skipped.is_empty() {
+            // A move the library refused because the destination was already
+            // known. The index is right; what the listener said about the old
+            // path stayed there. Worth saying out loud.
+            self.emit_error(
+                "folders",
+                &format!(
+                    "{} move(s) could not be carried over because the destination was already known: {:?}",
+                    skipped.len(),
+                    skipped
+                ),
+            );
+        }
+
+        let added: Vec<PathBuf> = diff.added.into_iter().map(|f| f.path).collect();
+        let modified: Vec<PathBuf> = diff.modified.into_iter().map(|f| f.path).collect();
+        // Index what the walk just found. A host that opens an album view after
+        // a scan must not have to ask for a second pass to see anything in it.
+        self.index_paths(added.iter().cloned().collect::<Vec<_>>());
+        // Modified files already have a row, and `index_paths` skips those. A
+        // file whose tags changed on disk is exactly the case the row cannot
+        // answer, so drop it first -- otherwise the list keeps showing the old
+        // title until something else removes the row.
+        for path in &modified {
+            if let Some(library) = self.library.as_ref() {
+                let _ = library.forget_tags(path);
+            }
+        }
+        self.index_paths(modified.iter().cloned().collect::<Vec<_>>());
+        self.events.emit(Event::ScanDone {
+            root,
+            added,
+            modified,
+            removed: diff.removed,
+            moved: diff
+                .moved
+                .into_iter()
+                .map(|(from, to)| crate::protocol::Move { from, to })
+                .collect(),
+        });
+    }
+
+    /// A scan is a walk of a tree, so it goes to the folder worker rather than
+    /// running here: the control thread is what keeps the position and the
+    /// queue in step, and a walk of a large drive would freeze both.
+    fn scan_folder(&mut self, root: PathBuf) {
+        if let Err(e) = self.folders.send(crate::scan::Job::Scan { root }) {
+            self.emit_error("folders", &e.to_string());
+        }
+    }
+
+    fn watch_folder(&mut self, root: PathBuf) {
+        if let Err(e) = self.folders.send(crate::scan::Job::Watch { root }) {
+            self.emit_error("folders", &e.to_string());
+        }
+    }
+
+    /// The worker owns the timer, because it owns the roots. A second copy of
+    /// the root list here would be a second answer to "which folders".
+    fn set_reconcile_interval(&mut self, seconds: u64) {
+        if let Err(e) = self.folders.send(crate::scan::Job::SetReconcile { seconds }) {
+            self.emit_error("folders", &e.to_string());
+        }
+    }
+
+    fn unwatch_folder(&mut self, root: PathBuf) {
+        if let Err(e) = self.folders.send(crate::scan::Job::Unwatch { root }) {
+            self.emit_error("folders", &e.to_string());
+        }
+    }
+
+    /// Read one file's tags and answer with everything a tag editor draws on.
+    ///
+    /// `families` and `writable` are two different questions. The first is what
+    /// this file carries now; the second is what its container can be written
+    /// with. A UI that offered the first as the write choice would offer
+    /// ID3v1 to a FLAC, whose container has no room for it.
+    ///
+    /// This does not go through the library: a tag is a fact about a file, and
+    /// reading one must work with no library file open.
+    fn read_tags(&mut self, path: PathBuf) {
+        let snapshot = match crate::tag::read_tags(&path) {
+            Ok(snapshot) => snapshot,
+            Err(e) => return self.emit_error("tags", &e.to_string()),
+        };
+        let writable = match crate::tag::writable_families(&path) {
+            Ok(list) => list,
+            Err(e) => return self.emit_error("tags", &e.to_string()),
+        };
+        // Built before `families` is moved out: `values()` borrows the snapshot.
+        let fields = snapshot.values();
+        self.events.emit(Event::TagsRead {
+            path,
+            families: snapshot.families,
+            writable,
+            fields,
+        });
+    }
+
+    /// Write fields into one file, then report what the file carries afterwards.
+    ///
+    /// The policy says what was asked for; the file says what happened. Only
+    /// the second is published, and it is read back rather than assumed, so a
+    /// subscriber that hears about the write can re-read and agree with it.
+    fn write_tags(
+        &mut self,
+        path: PathBuf,
+        values: Vec<crate::tag::TagFieldValue>,
+        policy: crate::tag::TagPolicy,
+    ) {
+        let fields = match crate::tag::fields_from_values(&values) {
+            Ok(fields) => fields,
+            Err(e) => return self.emit_error("tags", &e.to_string()),
+        };
+        // The write replaces the file, and the watcher would report that as a
+        // new file. Mark the path for the duration and just past it.
+        self.suppressed.mark(&path);
+        let written = crate::tag::write_tags(&path, &fields, &policy);
+        match &written {
+            // The window starts from the end of the write, so the backend's
+            // late rename is still covered.
+            Ok(()) => self.suppressed.mark(&path),
+            // Refused before anything was written: a mark here would swallow a
+            // real event for the length of the grace period.
+            Err(_) => self.suppressed.clear(&path),
+        }
+        if let Err(e) = written {
+            return self.emit_error("tags", &e.to_string());
+        }
+        // The index is a cache of the file's tags, so a write makes its row
+        // stale. Dropping the row and asking for it again is how the next list
+        // shows the new title instead of the old one.
+        if let Some(library) = self.library.as_ref() {
+            let _ = library.forget_tags(&path);
+        }
+        self.index_paths(vec![path.clone()]);
+        match crate::tag::read_tags(&path) {
+            Ok(snapshot) => self.events.emit(Event::TagsChanged {
+                path,
+                families: snapshot.families,
+            }),
+            // The write landed; only the re-read failed. Reporting the write as
+            // failed would be a lie, and inventing a family list would be one
+            // too, so the caller gets the error and can ask again.
+            Err(e) => self.emit_error("tags", &e.to_string()),
+        }
+    }
+
+    /// Answer with the pictures a file embeds.
+    ///
+    /// The listing is always complete so a tag editor can show every picture
+    /// and its size; the bytes come only for the one the caller named, because
+    /// a cover is a hundred kilobytes and most calls are asking whether there
+    /// is one at all.
+    ///
+    /// An index past the end is an error, not an empty answer: the caller asked
+    /// for a picture that is not there, and silence would look like a file with
+    /// a picture that failed to decode.
+    fn read_artwork(&mut self, path: PathBuf, index: Option<usize>) {
+        let artwork = match crate::tag::read_artwork(&path) {
+            Ok(list) => list,
+            Err(e) => return self.emit_error("artwork", &e.to_string()),
+        };
+        let pictures: Vec<crate::tag::ArtworkInfo> = artwork.iter().map(|a| a.info()).collect();
+        let data = match index {
+            None => None,
+            Some(i) => match artwork.get(i) {
+                Some(picture) => Some(picture.to_base64()),
+                None => {
+                    return self.emit_error(
+                        "artwork",
+                        &format!(
+                            "{} has {} picture(s); there is no index {}",
+                            path.display(),
+                            pictures.len(),
+                            i
+                        ),
+                    )
+                }
+            },
+        };
+        self.events.emit(Event::ArtworkRead {
+            path,
+            pictures,
+            index,
+            data,
+        });
+    }
+
+
+    /// Put a picture into a family, then report what the file carries.
+    ///
+    /// The bytes arrive base64, the same form `artwork_read` answers with: one
+    /// encoding for one bridge. A decode failure is an error rather than an
+    /// empty picture, because a zero-byte image is not what the caller sent.
+    #[allow(clippy::too_many_arguments)]
+    fn set_artwork(
+        &mut self,
+        path: PathBuf,
+        family: crate::tag::TagFamily,
+        index: Option<usize>,
+        data: String,
+        mime: Option<String>,
+        kind: Option<String>,
+        description: Option<String>,
+    ) {
+        use base64::Engine as _;
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+            Ok(bytes) => bytes,
+            Err(e) => return self.emit_error("artwork", &format!("the picture is not base64: {e}")),
+        };
+        if bytes.is_empty() {
+            return self.emit_error("artwork", "the picture is empty");
+        }
+        let input = crate::tag::ArtworkInput {
+            data: bytes,
+            mime,
+            kind,
+            description,
+        };
+        self.suppressed.mark(&path);
+        let written = crate::tag::set_artwork(&path, family, index, &input);
+        match &written {
+            Ok(()) => self.suppressed.mark(&path),
+            Err(_) => self.suppressed.clear(&path),
+        }
+        if let Err(e) = written {
+            return self.emit_error("artwork", &e.to_string());
+        }
+        self.publish_artwork(path);
+    }
+
+    /// Remove one picture and report what is left.
+    fn remove_artwork(&mut self, path: PathBuf, family: crate::tag::TagFamily, index: usize) {
+        self.suppressed.mark(&path);
+        let written = crate::tag::remove_artwork(&path, family, index);
+        match &written {
+            Ok(()) => self.suppressed.mark(&path),
+            Err(_) => self.suppressed.clear(&path),
+        }
+        if let Err(e) = written {
+            return self.emit_error("artwork", &e.to_string());
+        }
+        self.publish_artwork(path);
+    }
+
+    /// Re-read the pictures and publish them.
+    ///
+    /// Read back rather than predicted: the edit says what was asked for, the
+    /// file says what happened, and only the second is worth reporting.
+    fn publish_artwork(&mut self, path: PathBuf) {
+        let pictures = match crate::tag::read_artwork(&path) {
+            Ok(list) => list.iter().map(|a| a.info()).collect(),
+            Err(e) => return self.emit_error("artwork", &e.to_string()),
+        };
+        self.events.emit(Event::ArtworkChanged { path, pictures });
+    }
+
+    /// Answer with the field names each family accepts.
+    ///
+    /// The answer depends on the family and on no file, so a host asks once at
+    /// startup instead of on every selection.
+    fn publish_tag_keys(&mut self, families: Vec<crate::tag::TagFamily>) {
+        let asked: Vec<crate::tag::TagFamily> = if families.is_empty() {
+            crate::tag::all_families().to_vec()
+        } else {
+            families
+        };
+        let lists = asked
+            .into_iter()
+            .map(|family| crate::protocol::TagKeyList {
+                family,
+                keys: crate::tag::writable_keys(family)
+                    .into_iter()
+                    .map(|(name, _)| name.to_owned())
+                    .collect(),
+            })
+            .collect();
+        self.events.emit(Event::TagKeysChanged { lists });
+    }
+
     /// Start analyzing a batch the host supplied.
     ///
     /// The cache is grown to hold the batch before anything is queued: a scan
@@ -654,6 +1184,20 @@ impl Control {
             let mut batches = self.batches.lock().unwrap_or_else(|e| e.into_inner());
             batches.push(crate::analysis::Batch::new(paths.clone()));
         }
+        // The zero goes out before any work is queued, and that order is the
+        // point.
+        //
+        // It used to be sent after the requests, on the reasoning that the bus
+        // would put them in order. It does not: the workers publish from their
+        // own threads, so an item that finished immediately could emit `done: 1`
+        // before the control thread emitted its own `done: 0`. A progress bar
+        // painting that stream goes 1, then 0 -- it moves backwards, and a host
+        // that treats progress as monotonic reports a defect in the engine.
+        self.events.emit(Event::PreanalysisProgress {
+            done: 0,
+            total,
+            complete: false,
+        });
         for path in &paths {
             let _ = self.analysis.send(crate::analysis::Request {
                 path: path.clone(),
@@ -661,15 +1205,6 @@ impl Control {
                 cancel_id: None,
             });
         }
-        // A batch of one that is already cached finishes synchronously inside
-        // the worker before this event is built, so the first progress event
-        // can arrive before this one -- which is fine, they are ordered by the
-        // bus and a UI that paints from either lands on the same number.
-        self.events.emit(Event::PreanalysisProgress {
-            done: 0,
-            total,
-            complete: false,
-        });
     }
 
     /// Resize the analysis pool.
@@ -945,6 +1480,179 @@ impl Control {
         self.open_at(index + 1, true, 0.0);
     }
 
+    // ---- the browsing index ---------------------------------------------
+
+    /// Take back whatever the index worker finished.
+    fn drain_index(&mut self) {
+        let mut rows: Vec<crate::library::StoredTags> = Vec::new();
+        let mut touched = 0usize;
+        loop {
+            let Ok((_path, row)) = self.tag_out.try_recv() else {
+                break;
+            };
+            self.tag_done += 1;
+            touched += 1;
+            if let Some(row) = row {
+                rows.push(row);
+            }
+            if self.tag_total > 0 && self.tag_done >= self.tag_total {
+                break;
+            }
+        }
+        if touched == 0 {
+            return;
+        }
+        // One transaction per burst: a first scan of ten thousand files would
+        // otherwise be ten thousand implicit transactions on the control thread.
+        let failure = match self.library.as_ref() {
+            Some(library) => library.put_tags_many(&rows).err(),
+            None => None,
+        };
+        if let Some(error) = failure {
+            self.emit_error("index", &error.to_string());
+        }
+        // One event per burst, not per row: a scan used to emit ten thousand
+        // progress events through a channel the host is reading, which is more
+        // work than the indexing it was reporting on.
+        let complete = self.tag_total > 0 && self.tag_done >= self.tag_total;
+        self.events.emit(Event::TagsIndexed {
+            done: self.tag_done,
+            total: self.tag_total,
+            complete,
+        });
+        if complete {
+            self.tag_total = 0;
+            self.tag_done = 0;
+        }
+    }
+
+    /// Ask the worker to index these paths.
+    ///
+    /// A path already in the index is skipped: re-reading every file after every
+    /// scan would make a no-op scan cost the same as the first one.
+    /// Forget the rows for these paths and read them again.
+    ///
+    /// `IndexTags` means "these files changed on disk, look again". The plain
+    /// `index_paths` skips anything already indexed, which made the command a
+    /// no-op that also emitted no event -- a host waiting for one waited forever.
+    fn reindex_paths(&mut self, paths: Vec<PathBuf>) {
+        for path in &paths {
+            if let Some(library) = self.library.as_ref() {
+                let _ = library.forget_tags(path);
+            }
+        }
+        self.index_paths(paths);
+    }
+
+    /// Give the worker a bounded chance to finish before shutdown.
+    ///
+    /// A scan of a few thousand files outlives a host that quits immediately;
+    /// rows still in flight used to be dropped, so the next launch showed a
+    /// library with holes in it until something touched the files again.
+    fn finish_indexing(&mut self) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            self.drain_index();
+            if self.tag_total == 0 || Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn index_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        for path in paths {
+            let known = self
+                .library
+                .as_ref()
+                .map(|library| library.has_tags(&path).unwrap_or(false))
+                .unwrap_or(false);
+            if known {
+                continue;
+            }
+            self.tag_total += 1;
+            if self.tag_in.send(path).is_err() {
+                self.tag_total -= 1;
+                self.emit_error("index", "the index worker is gone");
+                return;
+            }
+        }
+    }
+
+    fn list_tracks(&mut self, offset: usize, limit: usize) {
+        let limit = limit.clamp(1, MAX_PAGE);
+        let result = match self.library.as_ref() {
+            Some(library) => library
+                .list_tracks(offset as i64, limit as i64)
+                .map(|rows| (rows, library.track_count().unwrap_or(0))),
+            None => return self.emit_error("library", NO_LIBRARY_LOCATION),
+        };
+        match result {
+            Ok((rows, total)) => self.events.emit(Event::TracksListed {
+                tracks: rows.iter().map(to_track_row).collect(),
+                total,
+                offset,
+            }),
+            Err(e) => self.emit_error("index", &e.to_string()),
+        }
+    }
+
+    fn list_albums(&mut self) {
+        let result = match self.library.as_ref() {
+            Some(library) => library.list_albums(),
+            None => return self.emit_error("library", NO_LIBRARY_LOCATION),
+        };
+        match result {
+            Ok(rows) => self.events.emit(Event::AlbumsListed {
+                albums: rows
+                    .into_iter()
+                    .map(|row| crate::protocol::AlbumSummary {
+                        album: row.album,
+                        album_artist: row.album_artist,
+                        year: row.year,
+                        track_count: row.track_count,
+                    })
+                    .collect(),
+            }),
+            Err(e) => self.emit_error("index", &e.to_string()),
+        }
+    }
+
+    fn list_artists(&mut self) {
+        let result = match self.library.as_ref() {
+            Some(library) => library.list_artists(),
+            None => return self.emit_error("library", NO_LIBRARY_LOCATION),
+        };
+        match result {
+            Ok(rows) => self.events.emit(Event::ArtistsListed {
+                artists: rows
+                    .into_iter()
+                    .map(|row| crate::protocol::ArtistSummary {
+                        artist: row.artist,
+                        track_count: row.track_count,
+                        album_count: row.album_count,
+                    })
+                    .collect(),
+            }),
+            Err(e) => self.emit_error("index", &e.to_string()),
+        }
+    }
+
+    fn search(&mut self, query: String, limit: usize) {
+        let limit = limit.clamp(1, MAX_PAGE);
+        let result = match self.library.as_ref() {
+            Some(library) => library.search(&query, limit as i64),
+            None => return self.emit_error("library", NO_LIBRARY_LOCATION),
+        };
+        match result {
+            Ok(rows) => self.events.emit(Event::SearchResults {
+                query,
+                tracks: rows.iter().map(to_track_row).collect(),
+            }),
+            Err(e) => self.emit_error("index", &e.to_string()),
+        }
+    }
+
     /// Open the queue entry at `index`.
     ///
     /// `resume_at` is where the new stream should start, or 0.0 for the
@@ -955,11 +1663,21 @@ impl Control {
     /// from one that had restarted. Seeking before the first slice removes that
     /// window entirely -- there is no audio in flight to race against.
     fn open_at(&mut self, index: usize, add_remaining: bool, resume_at: f64) {
-        self.close_session();
+        // Look before closing.
+        //
+        // Closing first and then discovering there is nothing at `index` left
+        // Base with no session and nothing published: `poll` returns early when
+        // there is no session, so the snapshot froze at the last position and
+        // every later command that needed a session did nothing at all. A probe
+        // saw a queue edit take the index past the end and then waited five
+        // seconds for a command that could never run.
         let Some(path) = self.queue.get(index).cloned() else {
+            self.close_session();
             self.index = None;
+            self.publish_phase(PlaybackState::Stopped, None);
             return;
         };
+        self.close_session();
         self.index = Some(index);
 
         let device_id = match self.device_id.clone() {

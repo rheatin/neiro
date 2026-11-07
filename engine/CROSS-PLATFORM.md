@@ -1,8 +1,11 @@
 # Cross-platform core and macOS
 
-Status: architecture, not a shipped macOS build. Windows/WASAPI is the only
-backend implemented and verified today. Platform coverage is the top priority;
-see [`ROADMAP.md`](ROADMAP.md) for the current sequence and what is parked.
+Status: Windows and macOS both build and pass their checks from this tree.
+`libnae.dylib` exports the same 109 entry points as `nae.dll`, and `base_probe`
+runs end to end on both. iOS and Android are not started.
+
+See [`PORT-HANDOVER.md`](PORT-HANDOVER.md) for the current state and
+[`ROADMAP.md`](ROADMAP.md) for what is parked.
 
 ## The split
 
@@ -38,10 +41,10 @@ macOS before CoreAudio exists.
 
 ## macOS: what you configure, and what I build
 
-The engine cannot be compiled on macOS today because `nae.cpp` and `session.cpp`
-are WASAPI/COM. The platform-neutral core (`neiro_core`) already has no Windows
-header and can be configured on macOS. The steps below separate what you set up
-once from what still has to be written.
+The engine compiles on macOS. `nae.cpp` and `session.cpp` have no Windows header
+outside `#ifdef _WIN32`; the macOS device open is
+`engine/open_coreaudio.cpp`, compiled only on macOS. A macOS build needs an
+FFmpeg (LGPL, see `scripts/build-ffmpeg-lgpl-macos.sh`) and nothing else.
 
 ### What you need on the Mac
 

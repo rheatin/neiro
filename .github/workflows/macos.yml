@@ -1,0 +1,28 @@
+# macOS: build the engine, Base and the binding, and run what a runner can.
+#
+# The runner has no audio endpoint, so scripts/verify.sh runs the device-free
+# checks only. Device checks are run with --with-devices on a workstation.
+name: macos
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup toolchain install stable-aarch64-apple-darwin --profile minimal
+
+      - name: CMake and Ninja
+        run: brew install cmake ninja
+
+      # Homebrew's FFmpeg enables GPL; the licence gate refuses it.
+      - name: LGPL FFmpeg
+        run: ./scripts/build-ffmpeg-lgpl-macos.sh
+
+      - name: Verify
+        run: ./scripts/verify.sh

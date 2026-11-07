@@ -79,9 +79,16 @@ add_subdirectory(${NEIRO_SOXR_DIR} ${CMAKE_CURRENT_BINARY_DIR}/soxr)
 #
 # Point NEIRO_FFMPEG_ROOT at another tree to switch builds.
 # ---------------------------------------------------------------------------
-if(WIN32)
-  set(NEIRO_FFMPEG_ROOT "$ENV{USERPROFILE}/scoop/apps/ffmpeg-shared/current"
-      CACHE PATH "Root of an FFmpeg shared build (with include/ and lib/)")
+# The vendored tree wins.
+#
+# A build fetched by scripts/build-lgpl.ps1 (Windows) or
+# scripts/build-ffmpeg-lgpl-macos.sh lands in vendor/ffmpeg-lgpl, and it is the
+# one the shipped binary has to link: the system packages on both platforms are
+# GPL builds, so linking them makes nae.dll GPL and nothing distributable.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/ffmpeg-lgpl/include/libavcodec/avcodec.h")
+  set(NEIRO_FFMPEG_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/ffmpeg-lgpl")
+elseif(WIN32)
+  set(NEIRO_FFMPEG_DEFAULT "$ENV{USERPROFILE}/scoop/apps/ffmpeg-shared/current")
 else()
   # Homebrew: /opt/homebrew on Apple Silicon, /usr/local on Intel. A caller can
   # override with -DNEIRO_FFMPEG_ROOT=<prefix>.
@@ -94,8 +101,21 @@ else()
   if(NOT NEIRO_BREW_PREFIX)
     set(NEIRO_BREW_PREFIX "/opt/homebrew")
   endif()
-  set(NEIRO_FFMPEG_ROOT "${NEIRO_BREW_PREFIX}"
-      CACHE PATH "Root of an FFmpeg install (with include/ and lib/)")
+  set(NEIRO_FFMPEG_DEFAULT "${NEIRO_BREW_PREFIX}")
+endif()
+
+set(NEIRO_FFMPEG_ROOT "${NEIRO_FFMPEG_DEFAULT}"
+    CACHE PATH "Root of an FFmpeg shared build (with include/ and lib/)")
+# A cache entry survives the arrival of the vendored tree, so the tree actually
+# used is printed rather than assumed. The earlier message named the vendored
+# directory while NEIRO_FFMPEG_ROOT still pointed at the system package, which
+# is a log that says one thing and links another.
+message(STATUS "FFmpeg root: ${NEIRO_FFMPEG_ROOT}")
+if(NOT NEIRO_FFMPEG_ROOT STREQUAL NEIRO_FFMPEG_DEFAULT)
+  message(STATUS
+    "note: a vendored tree is available at ${NEIRO_FFMPEG_DEFAULT}; this build "
+    "uses the cached NEIRO_FFMPEG_ROOT above. Pass -DNEIRO_FFMPEG_ROOT=... or "
+    "delete the build directory to switch.")
 endif()
 
 if(EXISTS "${NEIRO_FFMPEG_ROOT}/include/libavcodec/avcodec.h")
@@ -107,6 +127,87 @@ else()
   message(WARNING
     "FFmpeg not found at ${NEIRO_FFMPEG_ROOT}. File decoding will be disabled; "
     "the engine still builds and the test tone still works.")
+endif()
+
+# The licence is decided by the build that gets linked, not by the folder name.
+#
+# Both system packages are GPL builds, and a GPL nae.dll cannot be distributed.
+# This reads the configuration string out of the tree that is about to be linked
+# and stops the configure -- the alternative is discovering it at ship time, or
+# trusting a note in a README that drifted from the build.
+option(NEIRO_REQUIRE_LGPL
+       "Refuse to configure against an FFmpeg that enables GPL or nonfree" ON)
+if(NEIRO_HAVE_FFMPEG AND NEIRO_REQUIRE_LGPL)
+  # Deliberately NOT a cached variable. The first version used find_program,
+  # which caches its result: a build directory configured against the system
+  # package kept that binary after NEIRO_FFMPEG_ROOT moved to the vendored tree,
+  # and the gate then reported the vendored tree as GPL because it was reading
+  # the other one.
+  set(_neiro_ffmpeg_bin "${NEIRO_FFMPEG_ROOT}/bin/ffmpeg${CMAKE_EXECUTABLE_SUFFIX}")
+  if(NOT EXISTS "${_neiro_ffmpeg_bin}")
+    # `find_program` would cache the result even under a leading underscore, so
+    # the evidence is looked for with `find_file`, which does not.
+    unset(_neiro_ffmpeg_bin)
+    set(_neiro_ffmpeg_names ffmpeg)
+    find_file(_neiro_ffmpeg_bin NAMES ffmpeg${CMAKE_EXECUTABLE_SUFFIX}
+              PATHS "${NEIRO_FFMPEG_ROOT}/bin" NO_DEFAULT_PATH NO_CACHE)
+  endif()
+  if(NOT _neiro_ffmpeg_bin)
+    message(FATAL_ERROR
+      "NEIRO_REQUIRE_LGPL is on, but no ffmpeg executable was found under "
+      "${NEIRO_FFMPEG_ROOT}/bin, so the licence of the tree that would be "
+      "linked cannot be read. Either point NEIRO_FFMPEG_ROOT at a build that "
+      "ships one, or configure with -DNEIRO_REQUIRE_LGPL=OFF for a "
+      "development-only build.")
+  endif()
+  execute_process(COMMAND "${_neiro_ffmpeg_bin}" -hide_banner -version
+                  OUTPUT_VARIABLE NEIRO_FFMPEG_VERSION_TEXT
+                  RESULT_VARIABLE _neiro_ffmpeg_rc
+                  ERROR_QUIET)
+  # An unreadable licence is not a licence. A binary that will not start -- a
+  # quarantine attribute, the wrong architecture, a missing sibling dll -- used
+  # to leave the text empty and every MATCHES false, and the gate then said "not
+  # GPL" about a tree it had learned nothing about.
+  if(NOT _neiro_ffmpeg_rc EQUAL 0 OR NEIRO_FFMPEG_VERSION_TEXT STREQUAL "")
+    message(FATAL_ERROR
+      "${_neiro_ffmpeg_bin} could not be run (exit ${_neiro_ffmpeg_rc}), so the "
+      "licence of ${NEIRO_FFMPEG_ROOT} cannot be read. Nothing is known about "
+      "this tree, and an unknown licence is not a licence.")
+  endif()
+  # The evidence is the CLI's configuration string, which describes the *build*
+  # that produced the libraries beside it. Check that the major version of
+  # libavcodec it reports matches the one on disk, so a binary copied into a
+  # different tree cannot vouch for the code that is linked.
+  string(REGEX MATCH "libavcodec +([0-9]+)\." _neiro_cli_codec "${NEIRO_FFMPEG_VERSION_TEXT}")
+  set(_neiro_cli_codec_major "${CMAKE_MATCH_1}")
+  file(GLOB _neiro_codec_libs "${NEIRO_FFMPEG_ROOT}/lib/libavcodec*"
+                              "${NEIRO_FFMPEG_ROOT}/lib/avcodec-*")
+  if(_neiro_codec_libs)
+    list(GET _neiro_codec_libs 0 _neiro_codec_lib)
+    get_filename_component(_neiro_codec_name "${_neiro_codec_lib}" NAME)
+    string(REGEX MATCH "([0-9]+)" _neiro_disk_codec_major "${_neiro_codec_name}")
+    if(_neiro_cli_codec_major AND NOT _neiro_cli_codec_major STREQUAL _neiro_disk_codec_major)
+      message(FATAL_ERROR
+        "the ffmpeg at ${_neiro_ffmpeg_bin} reports libavcodec "
+        "${_neiro_cli_codec_major}, but ${_neiro_codec_name} is what would be "
+        "linked. These are not the same build, so the licence the binary "
+        "reports is not the licence of the library.")
+    endif()
+  endif()
+  if(NEIRO_FFMPEG_VERSION_TEXT MATCHES "--enable-gpl")
+    message(FATAL_ERROR
+      "the FFmpeg at ${NEIRO_FFMPEG_ROOT} enables GPL, and linking it makes "
+      "nae.dll GPL. Run scripts/build-lgpl.ps1 (Windows) or "
+      "scripts/build-ffmpeg-lgpl-macos.sh (macOS) to put an LGPL build in "
+      "vendor/ffmpeg-lgpl, or configure with -DNEIRO_REQUIRE_LGPL=OFF for a "
+      "development-only build.")
+  endif()
+  if(NEIRO_FFMPEG_VERSION_TEXT MATCHES "--enable-nonfree")
+    message(FATAL_ERROR
+      "the FFmpeg at ${NEIRO_FFMPEG_ROOT} enables nonfree components; a build "
+      "linked against it cannot be distributed at all.")
+  endif()
+  message(STATUS "FFmpeg at ${NEIRO_FFMPEG_ROOT} is not GPL and not nonfree")
 endif()
 
 # Platform-neutral audio core. This target must not include a platform header:
@@ -157,6 +258,67 @@ if(WIN32)
   target_link_options(hilbert_check PRIVATE "-static-libgcc" "-static-libstdc++")
 endif()
 
+# Checks that link only the platform-neutral core, above the backend choice:
+# the CoreAudio and AAudio branches return before the Windows half, so a
+# portable check placed below them simply never exists.
+
+add_executable(routing_check routing_check.cpp)
+target_link_libraries(routing_check PRIVATE neiro_core)
+target_include_directories(routing_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+if(WIN32)
+  target_link_options(routing_check PRIVATE "-static-libgcc" "-static-libstdc++")
+endif()
+
+add_executable(clip_guard_check clip_guard_check.cpp)
+target_link_libraries(clip_guard_check PRIVATE neiro_core)
+target_include_directories(clip_guard_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+if(WIN32)
+  target_link_options(clip_guard_check PRIVATE "-static-libgcc" "-static-libstdc++")
+endif()
+
+add_executable(bass_check bass_check.cpp)
+target_link_libraries(bass_check PRIVATE neiro_core)
+target_include_directories(bass_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+if(WIN32)
+  target_link_options(bass_check PRIVATE "-static-libgcc" "-static-libstdc++")
+endif()
+
+# ---------------------------------------------------------------------------
+# Checks that build on every platform.
+#
+# These were defined inside the Windows-only section below, so a macOS build
+# compiled the DSP and ran nothing against it: the core was portable in
+# principle and unproven in practice. Each builds its own sources, needs no
+# device and no backend, and is the same code the engine links.
+# ---------------------------------------------------------------------------
+add_executable(resample_check resample_check.cpp resampler.cpp)
+target_include_directories(resample_check PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${NEIRO_SOXR_DIR}/src   # soxr.h, which the wrapper includes
+)
+target_link_libraries(resample_check PRIVATE soxr)
+set_target_properties(resample_check PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
+add_executable(loudness_check loudness_check.cpp loudness.cpp)
+target_include_directories(loudness_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(linear_phase_eq_check linear_phase_eq_check.cpp linear_phase_eq.cpp partitioned_convolver.cpp)
+target_include_directories(linear_phase_eq_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(partitioned_convolver_check partitioned_convolver_check.cpp partitioned_convolver.cpp)
+target_include_directories(partitioned_convolver_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(dsd_downrate_check dsd_downrate_check.cpp dsd_downrate.cpp dsd_filter.cpp)
+target_include_directories(dsd_downrate_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+if(WIN32)
+  foreach(name loudness_check linear_phase_eq_check partitioned_convolver_check dsd_downrate_check)
+    target_link_options(${name} PRIVATE "-static-libgcc" "-static-libstdc++")
+  endforeach()
+endif()
+
 # Backend selection. The core is platform-neutral; this picks the one OS
 # boundary. WASAPI is the existing engine (nae.dll). CoreAudio/AAudio build a
 # backend library plus the shared core checks; they do not contain a second DSP.
@@ -178,6 +340,78 @@ if(NEIRO_BACKEND STREQUAL "COREAUDIO")
   target_link_libraries(neiro_backend PUBLIC neiro_core
                         "-framework AudioToolbox" "-framework CoreAudio" "-framework CoreFoundation")
   target_include_directories(neiro_backend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # The same backend probe Windows runs, against the real device: which rates
+  # and bit depths it offers, and whether asking for one changes it.
+  add_executable(backend_check backend_check.cpp)
+  target_link_libraries(backend_check PRIVATE neiro_backend)
+  target_include_directories(backend_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # The engine's device primitive, standing on its own: does opening a stream and
+  # offering it frames actually move those frames?
+  add_library(neiro_output STATIC output_stream_coreaudio.cpp)
+  target_link_libraries(neiro_output PUBLIC neiro_backend)
+  target_include_directories(neiro_output PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+  add_executable(output_stream_check output_stream_check.cpp)
+  target_link_libraries(output_stream_check PRIVATE neiro_output)
+  target_include_directories(output_stream_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+  # The engine itself, once the Windows device code has moved behind the platform
+  # boundary. Off by default on purpose: `nae.cpp` still contains that code
+  # inline, so building this fails, and a target that fails in the default build
+  # makes every other target's result unreadable. Configure with
+  # -DNEIRO_WIP_ENGINE_MACOS=ON to compile it and read the compiler's list of what
+  # still has to move.
+  option(NEIRO_WIP_ENGINE_MACOS "Build the engine as libnae.dylib on macOS" OFF)
+  if(NEIRO_WIP_ENGINE_MACOS)
+    # The same source file the Windows build compiles, as a loadable library with
+    # the same name, so a host can link against either without knowing which one
+    # it got.
+    add_library(nae SHARED nae.cpp session.cpp dsd_filter.cpp dsd_downrate.cpp
+                    open_coreaudio.cpp)
+    set_target_properties(nae PROPERTIES OUTPUT_NAME nae)
+    target_link_libraries(nae PRIVATE neiro_output neiro_backend neiro_core)
+    target_include_directories(nae PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    # The export list is generated from `nae.h` by `scripts/gen-exports.py`, and
+    # checked in. It is a fourth copy of the export surface, which AGENTS warns
+    # about -- but a generated copy that the build consumes cannot drift silently:
+    # a symbol in nae.h and missing here fails to export, and the probe sees it.
+    set(NEIRO_EXPORT_LIST "${CMAKE_CURRENT_SOURCE_DIR}/nae.exports.txt")
+    if(EXISTS "${NEIRO_EXPORT_LIST}")
+      target_link_options(nae PRIVATE "-Wl,-exported_symbols_list,${NEIRO_EXPORT_LIST}")
+      # Ninja does not treat a linker flag's file as an input, so editing the list
+      # reports "no work to do" and the old export table survives. This is the
+      # same trap AGENTS records for nae.def / nae.map, reproduced here on purpose
+      # in the open so it is not rediscovered the hard way.
+      set_property(TARGET nae APPEND PROPERTY LINK_DEPENDS "${NEIRO_EXPORT_LIST}")
+    endif()
+    add_executable(macos_smoke macos_smoke.cpp)
+    target_link_libraries(macos_smoke PRIVATE nae)
+    target_include_directories(macos_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+    add_executable(macos_play_check macos_play_check.cpp)
+    target_link_libraries(macos_play_check PRIVATE nae)
+    target_include_directories(macos_play_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+    add_executable(hog_mode_check hog_mode_check.cpp)
+    target_link_libraries(hog_mode_check PRIVATE nae "-framework CoreAudio" "-framework CoreFoundation")
+    target_include_directories(hog_mode_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+    add_executable(rate_set rate_set.cpp)
+    target_link_libraries(rate_set PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+
+    add_executable(hog_watch hog_watch.cpp)
+    target_link_libraries(hog_watch PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+
+    add_executable(hog_probe hog_probe.cpp)
+    target_link_libraries(hog_probe PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+
+    # Visibility is default on purpose for now. A curated -exported_symbols_list
+    # would be a fourth copy of the export list that nae.def / nae.map / ffi.rs
+    # already carry, and the drift between those three is the failure AGENTS
+    # records. Generating it from nae.h is the right follow-up; until then this
+    # exports the global NAE_* symbols, which is what a host needs.
+  endif()
   return()
 endif()
 
@@ -188,6 +422,34 @@ if(NEIRO_BACKEND STREQUAL "AAUDIO")
   return()
 endif()
 
+# Checks that link only the platform-neutral core. They compile on every
+# backend, so they belong above the Windows gate rather than inside it -- a
+# gate that swallows the portability checks is a gate nobody notices is wrong.
+
+
+
+
+# ---------------------------------------------------------------------------
+# The Windows half, in one block.
+#
+# Everything from here to the end of this file compiles nae.cpp against WASAPI
+# and builds the instruments that drive it. It is written as one condition
+# rather than the early `return()` the backend selection used to do, because the
+# `nae` target is about to exist on macOS as well: the moment it does, every
+# instrument below starts compiling there, and each one that calls
+# `dlopen`/`GetProcAddress` or includes a Windows header fails. A gate that has
+# to be proven correct for the new platform is a gate that will be forgotten;
+# naming the platform once cannot be.
+#
+# What macOS will need instead is the same `nae` target over a different source
+# list (nae.cpp + session.cpp + backend_coreaudio.cpp), which is why the export
+# control below is Windows-shaped and must not be inherited by it.
+if(NEIRO_BACKEND STREQUAL "WASAPI")
+
+# `backend_wasapi.cpp` is the device layer: the WASAPI stream and the factory
+# that opens it. It used to be a "backend" whose every method called back into
+# this DLL's own exports; it is now the other half of `nae.cpp`'s open path, and
+# the engine links it because the engine calls the stream.
 add_library(nae SHARED
   nae.cpp
   session.cpp
@@ -545,15 +807,6 @@ target_compile_definitions(format_matrix PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 # measures the tone with a Goertzel filter and checks the frequency and level
 # survived, rather than checking only the length.
 # ---------------------------------------------------------------------------
-add_executable(resample_check resample_check.cpp resampler.cpp)
-target_include_directories(resample_check PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  ${NEIRO_SOXR_DIR}/src   # soxr.h, which the wrapper includes
-)
-target_link_libraries(resample_check PRIVATE soxr)
-set_target_properties(resample_check PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-)
 
 # ---------------------------------------------------------------------------
 # Decode check.
@@ -753,6 +1006,10 @@ add_custom_command(TARGET mode_check POST_BUILD
 # correct TPDF dither both pass a naive "is there noise" test, so the error
 # amplitude is checked against the theoretical TPDF value too.
 # ---------------------------------------------------------------------------
+
+# dither_check stays here: it includes wasapi_compat.hpp for `placeInContainer`,
+# which is a Windows container rule. The TPDF arithmetic it measures is portable;
+# this particular bound must be checked where that rule exists.
 add_executable(dither_check dither_check.cpp dither.cpp)
 target_include_directories(dither_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(dither_check PROPERTIES
@@ -1002,13 +1259,6 @@ target_include_directories(session_policy_check PRIVATE ${CMAKE_CURRENT_SOURCE_D
 target_link_libraries(session_policy_check PRIVATE nae)
 add_dependencies(session_policy_check nae)
 
-add_executable(routing_check routing_check.cpp)
-target_link_libraries(routing_check PRIVATE neiro_core)
-target_include_directories(routing_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-if(WIN32)
-  target_link_options(routing_check PRIVATE "-static-libgcc" "-static-libstdc++")
-endif()
-
 add_executable(routing_play_check routing_play_check.cpp)
 target_include_directories(routing_play_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(routing_play_check PRIVATE nae)
@@ -1029,13 +1279,6 @@ target_include_directories(channel_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(channel_check PRIVATE nae)
 add_dependencies(channel_check nae)
 
-add_executable(clip_guard_check clip_guard_check.cpp)
-target_link_libraries(clip_guard_check PRIVATE neiro_core)
-target_include_directories(clip_guard_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-if(WIN32)
-  target_link_options(clip_guard_check PRIVATE "-static-libgcc" "-static-libstdc++")
-endif()
-
 add_executable(native_dsd_sink_check native_dsd_sink_check.cpp dsd_downrate.cpp dsd_filter.cpp)
 target_include_directories(native_dsd_sink_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(native_dsd_sink_check PRIVATE nae)
@@ -1044,31 +1287,13 @@ if(WIN32)
   target_link_options(native_dsd_sink_check PRIVATE "-static-libgcc" "-static-libstdc++")
 endif()
 
-add_executable(dsd_downrate_check dsd_downrate_check.cpp dsd_downrate.cpp dsd_filter.cpp)
-target_include_directories(dsd_downrate_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-if(WIN32)
-  target_link_options(dsd_downrate_check PRIVATE "-static-libgcc" "-static-libstdc++")
-endif()
 
-add_executable(linear_phase_eq_check linear_phase_eq_check.cpp linear_phase_eq.cpp partitioned_convolver.cpp)
-target_include_directories(linear_phase_eq_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-if(WIN32)
-  target_link_options(linear_phase_eq_check PRIVATE "-static-libgcc" "-static-libstdc++")
-endif()
 
-add_executable(loudness_check loudness_check.cpp loudness.cpp)
-target_include_directories(loudness_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-if(WIN32)
-  target_link_options(loudness_check PRIVATE "-static-libgcc" "-static-libstdc++")
-endif()
 
-add_executable(partitioned_convolver_check partitioned_convolver_check.cpp partitioned_convolver.cpp)
-target_include_directories(partitioned_convolver_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-if(WIN32)
-  target_link_options(partitioned_convolver_check PRIVATE "-static-libgcc" "-static-libstdc++")
-endif()
 
-add_executable(backend_check backend_check.cpp backend_wasapi.cpp)
+# The Windows adapter is inside the check now; the engine no longer carries a
+# "backend" that is a loop back into its own exports.
+add_executable(backend_check backend_check.cpp)
 target_include_directories(backend_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(backend_check PRIVATE nae)
 add_dependencies(backend_check nae)
@@ -1078,9 +1303,4 @@ target_include_directories(buffer_policy_check PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(buffer_policy_check PRIVATE nae)
 add_dependencies(buffer_policy_check nae)
 
-add_executable(bass_check bass_check.cpp)
-target_link_libraries(bass_check PRIVATE neiro_core)
-target_include_directories(bass_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-if(WIN32)
-  target_link_options(bass_check PRIVATE "-static-libgcc" "-static-libstdc++")
-endif()
+endif()  # NEIRO_BACKEND STREQUAL "WASAPI"

@@ -26,10 +26,25 @@ struct BackendDevice {
     bool isDefault = false;
 };
 
-// The backend pulls this many interleaved float frames from the core. It runs
-// on the backend's realtime callback, so the core side must not allocate, lock
-// or block. Returning fewer frames than requested means end of source.
-using RenderCallback = std::function<size_t(float* out, size_t frames)>;
+// The backend pulls this many frames from the core. It runs on the backend's
+// realtime callback, so the core side must not allocate, lock or block.
+// Returning fewer frames than requested means end of source.
+//
+// The buffer is the FINAL interleaved device bytes, in the format the stream was
+// opened with -- not floats for the backend to convert.
+//
+// That is deliberate, and it is the difference between one DSP and two. Dither
+// and requantisation are stages of the engine's canonical order
+// (`OUTPUT-POLICY.md §5`), and they are audible: a 24-in-32 endpoint must not be
+// dithered as though it were 24-bit. If this callback returned floats, every
+// backend would have to requantise itself, so the stage would live in
+// `backend_wasapi.cpp` on Windows and nowhere at all on macOS, where the device
+// format is already float32. One copy of the DSP is the rule; the stage stays in
+// the core and a backend only moves bytes.
+//
+// `bytesPerFrame` is `request.resolved`'s channel count times the container
+// width, so a backend that needs the layout has it from the open request.
+using RenderCallback = std::function<size_t(void* out, size_t frames)>;
 
 struct BackendOpenRequest {
     std::string deviceId;
@@ -44,8 +59,8 @@ struct BackendOpenRequest {
 };
 
 // The backend owns the device handle and the render callback. The core owns
-// sample processing. `render` returns interleaved float at the negotiated
-// output rate/channels; the backend converts to its native format.
+// sample processing and dithering, and writes the final interleaved device bytes
+// in the format this stream was opened with; the backend only moves them.
 class BackendStream {
   public:
     virtual ~BackendStream() = default;

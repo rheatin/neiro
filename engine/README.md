@@ -204,8 +204,9 @@ parked features are in [`ROADMAP.md`](ROADMAP.md); backend architecture is in
 - **The internal format is float32.** 16/24-bit integer sources round-trip
   exactly; a true 32-bit integer source does not, and it is reported as not
   bit-perfect with `NAE_REASON_SOURCE_PRECISION` rather than left to look clean.
-- **Windows only for now.** The device layer is WASAPI; the C ABI and CLI are
-  platform-neutral. CoreAudio and ALSA are not implemented.
+- **Windows and macOS.** The device layer is WASAPI on one and CoreAudio on the
+  other; the C ABI, the CLI and everything above the device are the same code.
+  iOS and Android are not implemented.
 
 The detailed feature notes (volume/EQ/crossfeed/ReplayGain/gapless/crossfade
 semantics) are in the root README and in `VERIFICATION.md`.
