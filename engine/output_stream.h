@@ -138,6 +138,14 @@ struct OpenedFormat {
     bool isFloat = false;
     uint32_t bufferFrames = 0;
     double latencyMs = 0.0;
+
+    /// True when the device signals the next period instead of the caller
+    /// polling a timer. It is reported rather than assumed: on an endpoint that
+    /// refuses event callbacks the stream still plays, and the only way to know
+    /// which pacing a run used is to ask.
+    bool eventDriven = false;
+    /// Why event-driven pacing was not used. Empty when it was.
+    std::string pacingNote;
 };
 
 /// Windows: the WASAPI stream, opened with the format the resolver chose.

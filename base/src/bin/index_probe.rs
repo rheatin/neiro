@@ -341,6 +341,61 @@ fn main() {
         );
     }
 
+    // The third path: a file whose tags changed *outside* Base. The row already
+    // exists, so `index_paths` skips it unless the scan forgets it first -- which
+    // is the branch this step exists to cover. Writing through Base would take
+    // the retag path above instead and leave this one unexercised.
+    tag_with_lofty(&paths[1], "Retagged Elsewhere", "The Signals", "Night Drive", 2);
+    handle
+        .dispatch(Command::ScanFolder { root: dir.clone() })
+        .expect("rescan");
+    let rescanned = wait_for(
+        &events,
+        Duration::from_secs(30),
+        |e| matches!(e, Event::ScanDone { .. }),
+        "the rescan to finish",
+    );
+    if let Event::ScanDone { modified, .. } = &rescanned {
+        check(
+            modified.iter().any(|p| p.ends_with("two.wav")),
+            "the rescan reports the retagged file as modified",
+            format!("{} modified", modified.len()),
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if Instant::now() >= deadline {
+            panic!("timeout waiting for the modified file to be re-indexed");
+        }
+        match events.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::TagsIndexed { complete: true, .. }) => break,
+            Ok(Event::Error { op, message }) => {
+                panic!("Base error while re-indexing: {op}: {message}")
+            }
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the event channel closed while re-indexing")
+            }
+        }
+    }
+    handle
+        .dispatch(Command::ListTracks { offset: 0, limit: 100 })
+        .expect("list tracks after the rescan");
+    let listed = wait_for(
+        &events,
+        Duration::from_secs(10),
+        |e| matches!(e, Event::TracksListed { .. }),
+        "the track list after the rescan",
+    );
+    if let Event::TracksListed { tracks, .. } = &listed {
+        check(
+            tracks.iter().any(|t| t.title == "Retagged Elsewhere"),
+            "a retag outside Base reaches the list after a rescan",
+            format!("{} track(s)", tracks.len()),
+        );
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
     base.shutdown();
     println!("\nAll index checks passed.");

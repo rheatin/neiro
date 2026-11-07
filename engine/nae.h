@@ -828,7 +828,8 @@ typedef struct NAE_PeaksInfo {
  *
  * # 为什么是**路径**而不是 handle
  *
- * 一开始写的是 `NAE_QueryPeaks(handle, ...)`，让调用方从**另一个线程**拿着 handle 调。
+ * 一开始写的是一个拿 handle 的 `NAE_QueryPeaks(handle, ...)`，让调用方从**另一个线程**拿着
+ * handle 调——那个入口后来删掉了，现在只有这条按路径的。
  * 而 `binding/src/engine.rs` 写着应用那条更严的约定：
  *
  *     neiro_audio::Stream is `!Send` on purpose: an exclusive WASAPI stream
@@ -1925,7 +1926,8 @@ int32_t NAE_SessionLastError(NAE_Session* session, char* buf, int32_t bufLen) NA
  *
  * `NAE_QuerySpectrum` and `NAE_QueryEnvelope` take a handle, and the handle
  * belongs to the session thread -- a host reading it from its own thread is the
- * use-after-free window `NAE_QueryPeaks` was changed to a path for. The session
+ * use-after-free window a handle-based query was changed to a path for (that
+ * entry point no longer exists). The session
  * thread publishes a copy of both taps after every slice it renders, and these
  * read that copy.
  *

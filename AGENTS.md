@@ -124,6 +124,18 @@ $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
 cargo run --bin tag_check -- ..\test\tagtmp\a.flac ..\test\tagtmp\b.mp3 ..\test\tagtmp\c.wav
 ```
 
+The whole set, on both platforms, is one command — it builds, runs every
+device-free check, then Base's probes and the binding, and it is what CI calls:
+
+```powershell
+powershell -File scripts/verify.ps1 -WithDevices     # Windows
+./scripts/verify.sh --with-devices                    # macOS
+```
+
+Without the flag it runs only what needs no sound card. A check that needs a
+device is skipped there on purpose; do not read a green CI run as "playback
+works".
+
 Do not pass `--target x86_64-pc-windows-gnu`. That toolchain's default host is
 already GNU; naming the target again selects the self-contained link setup, and
 every binary it produces dies at process start with `STATUS_STACK_OVERFLOW`.

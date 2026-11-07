@@ -184,6 +184,13 @@ Two things the port had to get right, both found by running the checks:
   the flag and the stream runs the timer path; that fallback is explicit and
   documented rather than an accident.
 
+The pacing a stream got is now reported rather than assumed: `OpenedFormat`
+carries `eventDriven` and `pacingNote`, and an open under `NAE_TRACE` prints
+`pacing=event` or `pacing=timer (reason)`. On this machine it prints
+`pacing=timer (the endpoint refused an event-driven stream)`, which is the
+answer to a question that used to have none: before this, a silent fallback to
+timer pacing looked exactly like a healthy run.
+
 ### What the Windows backend slice actually requires
 
 Not a file move. On Windows `NAE_Play(handle, ms)` calls

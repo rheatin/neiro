@@ -339,8 +339,15 @@ std::shared_ptr<OutputStream> openWasapiStream(const StreamFormatRequest& want,
     // event-driven exclusive `Initialize` -- must still play, so a refusal rebuilds
     // the client without the flag instead of failing the open.
     EventGuard event;
+    std::string pacingNote;
     event.handle = CreateEventW(nullptr, /*manualReset=*/FALSE, /*initialState=*/FALSE, nullptr);
     DWORD streamFlags = event.handle ? AUDCLNT_STREAMFLAGS_EVENTCALLBACK : 0;
+    // No event means no event callbacks, and the stream paces on a timer. Say
+    // which of the three reasons applied, every time: a silent timer fallback is
+    // indistinguishable from a healthy run."""
+    if (!event.handle) {
+        pacingNote = "the endpoint gave no render event";
+    }
 
     // One `Initialize` attempt, plus the fallback to the backend's own period when
     // an explicit one is refused. A refused buffer is reported, not fatal.
@@ -379,6 +386,7 @@ std::shared_ptr<OutputStream> openWasapiStream(const StreamFormatRequest& want,
     HRESULT initHr = initialize(client.Get(), streamFlags);
 
     if (FAILED(initHr) && streamFlags != 0) {
+        pacingNote = "the endpoint refused an event-driven stream";
         // The endpoint would not take an event-driven stream at all. Drop the
         // event and rebuild: polling is what this engine has always used.
         CloseHandle(event.handle);
@@ -396,6 +404,11 @@ std::shared_ptr<OutputStream> openWasapiStream(const StreamFormatRequest& want,
         // The client now advertises event callbacks without an event to signal,
         // and an initialised client cannot be re-configured. Start over without
         // them: the stream then falls back to the caller's timer pacing.
+        //
+        // The reason is recorded here too. It was not, at first: this branch
+        // reported `pacing=timer` with an empty note, which is the one state the
+        // report exists to make impossible.
+        pacingNote = "the endpoint refused the render event handle";
         CloseHandle(event.handle);
         event.handle = nullptr;
         streamFlags = 0;
@@ -455,9 +468,23 @@ std::shared_ptr<OutputStream> openWasapiStream(const StreamFormatRequest& want,
                                            static_cast<double>(granted.rate)
                                      : 0.0;
 
+    // Event-driven only counts if the handle was accepted; a refused
+    // `SetEventHandle` above has already cleared it.
+    granted.eventDriven = event.handle != nullptr;
+    granted.pacingNote = granted.eventDriven ? std::string() : pacingNote;
+
     if (getenv("NAE_TRACE") != nullptr) {
-        std::fprintf(stderr, "[nae] granted frames=%u (%.2f ms) rate=%u\n", granted.bufferFrames,
-                     granted.latencyMs, granted.rate);
+        char pacing[192];
+        if (granted.pacingNote.empty()) {
+            std::snprintf(pacing, sizeof(pacing), "%s",
+                          granted.eventDriven ? "event" : "timer");
+        } else {
+            std::snprintf(pacing, sizeof(pacing), "%s (%s)",
+                          granted.eventDriven ? "event" : "timer",
+                          granted.pacingNote.c_str());
+        }
+        std::fprintf(stderr, "[nae] granted frames=%u (%.2f ms) rate=%u pacing=%s\n",
+                     granted.bufferFrames, granted.latencyMs, granted.rate, pacing);
     }
 
     if (opened) *opened = granted;
