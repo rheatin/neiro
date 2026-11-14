@@ -21,21 +21,28 @@ import { reportEngineFailure } from "../../backend/engine";
 import { ActionButton, TextLink, focusRing } from "./controls";
 import { AppDialog } from "./overlays";
 import { Icon } from "./icons";
+import { addRoot } from "../../state/catalog";
 
 /** The three server kinds the engine speaks, as unmasked forms here: the
  * labels carry the real names. */
-type ServerKind = "jf-password" | "jf-token" | "nd";
+type ServerKind = "jf-password" | "jf-token" | "nd" | "local";
 
 const KIND_LABEL: Record<ServerKind, string> = {
   "jf-password": "Jellyfin 密码",
   "jf-token": "Jellyfin Token",
   nd: "Navidrome",
+  local: "本地路径",
 };
 
-const KIND_ORDER: ServerKind[] = ["jf-password", "jf-token", "nd"];
+const KIND_ORDER: ServerKind[] = ["jf-password", "jf-token", "nd", "local"];
 
 function remoteKindOf(kind: ServerKind): RemoteKind {
   return kind === "nd" ? "navidrome" : "jellyfin";
+}
+
+/** A folder on this machine is a source too, so the same 加号 asks for it. */
+function isLocal(kind: ServerKind): boolean {
+  return kind === "local";
 }
 
 function kindOfServer(server: RemoteServer | null): ServerKind {
@@ -48,6 +55,17 @@ function hostOf(baseUrl: string): string {
   return baseUrl.replace(/^\w+:\/\//, "").replace(/\/.*$/, "") || baseUrl;
 }
 
+/** The form's "which kind" state, at module scope so the sidebar's 加号 can
+ * open the dialog straight on it: the 加号 asks for a source, and the kinds are
+ * that dialog's tabs, not a second menu in front of it. */
+const editing = signal<RemoteServer | null | undefined>(undefined);
+
+/** Opens the source dialog on a blank form (the tabs are the kinds). */
+export function openSourceDialog(): void {
+  editing.set(null);
+  setServerDialogOpen(true);
+}
+
 export function ServerDialog() {
   return (
     <AppDialog open={serverDialogOpen()} onOpenChange={(next) => setServerDialogOpen(next)} testID="server-dialog">
@@ -58,7 +76,6 @@ export function ServerDialog() {
 
 function ServerDialogContent() {
   /** undefined = 列表；null = 新建；RemoteServer = 编辑。 */
-  const editing = signal<RemoteServer | null | undefined>(undefined);
   return (
     <If when={editing() !== undefined} else={<ServerList onNew={() => editing.set(null)} onEdit={(s) => editing.set(s)} />}>
       <ServerForm
@@ -218,6 +235,20 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
         </View>
       </View>
 
+      <If when={isLocal(kind())}>
+        <Text class="text-sm leading-relaxed text-muted-foreground">
+          选一个文件夹，扫描把里面的文件收进本地曲库。可以加多个。
+        </Text>
+        <ActionButton
+          label="选择文件夹…"
+          onPress={() => {
+            setServerDialogOpen(false);
+            void addRoot();
+          }}
+        />
+      </If>
+
+      <If when={!isLocal(kind())}>
       <Field label="服务器地址" hint="结尾的斜杠自动去掉，如 http://192.168.1.2:8096">
         <Input
           value={baseUrl()}
@@ -262,6 +293,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
         <View class="flex-1" />
         <ActionButton label={existing ? "保存并连接" : "连接"} disabled={busy()} onPress={save} />
       </View>
+      </If>
     </View>
   );
 }

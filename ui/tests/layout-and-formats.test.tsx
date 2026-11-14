@@ -31,9 +31,9 @@ test("窄侧栏：来源只剩图标，动作仍可达", async () => {
   expect(texts.includes("远程")).toBe(false);
   expect(app.shows("id:rail-source-library")).toBe(true);
   await app.press("id:rail-source-add");
-  await app.waitFor("id:rail-source-add-folder", { timeout: 5_000 });
-  expect(app.shows("id:rail-source-add-server")).toBe(true);
-  expect(app.shows("label:添加文件夹")).toBe(true);
+  // The dialog's tabs are the kinds: jellyfin, navidrome, and a local folder.
+  await app.waitFor("text:本地路径", { timeout: 5_000 });
+  expect(app.shows("text:Jellyfin 密码")).toBe(true);
 }, 60_000);
 
 test("宽侧栏：来源文字仍在", async () => {

@@ -15,6 +15,7 @@ import type { Playlist } from "../../backend/types";
 import { activeRemoteServer, isRemoteConfigured } from "../../state/remote";
 import { selectSource, servers } from "../../state/sources";
 import { setServerDialogOpen } from "../../state/overlays";
+import { openSourceDialog } from "../ui/server-dialog";
 import { Hint, focusRing, LAYER } from "../ui/controls";
 import { iconMotion, Icon, type IconName } from "../ui/icons";
 
@@ -190,7 +191,6 @@ function SourceIconRow(props: {
 }
 
 function SourcesPanel(props: { compact?: boolean }) {
-  const menu = signal(false);
   const scanning = () => scan().running;
   const count = () => scan().lastAdded;
   const dialog = setServerDialogOpen;
@@ -224,16 +224,7 @@ function SourcesPanel(props: { compact?: boolean }) {
               />
             )}
           </Each>
-          <SourceIconRow
-            icon="plus"
-            label="添加来源"
-            testID="rail-source-add"
-            onPress={() => menu.set(!menu())}
-          />
-          <If when={menu()}>
-            <SourceIconRow icon="folderPlus" label="添加文件夹" testID="rail-source-add-folder" onPress={() => void addRoot()} />
-            <SourceIconRow icon="server" label="添加远程库" testID="rail-source-add-server" onPress={() => dialog(true)} />
-          </If>
+          <SourceIconRow icon="plus" label="添加来源" testID="rail-source-add" onPress={() => openSourceDialog()} />
         </View>
       </If>
       <If when={props.compact !== true}>
@@ -272,41 +263,15 @@ function SourcesPanel(props: { compact?: boolean }) {
         </If>
       </View>
 
-      {/* One entrance for both kinds of source, in both widths. */}
+      {/* One entrance: the dialog's tabs are the kinds of source. */}
       <Button
         accessibilityLabel="添加来源"
-        onPress={() => menu.set(!menu())}
+        onPress={() => openSourceDialog()}
         class={`flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out hover:bg-row-hover active:scale-[0.98] ${focusRing}`}
       >
         <Icon name="plus" size={16} color="muted-foreground" />
         <Text class="text-xs font-semibold text-foreground">添加</Text>
       </Button>
-      <If when={menu()}>
-        <View class="gap-0.5 pl-6">
-          <Button
-            accessibilityLabel="添加文件夹"
-            onPress={() => {
-              menu.set(false);
-              void addRoot();
-            }}
-            class={`flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-row-hover ${focusRing}`}
-          >
-            <Icon name="folderPlus" size={14} color="muted-foreground" />
-            <Text class="text-xs text-foreground">文件夹…</Text>
-          </Button>
-          <Button
-            accessibilityLabel="添加远程库"
-            onPress={() => {
-              menu.set(false);
-              dialog(true);
-            }}
-            class={`flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-row-hover ${focusRing}`}
-          >
-            <Icon name="server" size={14} color="muted-foreground" />
-            <Text class="text-xs text-foreground">远程库…</Text>
-          </Button>
-        </View>
-      </If>
 
       {/* The remote half: one row per configured server, the glyph carrying
           the state instead of a coloured dot. */}
@@ -318,7 +283,7 @@ function SourcesPanel(props: { compact?: boolean }) {
       <If when={false}>
         <Button
           accessibilityLabel="连接服务器"
-          onPress={() => dialog(true)}
+          onPress={() => openSourceDialog()}
           class={`group flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out hover:bg-row-hover active:scale-[0.98] ${focusRing}`}
         >
           <Icon name="server" size={16} color="muted-foreground" />
