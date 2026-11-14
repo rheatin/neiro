@@ -39,6 +39,7 @@ import {
   remoteArtistGroups,
   remoteLoadingState,
   retryRemote,
+  remoteError,
 } from "../state/remote";
 import { AppPage } from "../components/page";
 import { pageEnd, wideTracks } from "../components/layout";
@@ -220,7 +221,10 @@ function RemoteHomeSections(props: { wave: ListWave }) {
       </If>
       <If when={state === "error" && remoteTracks().length === 0}>
         <View class="px-3 pb-8">
-          <ErrorState message="远程库没有读出来。" onRetry={retryRemote} />
+          <ErrorState
+            message={remoteError() ? `远程库没有读出来：${remoteError()}` : "远程库没有读出来。"}
+            onRetry={retryRemote}
+          />
         </View>
       </If>
       <If when={remoteTracks().length > 0}>

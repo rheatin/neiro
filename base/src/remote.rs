@@ -227,6 +227,45 @@ fn jellyfin_request(
         .header("Accept", "application/json")
 }
 
+
+/// The signed-in user's id, which `/Items` requires.
+///
+/// A Jellyfin newer than 10.9 answers `400` to a listing without it, and a
+/// token carries no user: one call to `/Users/Me` answers, and every later
+/// listing reuses it.
+fn jellyfin_user_id(base_url: &str, token: &str) -> Result<String, RemoteError> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let key = format!("{}|{token}", base_url.trim_end_matches('/'));
+    if let Ok(guard) = cache.lock() {
+        if let Some(id) = guard.get(&key) {
+            return Ok(id.clone());
+        }
+    }
+    let url = format!("{}/Users/Me", base_url.trim_end_matches('/'));
+    let mut response = jellyfin_request(token, &url).call().map_err(transport)?;
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| RemoteError::Transport(e.to_string()))?;
+    if !(200..300).contains(&status) {
+        return Err(RemoteError::Status { code: status, body });
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| RemoteError::Shape(e.to_string()))?;
+    let id = parsed
+        .get("Id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RemoteError::Shape("no user Id".into()))?
+        .to_string();
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(key, id.clone());
+    }
+    Ok(id)
+}
+
 /// Turn a ureq failure into this module's error, keeping the server's body.
 fn transport(e: ureq::Error) -> RemoteError {
     match e {
@@ -250,11 +289,6 @@ pub fn list_audio(
 ) -> Result<Vec<RemoteTrack>, RemoteError> {
     match server {
         Server::Jellyfin { base_url, auth } => {
-            let url = format!(
-                "{}/Items?IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,Path\
-                 &SortBy=SortName&EnableImages=false&StartIndex={start}&Limit={limit}",
-                base_url.trim_end_matches('/')
-            );
             let token = match auth {
                 JellyfinAuth::Token { token } => token.as_str(),
                 JellyfinAuth::Password { .. } => {
@@ -263,6 +297,12 @@ pub fn list_audio(
                     ))
                 }
             };
+            let user_id = jellyfin_user_id(base_url, token)?;
+            let url = format!(
+                "{}/Items?IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,Path\
+                 &SortBy=SortName&EnableImages=false&StartIndex={start}&Limit={limit}&userId={user_id}",
+                base_url.trim_end_matches('/')
+            );
             let mut response = jellyfin_request(token, &url).call().map_err(transport)?;
             let status = response.status().as_u16();
             let body = response
@@ -1026,8 +1066,9 @@ pub fn list_playlists(server: &Server) -> Result<Vec<RemotePlaylist>, RemoteErro
     match server {
         Server::Jellyfin { base_url, auth } => {
             let token = token_of(auth)?;
+            let user_id = jellyfin_user_id(base_url, token)?;
             let url = format!(
-                "{}/Items?IncludeItemTypes=Playlist&Recursive=true&Fields=ChildCount&EnableImages=false",
+                "{}/Items?IncludeItemTypes=Playlist&Recursive=true&Fields=ChildCount&EnableImages=false&userId={user_id}",
                 base_url.trim_end_matches('/')
             );
             let mut response = jellyfin_request(token, &url).call().map_err(transport)?;
@@ -1091,10 +1132,11 @@ pub fn playlist_tracks(
         Server::Jellyfin { base_url, auth } => {
             let token = token_of(auth)?;
             // `ParentId` rather than `/Playlists/{id}/Items`: the Items
-            // endpoint needs no user id and answers the same shape as a listing.
+            // endpoint answers the same shape as a listing.
+            let user_id = jellyfin_user_id(base_url, token)?;
             let url = format!(
                 "{}/Items?ParentId={}&IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources\
-                 &StartIndex={start}&Limit={limit}&EnableImages=false",
+                 &StartIndex={start}&Limit={limit}&EnableImages=false&userId={user_id}",
                 base_url.trim_end_matches('/'),
                 urlencode(id)
             );

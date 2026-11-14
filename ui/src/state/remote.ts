@@ -30,6 +30,10 @@ export const remoteFetching = signal(false);
 /** 为了进度显示, 以及一个较短页面在不匹配此信号时是过时的。 */
 export const remoteLoadingState = signal<"idle" | "loading" | "error">("idle");
 
+/** The engine's last word on a remote failure. An empty list and a refused
+ * server look the same on screen; this is what tells them apart. */
+export const remoteError = signal<string>("");
+
 export const remoteStatus = (): RemoteStatus => engine.remoteStatus();
 export const isRemoteConfigured = (): boolean => engine.remoteStatus().configured;
 export const remoteConfig = (): RemoteConfig | null => config();
@@ -201,10 +205,21 @@ export async function removeServerById(id: string): Promise<void> {
   await removeServer(id);
 }
 
-// 服务器就绪（remote_changed 配置为 true）时，启动读取：列表 + 播放列表。
+// 服务器就绪（remote_changed 配置为 true）时启动读取——每个服务器只启动一次。
+//
+// 以前的条件读了 `remoteLoadingState`/`remoteTracks`：一次空的回复把状态放回
+// `idle`，条件又成立，于是再发一次请求。屏幕上就是转圈走到一半归零、永远不
+// 落地。
 effect(() => {
   const status = engine.remoteStatus();
-  if (status.configured && remoteLoadingState() === "idle" && remoteTracks().length === 0) loadRemote();
+  const empty = remoteTracks().length === 0;
+  const busy = remoteFetching();
+  if (!status.configured || !empty || busy) return;
+  // A first attempt can be dropped while the engine is still subscribing.
+  // Retrying is safe because an attempt stamps `lastSyncAt`, so this runs at
+  // most once per freshness window — not once per state change.
+  if (Date.now() - lastSyncAt < 5_000) return;
+  untracked(() => loadRemote());
 });
 
 // ---- 列表 ------------------------------------------------------------------
@@ -277,6 +292,7 @@ export function loadRemote(): void {
   // in one swap when the last page lands.
   freshList = [];
   lastSyncAt = Date.now();
+  remoteError.set("");
   remoteLoadingState.set(remoteTracks().length > 0 ? "idle" : "loading");
   try {
     engine.listRemote(0, REMOTE_PAGE);
@@ -305,6 +321,7 @@ effect(() => {
 engine.subscribeEngineError((error) => {
   if (error.op !== "remote") return;
   untracked(() => {
+    remoteError.set(error.message);
     if (remoteFetching()) {
       remoteFetching.set(false);
       remoteLoadingState.set("error");
