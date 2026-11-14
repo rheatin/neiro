@@ -284,7 +284,13 @@ function handleListed(tracks: RemoteTrack[]): void {
         password,
       }).then(() => loadRemote());
     }
-    if (freshList !== null && freshList.length > 0) remoteTracks.set(freshList);
+    // A listing with songs is the proof the session works; an empty one has
+    // now been answered by a fresh sign-in, and asking again would be the
+    // same question on a loop.
+    if (freshList !== null && freshList.length > 0) {
+      emptyHandled = false;
+      remoteTracks.set(freshList);
+    }
     else if (freshList !== null) remoteTracks.set([]);
     freshList = null;
     lastSyncAt = Date.now();
@@ -303,7 +309,10 @@ function handleListed(tracks: RemoteTrack[]): void {
     }
   } else {
     // The listing is whole: one swap, so the page reads one listing.
-    if (freshList !== null) remoteTracks.set(freshList);
+    if (freshList !== null) {
+      emptyHandled = false;
+      remoteTracks.set(freshList);
+    }
     freshList = null;
     lastSyncAt = Date.now();
     remoteFetching.set(false);
@@ -320,8 +329,6 @@ function finishServerCache(): void {
 }
 
 export function loadRemote(): void {
-  // A new listing is a new question; the re-sign-in is allowed again.
-  emptyHandled = false;
   // Only a request that is still in flight blocks a new one. A flag left set
   // by a request that never answered used to make the page empty forever.
   if (remoteFetching() && remoteLoadingState() === "loading") return;
