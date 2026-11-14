@@ -209,9 +209,24 @@ function RemoteHomeSections(props: { wave: ListWave }) {
       }
     >
       <View class="gap-2 px-3 pb-2" accessibilityLabel="远程来源">
-        <Text class="px-3 text-xs text-muted-foreground">
-          {server()!.label} · {server()!.kind === "navidrome" ? "Navidrome" : "Jellyfin"} · {remoteTracks().length} 首
-        </Text>
+        <View class="px-3 gap-0.5">
+          <Text class="text-xs text-muted-foreground">
+            {server()!.label} · {server()!.kind === "navidrome" ? "Navidrome" : "Jellyfin"} ·{" "}
+            {engine.remoteStatus().configured ? "已连接" : "未连接"} · {remoteTracks().length} 首
+          </Text>
+          <If when={remoteError() !== ""}>
+            <Text class="text-[11px] text-destructive">最近一次失败：{remoteError()}</Text>
+          </If>
+          <If when={engine.remoteProbe() !== null}>
+            <Text class={`text-[11px] ${engine.remoteProbe()!.ok ? "text-muted-foreground" : "text-destructive"}`}>
+              测试：{engine.remoteProbe()!.ok ? "有应答" : "失败"} · {engine.remoteProbe()!.count} 条 ·{" "}
+              {engine.remoteProbe()!.message}
+            </Text>
+          </If>
+          <View class="flex-row pt-1">
+            <ActionButton label="测试连接" variant="outline" onPress={() => engine.probeRemote()} />
+          </View>
+        </View>
       </View>
       {/* Configured and reachable are two different answers; the page said
           "empty" for both, which reads as a server with no music. */}

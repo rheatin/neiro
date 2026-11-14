@@ -496,6 +496,7 @@ pub struct Analysis {
     pub bits_per_sample: u32,
     pub duration_ms: u32,
     pub codec: String,
+    pub codec_profile: String,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -722,6 +723,15 @@ pub enum WireEvent {
     /// The server's audio items, after `list_remote`.
     RemoteListed {
         tracks: Vec<RemoteTrackRow>,
+    },
+    /// The outcome of `probe_remote`.
+    RemoteProbed {
+        #[serde(default)]
+        ok: bool,
+        #[serde(default)]
+        message: String,
+        #[serde(default)]
+        count: usize,
     },
     /// One item is now a local file; `path` goes to `play`.
     RemoteFetched {

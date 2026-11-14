@@ -672,6 +672,9 @@ pub enum Command {
         #[serde(default = "default_remote_limit")]
         limit: usize,
     },
+    /// Asks the server for one item and answers with the outcome, for a
+    /// "测试连接" button. Answered as `remote_probed`.
+    ProbeRemote,
     /// Download one listed item into the cache. Answered as `remote_fetched`.
     ///
     /// The id is resolved against the last listing, so a fetch can only name
@@ -869,6 +872,13 @@ pub enum Event {
     /// The server's audio items, after `ListRemote`.
     RemoteListed {
         tracks: Vec<crate::remote::RemoteTrack>,
+    },
+    /// The outcome of `ProbeRemote`: whether the server answered, what it
+    /// said, and how many items it gave.
+    RemoteProbed {
+        ok: bool,
+        message: String,
+        count: usize,
     },
     /// A track's cover, after `FetchRemoteArtwork`.
     ///

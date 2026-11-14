@@ -161,6 +161,29 @@ export function RemotePage() {
           <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
             远程库
           </Text>
+          {/* The connection's own facts, always: "connected, zero items" and
+              "refused" were one sentence on this page, and neither is
+              actionable without the number. */}
+          <View class="gap-0.5 pt-1">
+            <Text class="text-[11px] text-muted-foreground">
+              {engine.remoteStatus().configured ? "已连接" : "未连接"} · {remoteTracks().length} 首
+              {remoteLoadingState() === "loading" ? " · 读取中" : ""}
+            </Text>
+            <If when={remoteError() !== ""}>
+              <Text class="text-[11px] text-destructive">最近一次失败：{remoteError()}</Text>
+            </If>
+            <If when={engine.remoteProbe() !== null}>
+              <Text
+                class={`text-[11px] ${engine.remoteProbe()!.ok ? "text-muted-foreground" : "text-destructive"}`}
+              >
+                测试：{engine.remoteProbe()!.ok ? "有应答" : "失败"} · {engine.remoteProbe()!.count} 条 ·{" "}
+                {engine.remoteProbe()!.message}
+              </Text>
+            </If>
+            <View class="flex-row pt-1">
+              <ActionButton label="测试连接" variant="outline" onPress={() => engine.probeRemote()} />
+            </View>
+          </View>
         </View>
         <If
           when={engine.remoteStatus().configured}

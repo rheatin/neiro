@@ -10,7 +10,7 @@
 // closes what is there and builds again.
 
 import { signal, Storage, type Accessor } from "nsh";
-import type { LyricsCandidate, TagFields } from "./types";
+import type { LyricsCandidate, RemoteProbe, TagFields } from "./types";
 import {
   Base,
   type Album as NativeAlbum,
@@ -122,6 +122,8 @@ const remoteStatusSig = signal<RemoteStatus>({ configured: false, kind: null, ba
 const remoteTracksSig = signal<RemoteTrack[]>([]);
 /** The last online lyrics search's answer. */
 const lyricsFoundSig = signal<LyricsCandidate[]>([]);
+/** The last 测试连接 outcome; `null` before one has run. */
+const remoteProbeSig = signal<RemoteProbe | null>(null);
 const remotePlaylistsSig = signal<RemotePlaylist[]>([]);
 const remoteItemsSig = signal<RemoteItemsPage | null>(null);
 const remoteFetchedSig = signal<RemoteFetched | null>(null);
@@ -387,6 +389,7 @@ export class Engine implements Backend {
   readonly settings: Accessor<Settings | null> = () => settingsSig();
   readonly remoteStatus: Accessor<RemoteStatus> = () => remoteStatusSig();
   readonly remoteTracks: Accessor<RemoteTrack[]> = () => remoteTracksSig();
+  readonly remoteProbe: Accessor<RemoteProbe | null> = () => remoteProbeSig();
   readonly remotePlaylists: Accessor<RemotePlaylist[]> = () => remotePlaylistsSig();
   readonly remoteItems: Accessor<RemoteItemsPage | null> = () => remoteItemsSig();
   readonly remoteFetched: Accessor<RemoteFetched | null> = () => remoteFetchedSig();
@@ -446,6 +449,13 @@ export class Engine implements Backend {
       base.onError((e) => this.#fan(this.#errorSubs, { op: text(e?.op), message: text(e?.message) })),
       base.onRemote((s) => remoteStatusSig.set(remoteStatusOf(s))),
       base.onRemoteTracks((t) => remoteTracksSig.set((t ?? []).map(remoteTrackOf))),
+      base.onRemoteProbed((p) =>
+        remoteProbeSig.set({
+          ok: p?.ok === true,
+          message: text(p?.message),
+          count: typeof p?.count === "number" ? p.count : 0,
+        }),
+      ),
       base.onLyricsFound((list) => {
         lyricsFoundSig.set((list ?? []).map(lyricsCandidateOf));
         this.#fan(this.#lyricsFoundSubs, lyricsFoundSig());
@@ -523,6 +533,11 @@ export class Engine implements Backend {
   subscribeArtworkList(sub: Fanout<ArtworkList>): () => void {
     this.#artListSubs.add(sub);
     return () => this.#artListSubs.delete(sub);
+  }
+
+  /** Asks the server one item; the outcome arrives on `subscribeRemoteProbe`. */
+  probeRemote(): void {
+    this.#command((base) => (base as any).probeRemote());
   }
 
   /** The answer to one online lyrics search, as the provider returned it. */

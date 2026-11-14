@@ -396,6 +396,7 @@ impl Control {
             Command::IndexTags { paths } => self.reindex_paths(paths),
             Command::ReadArtwork { path, index } => self.read_artwork(path, index),
             Command::SetRemote { server, cache_dir } => self.set_remote(server, cache_dir),
+            Command::ProbeRemote => self.send_remote(crate::remote::Job::Probe),
             Command::ListRemote { start, limit } => self.list_remote(start, limit),
             Command::FetchRemote { id } => self.fetch_remote(id),
             Command::FetchRemoteArtwork { id } => {

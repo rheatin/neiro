@@ -1207,6 +1207,10 @@ pub enum Job {
         start: usize,
         limit: usize,
     },
+    /// One small listing, reported as an outcome rather than as tracks: the
+    /// answer a person asking "is this server working" needs is the status
+    /// and the count, not a page of rows.
+    Probe,
     /// Download one item of the last listing and report its path.
     Fetch {
         id: String,
@@ -1288,6 +1292,25 @@ impl Session {
                     cache_dir: self.cache_dir.clone(),
                 }
             }
+            Job::Probe => match self.config.as_ref() {
+                None => crate::protocol::Event::RemoteProbed {
+                    ok: false,
+                    message: "还没有连接服务器".into(),
+                    count: 0,
+                },
+                Some(config) => match list_audio(config, 0, 1) {
+                    Ok(tracks) => crate::protocol::Event::RemoteProbed {
+                        ok: true,
+                        message: "服务器有应答".into(),
+                        count: tracks.len(),
+                    },
+                    Err(e) => crate::protocol::Event::RemoteProbed {
+                        ok: false,
+                        message: e.to_string(),
+                        count: 0,
+                    },
+                },
+            },
             Job::List { start, limit } => match self.config.as_ref() {
                 None => self.error("no server is configured"),
                 Some(config) => match list_audio(config, start, limit) {

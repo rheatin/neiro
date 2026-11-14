@@ -3,7 +3,7 @@
 import { Text, View } from "nsh";
 import { cancelWriteLyrics, confirmWriteLyrics, lyricsWrite } from "../../state/lyrics";
 import { AppDialog } from "../ui/overlays";
-import { ActionButton, TextLink } from "../ui/controls";
+import { ActionButton } from "../ui/controls";
 
 export function LyricsWriteDialog() {
   const asked = () => lyricsWrite();
@@ -18,8 +18,10 @@ export function LyricsWriteDialog() {
         <Text class="text-xs leading-relaxed text-muted-foreground">
           这份歌词会写进「{name()}」的标签里，覆盖文件里原有的歌词。音频本身不会变。
         </Text>
-        <View class="flex-row items-center justify-end gap-4 pt-2">
-          <TextLink label="取消" onPress={() => cancelWriteLyrics()} />
+        {/* One control for both: a link and a pill put their labels on
+            different baselines, which reads as a misaligned row. */}
+        <View class="flex-row items-center justify-end gap-2 pt-2">
+          <ActionButton label="取消" variant="outline" onPress={() => cancelWriteLyrics()} />
           <ActionButton label="写入" onPress={() => confirmWriteLyrics()} />
         </View>
       </View>

@@ -324,6 +324,13 @@ export interface RemoteStatus {
   baseUrl: string;
 }
 
+/** The outcome of a 测试连接. */
+export interface RemoteProbe {
+  ok: boolean;
+  message: string;
+  count: number;
+}
+
 /** One set of words an online provider offers for a track. `synced` is the
  * timestamped text (LRC), `plain` the untimed one; a provider has either,
  * both, or (for a match with no words) neither. */

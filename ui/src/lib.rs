@@ -280,6 +280,14 @@ pub struct RemoteTrack {
     pub cover_art: Option<String>,
 }
 
+/// What a 测试连接 asked the server and what it answered.
+#[derive(Debug, Clone, Default, PartialEq, JsObject)]
+pub struct RemoteProbe {
+    pub ok: bool,
+    pub message: String,
+    pub count: f64,
+}
+
 /// One set of words an online provider offers for a track.
 ///
 /// `synced` is the provider's timestamped text (LRC), `plain` its untimed one.
@@ -516,6 +524,7 @@ struct Inner {
     on_artists: Listeners<Vec<Artist>>,
     on_search: Listeners<SearchPage>,
     on_lyrics_found: Listeners<Vec<LyricsCandidate>>,
+    on_remote_probed: Listeners<RemoteProbe>,
     on_artwork_list: Listeners<ArtworkList>,
     on_artwork_data: Listeners<ArtworkBytes>,
     on_scan: Listeners<ScanEvent>,
@@ -854,6 +863,10 @@ impl Inner {
                 let listed = tracks.into_iter().map(remote_track_of).collect::<Vec<_>>();
                 self.on_remote_tracks.post(&listed.clone());
                 self.remote_tracks = Some(listed);
+            }
+            WireEvent::RemoteProbed { ok, message, count } => {
+                let probe = RemoteProbe { ok, message, count: count as f64 };
+                self.on_remote_probed.post(&probe.clone());
             }
             WireEvent::RemoteFetched { track, path } => {
                 self.on_remote_fetched
@@ -1970,6 +1983,21 @@ impl Base {
             }
         });
         Ok(())
+    }
+
+    /// Asks the server one item and reports the outcome; answered on
+    /// `onRemoteProbed`.
+    pub fn probe_remote(&self) -> Result<(), String> {
+        self.command(&serde_json::json!({ "command": "probe_remote" }))
+    }
+
+    /// Calls `listener` with each 测试连接 outcome.
+    pub fn on_remote_probed(&self, #[args(probe)] listener: Callback<RemoteProbe>) -> Stop {
+        self.subscribe(
+            |inner| &mut inner.on_remote_probed,
+            |_inner| None,
+            listener,
+        )
     }
 
     /// Calls `listener` after every online lyrics search.
