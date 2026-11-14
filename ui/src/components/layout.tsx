@@ -4,7 +4,7 @@
 // phone, a terminal — renders one honest page: the engine talks to the
 // audio devices, and only the desktop window has them.
 
-import { Text, View, platform, windowSize, type JSX } from "nsh";
+import { Text, View, platform, signal, windowSize, type JSX } from "nsh";
 import { sidebarCollapsed } from "../state/overlays";
 
 export type Layout = "desktop" | "unsupported";
@@ -38,8 +38,19 @@ export const barSize = (): "full" | "compact" | "stacked" => {
   return w < STACKED_BAR ? "stacked" : w < COMPACT_BAR ? "compact" : "full";
 };
 
+/** The shell's own width, measured. `windowSize()` reports the window on some
+ * backends and the screen on others; a rail decided from the wrong one never
+ * appears, and the panels squeeze instead. The shell measures itself, and this
+ * is what the sidebar switches on. */
+const shellWidth = signal(0);
+export const measuredShellWidth = () => shellWidth();
+export const measureShell = (width: number): void => {
+  const w = Math.round(width);
+  if (w > 0 && w !== shellWidth()) shellWidth.set(w);
+};
+
 /** Whether the desktop's sidebar is a rail of icons (tracked). */
-export const railSidebar = () => windowSize().width < RAIL;
+export const railSidebar = () => (measuredShellWidth() || windowSize().width) < RAIL;
 
 /** Whether the desktop's sidebar shows at all (tracked). */
 export const sidebarShown = () => !sidebarCollapsed();

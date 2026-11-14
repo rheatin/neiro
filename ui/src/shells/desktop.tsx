@@ -3,7 +3,7 @@
 // player bar floating over their bottom, a pill the pages scroll behind.
 
 import { token, View } from "nsh";
-import { barSize, railSidebar, sidebarShown, sidebarWidth } from "../components/layout";
+import { barSize, measureShell, railSidebar, sidebarShown, sidebarWidth } from "../components/layout";
 import { animateLayoutOn } from "../components/ui/motion";
 import { Sidebar } from "../components/library/sidebar";
 import { PlayerBar } from "../components/player/player-bar";
@@ -29,7 +29,11 @@ export function DesktopShell() {
           <TrailingControls />
         </View>
       </TitleBar>
-      <View class="flex-1 flex-row gap-2 px-2 pb-2" style={{ paddingTop: titleBarArea().height > 0 ? 0 : 8 }}>
+      <View
+        class="flex-1 flex-row gap-2 px-2 pb-2"
+        style={{ paddingTop: titleBarArea().height > 0 ? 0 : 8 }}
+        onLayout={(e) => measureShell(e.bounds.size.width)}
+      >
         <If when={sidebarShown()}>
           <View class="shrink-0" style={{ width: sidebarWidth() }}>
             <Sidebar compact={railSidebar()} />

@@ -1,10 +1,8 @@
-// The sidebar: the 换页 panel (首页), the library panel (专辑、歌手、全部
-// 曲目), the 曲库 panel (local roots and remote servers in one card) and the
-// 曲单 panel at the foot — a list that grows belongs last. On a narrow
-// window the panels become a rail of icons, each with a tooltip; the 曲库
-// and 曲单 panels are only on the open sidebar. Every row shares one
-// geometry: 44 high, its glyph in the same 30pt column, so the labels line
-// up — including the ones whose label used to be `text-base font-bold`.
+// The sidebar: 换页 panel (首页), the library panel (专辑、歌手、全部
+// 曲目) and the 来源 panel (local roots and remote servers). On a narrow
+// window every panel becomes a rail of icons, each with a tooltip — no
+// labels, so nothing is ever cut in half. Every row shares one geometry:
+// 44 high, its glyph in the same 30pt column, so the icons line up.
 
 import { createMotion, effect, reduceMotion, token, untracked, View } from "nsh";
 import { Button } from "nsh/base";
@@ -85,7 +83,7 @@ function NavRow(props: { icon: IconName; label: string; route: Route; compact: b
         </View>
         <If when={!props.compact}>
           <Text
-            class={`text-base font-bold ${LAYER} group-hover:translate-x-0.5 ${
+            class={`min-w-0 flex-1 truncate text-base font-bold ${LAYER} group-hover:translate-x-0.5 ${
               selected() ? "text-foreground" : "text-muted-foreground group-hover:text-foreground"
             }`}
           >
@@ -159,16 +157,74 @@ function RootRow(props: { path: string }) {
   );
 }
 
-/** 曲库 panel: where tracks come from. The local roots and the remote
- * servers are one question, so they share a card — 本地 first, 远程 under it,
- * separated by a rule rather than by another panel. */
-function SourcesPanel() {
+/** 来源 panel: where tracks come from. Wide, it names the local roots and
+ * remote servers; narrow, it is one 44pt icon row per action — a label in a
+ * 72pt rail is either clipped or wraps a character per line, so the label
+ * lives in the tooltip and the accessible name instead. */
+function SourceIconRow(props: {
+  icon: IconName;
+  label: string;
+  onPress: () => void;
+  active?: boolean;
+  disabled?: boolean;
+  testID?: string;
+}) {
+  return (
+    <Button
+      testID={props.testID}
+      accessibilityLabel={props.label}
+      tooltip={<Hint label={props.label} />}
+      disabled={props.disabled}
+      onPress={props.onPress}
+      class={`h-11 items-center justify-center rounded-(--radius-inset) transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none ${focusRing} ${
+        props.active ? "bg-secondary" : ""
+      }`}
+    >
+      <View class="w-[30px] items-center">
+        <Icon name={props.icon} size={22} color={props.active ? "foreground" : "muted-foreground"} />
+      </View>
+    </Button>
+  );
+}
+
+function SourcesPanel(props: { compact?: boolean }) {
   const scanning = () => scan().running;
   const count = () => scan().lastAdded;
   const dialog = setServerDialogOpen;
   const list = () => servers();
   const activeId = () => activeRemoteServer()?.id;
   return (
+    <>
+      <If when={props.compact === true}>
+        <View class="gap-1 rounded-(--radius-panel) border border-border bg-card p-2" accessibilityLabel="来源" role="navigation">
+          <SourceIconRow icon="folderPlus" label="添加文件夹" testID="rail-source-add-folder" onPress={() => void addRoot()} />
+          <If when={roots().length > 0}>
+            <SourceIconRow
+              testID="rail-source-rescan"
+              icon="refresh"
+              label={scanning() ? "扫描进行中" : "重新扫描"}
+              disabled={scanning()}
+              onPress={rescanAll}
+            />
+          </If>
+          <Each of={list()}>
+            {(server) => (
+              <SourceIconRow
+                testID="rail-source-server"
+                icon="server"
+                label={`服务器 ${server().label}${isRemoteConfigured() && activeId() === server().id ? "，已连接" : ""}`}
+                active={isRemoteConfigured() && activeId() === server().id}
+                onPress={() => {
+                  selectSource(`remote:${server().id}`);
+                  switchTo(REMOTE);
+                }}
+              />
+            )}
+          </Each>
+          <SourceIconRow icon="plus" label="添加服务器" testID="rail-source-add-server" onPress={() => dialog(true)} />
+        </View>
+      </If>
+      <If when={props.compact !== true}>
     <View class="gap-1 rounded-(--radius-panel) border border-border bg-card p-2" accessibilityLabel="曲库">
       <Text class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">本地</Text>
       <If when={roots().length > 0}>
@@ -186,14 +242,6 @@ function SourcesPanel() {
         <Text class="px-2 pb-1 text-xs text-muted-foreground">还没有文件夹。添加一个，扫描把里面的文件收进曲库。</Text>
       </If>
       <View class="flex-row items-center gap-1">
-        <Button
-          accessibilityLabel="添加文件夹"
-          onPress={() => void addRoot()}
-          class={`group flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out hover:bg-row-hover active:scale-[0.98] ${focusRing}`}
-        >
-          <Icon name="folderPlus" size={16} color="muted-foreground" />
-          <Text class="text-xs font-semibold text-foreground">添加文件夹</Text>
-        </Button>
         <If when={roots().length > 0}>
           <Button
             accessibilityLabel={scanning() ? "扫描进行中" : "重新扫描"}
@@ -257,16 +305,11 @@ function SourcesPanel() {
             }}
           </Each>
         </View>
-        <Button
-          accessibilityLabel="添加服务器"
-          onPress={() => dialog(true)}
-          class={`flex-row items-center gap-1.5 rounded-(--radius) px-2 py-1 hover:bg-row-hover ${focusRing}`}
-        >
-          <Icon name="plus" size={14} color="muted-foreground" />
-          <Text class="text-[11px] text-muted-foreground">添加服务器…</Text>
-        </Button>
+        <View />
       </If>
     </View>
+      </If>
+    </>
   );
 }
 
@@ -277,9 +320,7 @@ export function Sidebar(props: { compact?: boolean }) {
     <View class="min-h-0 flex-1 gap-2" role="navigation">
       <NavPanel compact={compact} />
       <LibraryPanel compact={compact} />
-      <If when={!compact}>
-        <SourcesPanel />
-      </If>
+      <SourcesPanel compact={compact} />
     </View>
   );
 }
