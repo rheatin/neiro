@@ -248,7 +248,9 @@ function finishServerCache(): void {
 }
 
 export function loadRemote(): void {
-  if (remoteFetching()) return;
+  // Only a request that is still in flight blocks a new one. A flag left set
+  // by a request that never answered used to make the page empty forever.
+  if (remoteFetching() && remoteLoadingState() === "loading") return;
   remoteFetching.set(true);
   remoteTracks.set([]);
   remoteLoadingState.set("loading");

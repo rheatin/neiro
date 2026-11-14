@@ -236,7 +236,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       </View>
 
       <If when={isLocal(kind())}>
-        <Text class="text-sm leading-relaxed text-muted-foreground">
+        <Text class="text-xs leading-relaxed text-muted-foreground">
           选一个文件夹，扫描把里面的文件收进本地曲库。可以加多个。
         </Text>
         <ActionButton
