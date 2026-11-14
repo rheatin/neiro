@@ -397,7 +397,9 @@ function RemotePreview() {
           snapToAlignment="start"
           decelerationRate="fast"
           scrollbar={false}
-          class="-mx-3 h-[196px]"
+          // 224 = the card's own height (20 padding + 128 cover + 8 gap + the
+          // three lines under it); at 196 the artist and play count were cut.
+          class="-mx-3 h-[224px]"
           contentClass="px-3 pt-1"
         >
           {(row, index) => <RemoteHomeCard row={row()} index={index()} />}
@@ -462,7 +464,9 @@ function MostPlayedPreview() {
           snapToAlignment="start"
           decelerationRate="fast"
           scrollbar={false}
-          class="-mx-3 h-[196px]"
+          // 224 = the card's own height (20 padding + 128 cover + 8 gap + the
+          // three lines under it); at 196 the artist and play count were cut.
+          class="-mx-3 h-[224px]"
           contentClass="px-3 pt-1"
         >
           {(row, index) => <MostPlayedCard row={row()} index={index()} />}
