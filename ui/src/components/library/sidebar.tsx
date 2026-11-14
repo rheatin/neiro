@@ -8,13 +8,12 @@ import { createMotion, effect, reduceMotion, signal, token, untracked, View } fr
 import { Button } from "nsh/base";
 import { Text } from "nsh";
 import { ALBUMS, ARTISTS, LIKED, PLAYLISTS, REMOTE, TRACKS, currentRoot, switchTo, type Route } from "../../nav";
-import { favourites, playlists as playlistList } from "../../state/user-catalog";
+import { favourites } from "../../state/user-catalog";
 import { setNewPlaylistOpen } from "./playlist-dialogs";
-import { addRoot, removeRoot, roots, rootsLoaded, rescanAll, scan } from "../../state/catalog";
+import { roots } from "../../state/catalog";
 import type { Playlist } from "../../backend/types";
 import { activeRemoteServer, isRemoteConfigured } from "../../state/remote";
 import { selectSource, servers } from "../../state/sources";
-import { setServerDialogOpen } from "../../state/overlays";
 import { openSourceDialog } from "../ui/server-dialog";
 import { Hint, focusRing, LAYER } from "../ui/controls";
 import { iconMotion, Icon, type IconName } from "../ui/icons";
@@ -138,194 +137,87 @@ function LibraryPanel(props: { compact: boolean }) {
   );
 }
 
-/** One watched folder: its path, and an ✕ that removes it on hover. */
-function RootRow(props: { path: string }) {
+
+
+function SourcesPanel(props: { compact?: boolean }) {
+  const compact = () => props.compact === true;
+  const list = () => servers();
+  const activeId = () => activeRemoteServer()?.id;
+  const active = (id: string) => () => isRemoteConfigured() && activeId() === id;
   return (
-    <View class="group h-9 flex-row items-center gap-2 rounded-(--radius) px-2 hover:bg-row-hover">
-      <View class="w-6 items-center">
-        <Icon name="folder" size={16} color="muted-foreground" />
-      </View>
-      <Text class="min-w-0 flex-1 truncate text-xs text-foreground">
-        {props.path}
-      </Text>
-      <Button
-        accessibilityLabel={`移除 ${props.path}`}
-        onPress={() => removeRoot(props.path)}
-        class={`shrink-0 items-center justify-center rounded-(--radius) opacity-0 transition duration-150 ease-out hover:bg-muted group-hover:opacity-100 active:opacity-60 ${focusRing}`}
-        style={{ width: 24, height: 24 }}
-      >
-        <Icon name="close" size={14} color="muted-foreground" />
-      </Button>
+    <View class="gap-1 rounded-(--radius-panel) border border-border bg-card p-2" accessibilityLabel="来源" role="navigation">
+      {/* Servers above the 加号, folders below it, the 加号 between them. With
+          nothing added, the 加号 is the whole panel. */}
+      <Each of={list()}>
+        {(server) => (
+          <SourceRow
+            compact={compact()}
+            icon="server"
+            label={server().label}
+            active={active(server().id)()}
+            testID="source-server"
+            onPress={() => {
+              selectSource(`remote:${server().id}`);
+              switchTo(REMOTE);
+            }}
+          />
+        )}
+      </Each>
+      <SourceRow
+        compact={compact()}
+        icon="plus"
+        label="添加来源"
+        testID="rail-source-add"
+        onPress={() => openSourceDialog()}
+      />
+      <Each of={roots()}>
+        {(root) => (
+          <SourceRow
+            compact={compact()}
+            icon="folder"
+            label={root()}
+            testID="source-root"
+            onPress={() => switchTo(TRACKS)}
+          />
+        )}
+      </Each>
     </View>
   );
 }
 
-/** 来源 panel: where tracks come from. Wide, it names the local roots and
- * remote servers; narrow, it is one 44pt icon row per action — a label in a
- * 72pt rail is either clipped or wraps a character per line, so the label
- * lives in the tooltip and the accessible name instead. */
-function SourceIconRow(props: {
+/** One source: a server or a folder. Narrow, it is the icon alone — the label
+ * lives in the tooltip and the accessible name. */
+function SourceRow(props: {
+  compact: boolean;
   icon: IconName;
   label: string;
   onPress: () => void;
   active?: boolean;
-  disabled?: boolean;
   testID?: string;
 }) {
   return (
     <Button
       testID={props.testID}
       accessibilityLabel={props.label}
-      tooltip={<Hint label={props.label} />}
-      disabled={props.disabled}
+      tooltip={props.compact ? <Hint label={props.label} /> : undefined}
       onPress={props.onPress}
-      class={`h-11 items-center justify-center rounded-(--radius-inset) transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none ${focusRing} ${
+      class={`h-11 flex-row items-center rounded-(--radius-inset) transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none ${focusRing} ${
         props.active ? "bg-secondary" : ""
-      }`}
+      } ${props.compact ? "justify-center" : "gap-3 px-2"}`}
     >
       <View class="w-[30px] items-center">
         <Icon name={props.icon} size={22} color={props.active ? "foreground" : "muted-foreground"} />
       </View>
-    </Button>
-  );
-}
-
-function SourcesPanel(props: { compact?: boolean }) {
-  const scanning = () => scan().running;
-  const count = () => scan().lastAdded;
-  const dialog = setServerDialogOpen;
-  const list = () => servers();
-  const activeId = () => activeRemoteServer()?.id;
-  return (
-    <>
-      <If when={props.compact === true}>
-        <View class="gap-1 rounded-(--radius-panel) border border-border bg-card p-2" accessibilityLabel="来源" role="navigation">
-          <SourceIconRow icon="folder" label="曲库" testID="rail-source-library" onPress={() => switchTo(TRACKS)} />
-          <If when={roots().length > 0}>
-            <SourceIconRow
-              testID="rail-source-rescan"
-              icon="refresh"
-              label={scanning() ? "扫描进行中" : "重新扫描"}
-              disabled={scanning()}
-              onPress={rescanAll}
-            />
-          </If>
-          <Each of={list()}>
-            {(server) => (
-              <SourceIconRow
-                testID="rail-source-server"
-                icon="server"
-                label={`服务器 ${server().label}${isRemoteConfigured() && activeId() === server().id ? "，已连接" : ""}`}
-                active={isRemoteConfigured() && activeId() === server().id}
-                onPress={() => {
-                  selectSource(`remote:${server().id}`);
-                  switchTo(REMOTE);
-                }}
-              />
-            )}
-          </Each>
-          <SourceIconRow icon="plus" label="添加来源" testID="rail-source-add" onPress={() => openSourceDialog()} />
-        </View>
-      </If>
-      <If when={props.compact !== true}>
-    <View class="gap-1 rounded-(--radius-panel) border border-border bg-card p-2" accessibilityLabel="曲库">
-      <Text class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">本地</Text>
-      <If when={roots().length > 0}>
-        <View class="gap-0.5">
-          <Each of={roots()}>
-            {(root) => (
-              <View class="pb-0.5">
-                <RootRow path={root()} />
-              </View>
-            )}
-          </Each>
-        </View>
-      </If>
-      <If when={rootsLoaded() && roots().length === 0}>
-        <Text class="px-2 pb-1 text-xs text-muted-foreground">还没有文件夹。添加一个，扫描把里面的文件收进曲库。</Text>
-      </If>
-      <View class="flex-row items-center gap-1">
-        <If when={roots().length > 0}>
-          <Button
-            accessibilityLabel={scanning() ? "扫描进行中" : "重新扫描"}
-            disabled={scanning()}
-            onPress={rescanAll}
-            class={`group flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out hover:bg-row-hover active:scale-[0.98] disabled:opacity-40 ${focusRing}`}
-          >
-            <Icon name="refresh" size={16} color="muted-foreground" />
-            <If when={scanning()} else={<Text class="text-xs font-semibold text-foreground">扫描</Text>}>
-              <Text class="text-xs font-semibold text-muted-foreground">扫描中…</Text>
-            </If>
-          </Button>
-        </If>
-        <If when={!scanning() && count() !== null}>
-          <Text class="pl-1 text-[11px] text-muted-foreground">上次 +{count()}</Text>
-        </If>
-      </View>
-
-      {/* One entrance: the dialog's tabs are the kinds of source. */}
-      <Button
-        accessibilityLabel="添加来源"
-        onPress={() => openSourceDialog()}
-        class={`flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out hover:bg-row-hover active:scale-[0.98] ${focusRing}`}
-      >
-        <Icon name="plus" size={16} color="muted-foreground" />
-        <Text class="text-xs font-semibold text-foreground">添加</Text>
-      </Button>
-
-      {/* The remote half: one row per configured server, the glyph carrying
-          the state instead of a coloured dot. */}
-      <View class="my-1 h-px" style={{ backgroundColor: token("border") }} />
-      <Text class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">远程</Text>
-      <If when={list().length === 0}>
-        <Text class="px-2 pb-1 text-xs text-muted-foreground">还没有远程库。用下面的加号连接。</Text>
-      </If>
-      <If when={false}>
-        <Button
-          accessibilityLabel="连接服务器"
-          onPress={() => openSourceDialog()}
-          class={`group flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out hover:bg-row-hover active:scale-[0.98] ${focusRing}`}
+      <If when={!props.compact}>
+        <Text
+          class={`min-w-0 flex-1 truncate text-left text-xs font-semibold ${
+            props.active ? "text-foreground" : "text-muted-foreground"
+          }`}
         >
-          <Icon name="server" size={16} color="muted-foreground" />
-          <Text class="text-xs font-semibold text-foreground">连接服务器…</Text>
-        </Button>
+          {props.label}
+        </Text>
       </If>
-      <If when={list().length > 0}>
-        <View class="gap-0.5">
-          <Each of={list()}>
-            {(server) => {
-              const active = () => isRemoteConfigured() && activeId() === server().id;
-              return (
-                <Button
-                  accessibilityLabel={`服务器 ${server().label}${active() ? "，已连接" : ""}`}
-                  onPress={() => {
-                    selectSource(`remote:${server().id}`);
-                    switchTo(REMOTE);
-                  }}
-                  class={`flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out ${
-                    active() ? "bg-secondary" : "hover:bg-row-hover"
-                  } ${focusRing}`}
-                >
-                  <View class="w-6 items-center">
-                    <Icon name="server" size={16} color={active() ? "foreground" : "muted-foreground"} />
-                  </View>
-                  <Text
-                    class={`min-w-0 flex-1 truncate text-left text-xs font-semibold ${
-                      active() ? "text-foreground" : "text-muted-foreground"
-                    }`}
-                  >
-                    {server().label}
-                  </Text>
-                </Button>
-              );
-            }}
-          </Each>
-        </View>
-        <View />
-      </If>
-    </View>
-      </If>
-    </>
+    </Button>
   );
 }
 

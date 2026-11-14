@@ -23,15 +23,16 @@ test("窄侧栏：来源只剩图标，动作仍可达", async () => {
     height: 900,
     storage: { "library:roots": "[]" },
   });
-  // One 曲库 entry and one 加号; the two kinds of source live behind the 加号.
+  // With no source added, the rail's 来源 panel is the 加号 alone.
   await app.waitFor("id:rail-source-add");
   const texts = app.texts();
   expect(texts.includes("本地")).toBe(false);
   expect(texts.some((t) => t.includes("还没有文件夹"))).toBe(false);
   expect(texts.includes("远程")).toBe(false);
-  expect(app.shows("id:rail-source-library")).toBe(true);
+  expect(app.shows("id:source-server")).toBe(false);
+  expect(app.shows("id:source-root")).toBe(false);
   await app.press("id:rail-source-add");
-  // The dialog's tabs are the kinds: jellyfin, navidrome, and a local folder.
+  // The 加号 opens the kind dialog: jellyfin, navidrome, and a local folder.
   await app.waitFor("text:本地路径", { timeout: 5_000 });
   expect(app.shows("text:Jellyfin 密码")).toBe(true);
 }, 60_000);
@@ -43,8 +44,9 @@ test("宽侧栏：来源文字仍在", async () => {
     height: 837,
     storage: { "library:roots": "[]" },
   });
-  await app.waitFor("text:本地");
-  expect(app.texts().includes("远程")).toBe(true);
-  expect(app.shows("id:rail-source-add-folder")).toBe(false);
+  // Wide, the 加号 carries its label and the rows their names; the headings
+  // 本地/远程 are gone — a source row says what it is by its icon and name.
+  await app.waitFor("text:添加来源");
+  expect(app.shows("label:添加来源")).toBe(true);
 }, 60_000);
 
