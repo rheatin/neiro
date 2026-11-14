@@ -214,26 +214,47 @@ effect(() => {
 const REMOTE_PAGE = 200;
 
 /** 一页并入列表；再没到头就发下一页的请求。 */
+/** A refresh collects into this while the cached list stays on screen; the
+ * swap happens when the last page lands, so a re-listing never blanks the
+ * page and never mixes two listings. */
+let freshList: RemoteTrack[] | null = null;
+let lastSyncAt = 0;
+
+/** How long a listing is trusted before the page refreshes it again. */
+const SYNC_TTL_MS = 5 * 60 * 1000;
+
+/** Whether the cached listing is fresh enough to show without asking again. */
+export const remoteIsFresh = (): boolean =>
+  remoteTracks().length > 0 && Date.now() - lastSyncAt < SYNC_TTL_MS;
+
 function handleListed(tracks: RemoteTrack[]): void {
   // 分页期间 `remoteFetching` 必须保持 true：订阅条件 `if (remoteFetching())`
   // 是"这是当前这一轮拉取的页"的标记；第一页就置 false 会把第二页起的所有
   // 页丢掉（曾经只拉到 200 首）。
   remoteLoadingState.set("idle");
   if (tracks.length === 0) {
+    if (freshList !== null && freshList.length > 0) remoteTracks.set(freshList);
+    else if (freshList !== null) remoteTracks.set([]);
+    freshList = null;
+    lastSyncAt = Date.now();
     remoteFetching.set(false);
     finishServerCache();
     return;
   }
-  remoteTracks.update((prev) => [...prev, ...tracks]);
+  if (freshList !== null) freshList.push(...tracks);
   if (tracks.length >= REMOTE_PAGE) {
     try {
-      engine.listRemote(remoteTracks().length, REMOTE_PAGE);
+      engine.listRemote(freshList !== null ? freshList.length : remoteTracks().length, REMOTE_PAGE);
     } catch (error) {
       console.warn("neiro: 下一页远程列表没有发出去:", String(error));
       remoteFetching.set(false);
       finishServerCache();
     }
   } else {
+    // The listing is whole: one swap, so the page reads one listing.
+    if (freshList !== null) remoteTracks.set(freshList);
+    freshList = null;
+    lastSyncAt = Date.now();
     remoteFetching.set(false);
     finishServerCache();
   }
@@ -252,8 +273,10 @@ export function loadRemote(): void {
   // by a request that never answered used to make the page empty forever.
   if (remoteFetching() && remoteLoadingState() === "loading") return;
   remoteFetching.set(true);
-  remoteTracks.set([]);
-  remoteLoadingState.set("loading");
+  // The cached rows stay on screen while this runs; `freshList` replaces them
+  // in one swap when the last page lands.
+  freshList = [];
+  remoteLoadingState.set(remoteTracks().length > 0 ? "idle" : "loading");
   try {
     engine.listRemote(0, REMOTE_PAGE);
   } catch (error) {

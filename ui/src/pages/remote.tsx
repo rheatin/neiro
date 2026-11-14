@@ -16,6 +16,7 @@ import {
   filteredRemoteTracks,
   isFetchingRemote,
   loadRemote,
+  remoteIsFresh,
   playRemote,
   remoteLoadingState,
   remoteQuery,
@@ -117,7 +118,11 @@ export function RemotePage() {
   // list with nothing, and the page used to need a second visit to show songs.
   const retried = signal(false);
   effect(() => {
-    untracked(() => loadRemote());
+    // The cached listing is what the page shows; the server is only asked
+    // again when the cache is empty or past its freshness window.
+    untracked(() => {
+      if (!remoteIsFresh()) loadRemote();
+    });
   });
   effect(() => {
     if (retried()) return;
