@@ -28,7 +28,6 @@ import { ready } from "../../state/engine";
 import { shuffle, shuffleSupported, toggleShuffle } from "../../state/shuffle";
 import { notify } from "../../state/feedback";
 import { Cover } from "../ui/cover";
-import { NowPlayingBadges } from "../ui/format-badges";
 import { Digits } from "../ui/digits";
 import { BarSlider, focusRing, IconButton, PlayButton } from "../ui/controls";
 import type { IconName } from "../ui/icons";
@@ -235,9 +234,6 @@ export function NowPlayingSummary(props: { cover?: number; round?: boolean; open
       <Text class={`line-clamp-1 min-w-0 shrink text-muted-foreground ${props.large ? "text-base" : "text-xs"} ${props.center ? "text-center" : ""}`}>
         {subtitle()}
       </Text>
-      {/* Under the name, in the same alignment as it: a plate belongs to the
-          file, and the file is what this block is about. */}
-      <NowPlayingBadges class={`pt-1 ${props.center ? "justify-center" : ""}`} wrap={false} />
     </View>
   );
   const withCover = () => props.cover !== 0;

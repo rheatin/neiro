@@ -134,7 +134,18 @@ function NowPlayingContent() {
         <NowPlayingSummary large cover={0} center={lyricsOpen()} />
       </View>
       <View style={enter("fadeInUp", 200)}>
-        <SeekBar quiet />
+        {/* Between the two clocks: the sheet's one point equidistant from
+            both ends of the track. */}
+        <SeekBar
+          quiet
+          center={
+            // `self-center`: the plate row would otherwise take the whole slot
+            // and leave its one plate at the slot's left edge.
+            <View class="self-center">
+              <NowPlayingBadges wrap={false} />
+            </View>
+          }
+        />
       </View>
       <View class="flex-row items-center justify-center gap-6" style={enter("fadeInUp", 260)}>
         <TransportControls large quiet />
@@ -179,7 +190,16 @@ function NowPlayingContent() {
             <LyricsPanel large />
           </View>
           <View class="gap-3">
-            <SeekBar quiet />
+            <SeekBar
+          quiet
+          center={
+            // `self-center`: the plate row would otherwise take the whole slot
+            // and leave its one plate at the slot's left edge.
+            <View class="self-center">
+              <NowPlayingBadges wrap={false} />
+            </View>
+          }
+        />
             <View class="flex-row items-center justify-center gap-6">
               <TransportControls large quiet />
               <NowPlayingHeart size={22} />
