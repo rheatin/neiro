@@ -55,7 +55,6 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
     const to = Math.min(lines.length, at + span + 1);
     return lines.slice(from, to).map((line, offset) => ({ line, index: from + offset }));
   };
-  const centred = () => lyrics().synced;
   return (
     <View class={`min-h-24 flex-1 justify-start ${props.large ? "gap-3" : "gap-1.5"}`} accessibilityLabel="歌词">
       {/* In the one-column layout the page *is* the lyrics; a label there would
@@ -76,14 +75,17 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
         }
       >
         <If
-          when={centred()}
+          when={lyrics().synced}
           else={
-            // No timestamps: nothing marks a "now", so the whole text is shown
-            // at one weight rather than pretending the top line is playing.
-            <Scroll class="min-h-0 flex-1" contentClass="gap-1 px-1 pb-2">
+            // No timestamps: the same centred column, every line at one
+            // weight, scrolled by hand. Nothing marks a "now", so nothing
+            // follows the playback — but the panel is the same panel.
+            <Scroll class="min-h-0 flex-1" contentClass="min-h-full flex-col items-center justify-center gap-2 px-1">
               <Each of={lyrics().lines}>
                 {(line) => (
-                  <Text class={`text-left leading-snug ${props.large ? "text-2xl" : "text-sm"} text-muted-foreground`}>
+                  <Text
+                    class={`text-center leading-[1.45] ${props.large ? "text-2xl" : "text-sm"} text-muted-foreground`}
+                  >
                     {line().text}
                   </Text>
                 )}

@@ -32,7 +32,8 @@ import {
   visibleAlbums,
   visibleArtists,
 } from "../state/catalog";
-import { activeSource, allSources, pickAndAddRoot, selectSource } from "../state/sources";
+import { activeSource, allSources, selectSource } from "../state/sources";
+import { openSourceDialog } from "../components/ui/server-dialog";
 import {
   activeRemoteServer,
   remoteAlbumGroups,
@@ -168,17 +169,12 @@ function SourceTabs() {
           </Each>
         </View>
       </Scroll>
-      <View class="flex-row shrink-0 gap-1 pr-1">
+      {/* One entry, the same one the sidebar has: a folder and a server are
+          two answers to "add a source", not two buttons. */}
+      <View class="flex-row shrink-0 pr-1">
         <Button
-          accessibilityLabel="添加文件夹"
-          onPress={() => void pickAndAddRoot()}
-          class={`h-8 w-8 items-center justify-center rounded-full text-muted-foreground transition duration-150 ease-out hover:bg-row-hover ${focusRing}`}
-        >
-          <Icon name="folderPlus" size={15} color="muted-foreground" />
-        </Button>
-        <Button
-          accessibilityLabel="添加服务器"
-          onPress={() => setServerDialogOpen(true)}
+          accessibilityLabel="添加来源"
+          onPress={() => openSourceDialog()}
           class={`h-8 w-8 items-center justify-center rounded-full text-muted-foreground transition duration-150 ease-out hover:bg-row-hover ${focusRing}`}
         >
           <Icon name="plus" size={15} color="muted-foreground" />
