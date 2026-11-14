@@ -895,7 +895,7 @@ int32_t NAE_ComputePeaks(const char* path, uint32_t buckets, NAE_PeaksInfo* info
 // never touches a playback handle; the host calls it on its own worker and owns
 // the cache. `analyzerVersion` belongs in the cache key.
 
-#define NAE_ANALYZER_VERSION 2
+#define NAE_ANALYZER_VERSION 3  // +codecProfile: old cache entries lack it
 
 typedef struct NAE_AnalysisInfo {
     uint32_t structSize;
@@ -957,6 +957,10 @@ typedef struct NAE_AnalysisInfo {
     int32_t lufsValid;
     /** 1 = a 3 s window existed; 0 makes the two fields above meaningless. */
     int32_t lufsShortTermValid;
+    /** FFmpeg's codec profile name ("Dolby Digital Plus + Dolby Atmos" for
+     * E-AC-3 JOC). Empty when the decoder did not name one. Appended at the
+     * end so an older host's smaller structSize still reads every old field. */
+    char codecProfile[64];
 } NAE_AnalysisInfo;
 
 /**

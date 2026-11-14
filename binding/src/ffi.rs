@@ -736,6 +736,7 @@ pub struct NAE_AnalysisInfo {
     pub lufs_valid: i32,
     /// 0 = no 3 s window existed.
     pub lufs_short_term_valid: i32,
+    pub codec_profile: [c_char; 64],
 }
 
 impl Default for NAE_AnalysisInfo {
@@ -789,7 +790,8 @@ const _: () = {
     assert!(offset_of!(NAE_AnalysisInfo, lufs_range) == 1200);
     assert!(offset_of!(NAE_AnalysisInfo, lufs_valid) == 1208);
     assert!(offset_of!(NAE_AnalysisInfo, lufs_short_term_valid) == 1212);
-    assert!(std::mem::size_of::<NAE_AnalysisInfo>() == 1216);
+    assert!(offset_of!(NAE_AnalysisInfo, codec_profile) == 1216);
+    assert!(std::mem::size_of::<NAE_AnalysisInfo>() == 1280);
     // Adjacency pins: adding a field must also update the numbers above.
     assert!(
         offset_of!(NAE_AnalysisInfo, struct_size) + 4
@@ -804,6 +806,10 @@ const _: () = {
     assert!(offset_of!(NAE_AnalysisInfo, metrics_hop_ms) + 4 == offset_of!(NAE_AnalysisInfo, bpm));
     assert!(
         offset_of!(NAE_AnalysisInfo, bpm_confidence) + 8 == offset_of!(NAE_AnalysisInfo, bpm_valid)
+    );
+    assert!(
+        offset_of!(NAE_AnalysisInfo, lufs_short_term_valid) + 4
+            == offset_of!(NAE_AnalysisInfo, codec_profile)
     );
 };
 

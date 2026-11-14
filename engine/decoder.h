@@ -45,6 +45,7 @@ struct StreamInfo {
     // Duration in milliseconds, when the container reports it.
     double duration_ms = 0.0;
     std::string codec;
+    std::string codec_profile;
     // The container's width, in bits per sample: 8, 16, 32, 64, or 0 when the
     // format did not say.
     //

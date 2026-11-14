@@ -594,6 +594,10 @@ bool Decoder::open(const std::string& path, std::string* error, uint32_t outChan
     // break a wrapper exists to absorb.
     const char* name = avcodec_get_name(p.codec->codec_id);
     p.info.codec = name ? name : "unknown";
+    // The codec id alone is `eac3` for both plain DD+ and its Atmos (JOC)
+    // variant; FFmpeg's profile is the field that tells them apart.
+    const char* profile = avcodec_profile_name(p.codec->codec_id, p.codec->profile);
+    p.info.codec_profile = profile ? profile : "";
 
     // 标签。
     //

@@ -5927,6 +5927,8 @@ bool computePeaksFromFile(const std::string& path, uint32_t buckets,
         analysis->bitsPerSample = static_cast<int32_t>(info.bits_per_sample);
         analysis->durationMs = static_cast<int32_t>(info.duration_ms);
         std::snprintf(analysis->codec, sizeof(analysis->codec), "%s", info.codec.c_str());
+        std::snprintf(analysis->codecProfile, sizeof(analysis->codecProfile), "%s",
+                      info.codec_profile.c_str());
         const auto copyTag = [](char* dst, size_t cap, const std::string& src) {
             if (cap == 0) return;
             const size_t n = std::min(cap - 1, src.size());
