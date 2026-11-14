@@ -6,7 +6,7 @@
 // the engine has answered, the panel says it is reading rather than showing an
 // empty box that could be mistaken for "no lyrics".
 
-import { effect, Scroll, Text, token, untracked, View } from "nsh";
+import { effect, Scroll, signal, Text, token, untracked, View } from "nsh";
 import { animateLayoutOn } from "../ui/motion";
 import { player } from "../../state/player";
 import {
@@ -47,6 +47,20 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
     untracked(() => ensureLyrics(path));
   });
   const lyrics = () => trackLyrics();
+  /** How far the reader has scrolled away from the line that is playing: `0`
+   * follows the playback, anything else holds the words where they put them,
+   * so a line that has not been sung yet can be read — and pressed. */
+  const manual = signal(0);
+  let following = "";
+  effect(() => {
+    // A new track starts at its own first line.
+    const path = player().path ?? "";
+    untracked(() => {
+      if (path === following) return;
+      following = path;
+      manual.set(0);
+    });
+  });
   const active = () => activeLine(lyrics().lines, player().positionMs + lyricOffset());
   // Each new active line moves the window by one row; the layout animation is
   // what makes that read as the words sliding rather than jumping.
@@ -62,8 +76,9 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
     // timings: it belongs in the synced layout, centred on its first line.
     // Falling back to the untimed layout made the opening seconds look like a
     // different panel — small, left, two lines.
-    const at = Math.max(active(), 0);
     const span = props.large ? 4 : 3;
+    const centre = Math.max(active(), 0) + manual();
+    const at = Math.max(0, Math.min(lines.length - 1, centre));
     const from = Math.max(0, at - span);
     const to = Math.min(lines.length, at + span + 1);
     return lines.slice(from, to).map((line, offset) => ({ line, index: from + offset }));
@@ -72,12 +87,27 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
     <View
       class={`min-h-24 flex-1 justify-start ${props.large ? "gap-3" : "gap-1.5"}`}
       accessibilityLabel="歌词"
+      onWheel={(e: { delta: { x: number; y: number }; deltaMode: string }) => {
+        if (!lyrics().synced) return;
+        // One notch is one line; a touchpad's points are gathered until they
+        // add up to one, so a slow swipe does not fly through the words.
+        const step = e.deltaMode === "lines" ? e.delta.y : e.delta.y / 24;
+        if (Math.abs(step) < 0.4) return;
+        const lines = lyrics().lines.length;
+        manual.set(Math.max(-lines, Math.min(lines, manual() + Math.sign(step))));
+      }}
       onContextMenu={(e: { pagePosition: { x: number; y: number } }) =>
         openContextMenu(e.pagePosition, [
           { label: lyrics().present ? "换一份歌词…" : "在线搜索歌词…", onSelect: () => setLyricsSearchOpen(true) },
           { label: "写入文件…", onSelect: () => askWriteLyrics(), disabled: !lyrics().present },
           { label: "歌词提前 0.5 秒", onSelect: () => nudgeLyricOffset(-500), separated: true, disabled: !lyrics().synced },
           { label: "歌词延后 0.5 秒", onSelect: () => nudgeLyricOffset(500), disabled: !lyrics().synced },
+          {
+            label: "回到正在唱的一句",
+            onSelect: () => manual.set(0),
+            separated: true,
+            disabled: manual() === 0,
+          },
           {
             label: lyricOffset() === 0 ? "已同步" : `已偏移 ${(lyricOffset() / 1000).toFixed(1)}s，重置`,
             onSelect: () => setLyricOffset(0),
@@ -129,6 +159,9 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
                   const seconds = at();
                   if (seconds === null) return;
                   seek(Math.max(0, seconds * 1000 - lyricOffset()));
+                  // Back to following: the words the listener picked are the
+                  // words playing now.
+                  manual.set(0);
                 };
                 const common = `text-center transition duration-500 ease-out ${
                   props.large ? "leading-[1.45]" : "leading-snug"
