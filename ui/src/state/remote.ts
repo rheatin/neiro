@@ -247,6 +247,18 @@ function finishServerCache(): void {
   cacheVersion.update((v) => v + 1);
 }
 
+let emptyRetry: ReturnType<typeof setTimeout> | null = null;
+
+/** A page that arrived empty is retried once: a server just connected often
+ * answers its first list with nothing. */
+export function retryOnceIfEmpty(): void {
+  if (emptyRetry !== null) return;
+  emptyRetry = setTimeout(() => {
+    emptyRetry = null;
+    loadRemote();
+  }, 1500);
+}
+
 export function loadRemote(): void {
   if (remoteFetching()) return;
   remoteFetching.set(true);
@@ -272,6 +284,9 @@ effect(() => {
   untracked(() => {
     if (page === null) return;
     if (remoteFetching()) handleListed(page);
+    if (!remoteFetching() && remoteTracks().length === 0 && remoteLoadingState() === "ready") {
+      retryOnceIfEmpty();
+    }
   });
 });
 

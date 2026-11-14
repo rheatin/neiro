@@ -414,7 +414,7 @@ function RemoteHomeCard(props: { row: RemoteTrack; index: number }) {
         <If when={row().container}>
           <Text
             accessibilityLabel={`容器 ${row().container}`}
-            class="absolute bottom-1 right-1 rounded-sm bg-muted-foreground px-1 py-0.5 text-[9px] font-mono font-bold lowercase text-background"
+            class="absolute bottom-1 right-1 rounded-sm bg-muted-foreground px-1 py-0.5 text-[9px] font-mono font-bold lowercase text-center text-background" style={{ minWidth: 42 }}
           >
             {row().container.toUpperCase().slice(0, 5)}
           </Text>
