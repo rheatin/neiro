@@ -415,6 +415,7 @@ export interface Backend {
   subscribeVisualFrame(sub: (frame: VisualFrame) => void): () => void;
   scanFolder(root: string): void;
   watchFolder(root: string): void;
+  forgetFolder(root: string): void;
   unwatchFolder(root: string): void;
   setReconcileInterval(seconds: number): void;
   pickFolder(): Promise<string | null>;

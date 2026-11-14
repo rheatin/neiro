@@ -666,6 +666,11 @@ export class Engine implements Backend {
     this.#command((base) => base.watchFolder(root));
   }
 
+  /** Stop watching a folder and delete what was indexed under it. */
+  forgetFolder(root: string): void {
+    this.#command((base) => base.forgetFolder(root));
+  }
+
   unwatchFolder(root: string): void {
     this.#command((base) => base.unwatchFolder(root));
   }

@@ -1806,13 +1806,13 @@ impl Base {
         self.command(&serde_json::json!({ "command": "watch_folder", "root": root }))
     }
 
+    /// Stops reporting changes under `root`; answered on `on_scan`.
     /// Stops reporting changes under `root` and deletes what was indexed under
     /// it; answered on `on_scan`.
     pub fn forget_folder(&self, root: String) -> Result<(), String> {
         self.command(&serde_json::json!({ "command": "forget_folder", "root": root }))
     }
 
-    /// Stops reporting changes under `root`; answered on `on_scan`.
     pub fn unwatch_folder(&self, root: String) -> Result<(), String> {
         self.command(&serde_json::json!({ "command": "unwatch_folder", "root": root }))
     }
