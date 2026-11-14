@@ -159,11 +159,7 @@ export function CardRow(props: { title?: string; items: LibraryItem[]; class?: s
         class="-mx-3" style={{ height: rowHeight(CARD_WIDTH) }}
         contentClass="px-3 pt-1"
       >
-        {(item, index) => (
-          <If when={item()}>
-            {(it) => <Card item={it()} index={index()} wave={wave} />}
-          </If>
-        )}
+        {(item, index) => <Card item={item()} index={index()} wave={wave} />}
       </List>
     </View>
   );

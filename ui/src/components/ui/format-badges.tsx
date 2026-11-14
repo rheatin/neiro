@@ -191,7 +191,10 @@ a   * line to spend turns it off, so two plates never stack. */
       <If when={grade() !== null}>
         <GradeBadge grade={grade()!} />
       </If>
-      <If when={lossless()}>
+      {/* A Hi-Res file is lossless by definition, so the plate beside its
+          grade says nothing. It stays for the CD-and-below case, where it is
+          the only statement about the file's samples. */}
+      <If when={lossless() && grade() === null}>
         <Plate label="LOSSLESS" tone="plain" />
       </If>
       {/* A lossy file is still named: a row of plates that says nothing

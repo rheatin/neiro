@@ -13,11 +13,10 @@ export type Layout = "desktop" | "unsupported";
  * around and between it and the pages. */
 const RAIL_WIDTH = 72;
 const SIDEBAR_WIDE = 274;
-const SIDEBAR_MIDDLE = 228;
 const PANEL_INSET = 2 * (8 + 1);
 const SHELL_GAPS = 3 * 8;
 /** Narrower than this, the desktop's sidebar is a rail. */
-const RAIL = 860;
+const RAIL = 1000;
 /** Wider than this, track lists have room for an album column. */
 const ALBUM_COLUMN = 1100;
 /** With the pages narrower than this, the player bar is compact. */
@@ -47,7 +46,7 @@ export const sidebarShown = () => !sidebarCollapsed();
 
 /** The desktop sidebar's width now, pt (tracked). */
 export const sidebarWidth = () =>
-  !sidebarShown() ? 0 : railSidebar() ? RAIL_WIDTH : windowSize().width < ALBUM_COLUMN ? SIDEBAR_MIDDLE : SIDEBAR_WIDE;
+  !sidebarShown() ? 0 : railSidebar() ? RAIL_WIDTH : SIDEBAR_WIDE;
 
 /** Whether there is room for the album column of track lists (tracked). */
 export const wideTracks = () => layout() === "desktop" && windowSize().width > ALBUM_COLUMN;

@@ -96,7 +96,7 @@ export function RemoteTrackRow(props: { track: RemoteTrack; number: number }) {
       <If when={track().container}>
         <Text
           accessibilityLabel={`容器 ${track().container}`}
-          class="rounded-sm bg-muted-foreground px-1.5 py-0.5 text-[9px] font-bold lowercase text-background"
+          class="rounded-sm bg-muted-foreground px-1.5 py-0.5 text-[9px] font-mono font-bold lowercase text-background"
         >
           {CONTAINER_LABEL(track().container)}
         </Text>

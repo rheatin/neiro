@@ -374,7 +374,7 @@ export function SourceStage(props: {
               as [IN] —[SRC]— [OUT] rather than as two labels with numbers
               drifting beside them. */}
           <View class="min-w-0 flex-1 justify-center">
-            <View class="flex-row flex-wrap items-center" style={{ gap: 4 }}>
+            <View class="flex-row items-center" style={{ gap: 4 }}>
               <RateBox
                 label="IN"
                 value={path() ? formatHz(path()!.sourceRate) : "—"}
