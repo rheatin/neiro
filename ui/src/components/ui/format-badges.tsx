@@ -19,12 +19,17 @@ import { resolvedPath } from "../../state/resolved";
 /** What the source's numbers are worth, as a listener reads it. */
 export type Grade = "HI-RES+" | "HI-RES" | "CD" | "DSD" | "PCM";
 
-/** The grade a source earns: DSD is its own thing; otherwise the higher of
- * rate and depth decides. Plain 16/44.1 is CD; anything above it is Hi-Res. */
+/** The grade a source earns.
+ *
+ * Hi-Res is a *both* claim, which is what the Japan Audio Society's definition
+ * says and what the badges are read as: 24-bit words **and** a rate above the
+ * CD's 44.1 kHz. A 24-bit file at 44.1 kHz carries more headroom, not more
+ * music — it is still a CD's band, and calling it Hi-Res is the kind of
+ * flattery a listener cannot hear. */
 export function gradeOf(rateHz: number, bits: number, dsd: boolean): Grade {
   if (dsd) return "DSD";
   if (rateHz >= 352_800 || bits >= 32) return "HI-RES+";
-  if (rateHz >= 96_000 || bits >= 24) return "HI-RES";
+  if (bits >= 24 && rateHz >= 88_200) return "HI-RES";
   if (rateHz >= 44_100 && bits >= 16) return "CD";
   return "PCM";
 }
@@ -116,7 +121,7 @@ export function GradeBadge(props: { grade: Grade; size?: "sm" | "md" }) {
       }}
       accessibilityLabel={props.grade}
     >
-      <Text class="font-mono text-[9px] font-extrabold tracking-[0.08em]" style={{ color: tone().text }}>
+      <Text class="font-mono text-[9px] font-bold tracking-[0.08em]" style={{ color: tone().text }}>
         {props.grade}
       </Text>
     </View>
@@ -142,7 +147,7 @@ export function MetaChip(props: { label: string; tone?: "solid" | "quiet" }) {
       accessibilityLabel={props.label}
     >
       <Text
-        class={`text-[9px] ${solid ? "font-mono font-bold" : "font-mono font-semibold"}`}
+        class={`text-[9px] ${solid ? "font-mono font-bold" : "font-mono font-bold"}`}
         style={{ color: solid ? token("background") : HARDWARE.textDim }}
       >
         {props.label}

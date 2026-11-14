@@ -193,7 +193,7 @@ export function TextLink(props: { label: string; onPress: () => void; small?: bo
       onPress={props.onPress}
       class={`group self-start rounded-sm ${PRESS} ${PRESSED} active:opacity-70 ${focusRing} ${props.class ?? ""}`}
     >
-      <Text class={`font-semibold text-primary hover:underline ${props.small ? "text-xs" : "text-sm"}`}>{props.label}</Text>
+      <Text class={`font-bold text-primary hover:underline ${props.small ? "text-xs" : "text-sm"}`}>{props.label}</Text>
     </Button>
   );
 }
@@ -275,7 +275,7 @@ function NativeRange(props: { fill: AnimatedValue; quiet: boolean; disabled: boo
 /** A section's title. */
 export function SectionTitle(props: { children: JSX.Element; class?: string }) {
   return (
-    <Text role="header" class={`text-lg font-semibold text-foreground ${props.class ?? ""}`}>
+    <Text role="header" class={`text-lg font-bold text-foreground ${props.class ?? ""}`}>
       {props.children}
     </Text>
   );

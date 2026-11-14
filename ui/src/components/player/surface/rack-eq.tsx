@@ -633,7 +633,7 @@ export function RackEq() {
     <View class="gap-2.5">
       <View class="flex-row items-center gap-1.5">
         <Silkscreen tone="amber">RACK UNIT A</Silkscreen>
-        <Text class="text-[10px] font-semibold uppercase tracking-[0.14em]" style={{ color: HARDWARE.textDim }}>
+        <Text class="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: HARDWARE.textDim }}>
           32-BAND GRAPHIC EQ & INDEPENDENT OPRA ENGINE
         </Text>
         <View class="flex-1" />
@@ -684,7 +684,7 @@ export function RackEq() {
       <RackPresets />
       <View class="gap-1 rounded-lg p-2" style={{ backgroundColor: "rgba(0,0,0,0.28)" }}>
         <View class="flex-row items-center gap-1.5">
-          <Text class="text-[9px] font-semibold uppercase tracking-wider" style={{ color: HARDWARE.textDim }}>
+          <Text class="text-[9px] font-bold uppercase tracking-wider" style={{ color: HARDWARE.textDim }}>
             32-BAND 1/3-OCTAVE FADER MATRIX
           </Text>
           <Text class="font-mono text-[8px]" style={{ color: HARDWARE.textFaint }}>

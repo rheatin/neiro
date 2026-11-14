@@ -48,7 +48,7 @@ export function AlbumsPage() {
         when={remote()}
         else={
       <Scroll class="flex-1" contentClass="px-6 pb-28">
-        <Text role="header" class="pb-6 text-3xl font-extrabold text-foreground" style={enter("fadeInUp")}>
+        <Text role="header" class="pb-6 text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
           专辑
         </Text>
         <If
@@ -79,7 +79,7 @@ export function AlbumsPage() {
         }
       >
       <Scroll class="flex-1" contentClass="px-6 pb-28">
-        <Text role="header" class="pb-6 text-3xl font-extrabold text-foreground" style={enter("fadeInUp")}>
+        <Text role="header" class="pb-6 text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
           专辑
         </Text>
         <If when={remoteLoadingState() === "error" && remoteTracks().length === 0}>

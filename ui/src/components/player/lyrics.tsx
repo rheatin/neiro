@@ -68,7 +68,7 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
           sit under the artist and name what is already obvious. */}
       <If when={!props.hideLabel && lyrics().present}>
         <View class={`flex-row items-center gap-2 ${props.large ? "self-center" : "px-1"}`}>
-          <Text class="text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+          <Text class="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">
             歌词
           </Text>
           <Button
@@ -131,7 +131,7 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
                   <Text
                     class={`text-center transition duration-500 ease-out ${
                       props.large ? "leading-[1.45]" : "leading-snug"
-                    } ${distance() === 0 ? (props.large ? "text-3xl font-semibold" : "text-base font-semibold") : props.large ? "text-2xl" : "text-sm"}`}
+                    } ${distance() === 0 ? (props.large ? "text-3xl font-bold" : "text-base font-bold") : props.large ? "text-2xl" : "text-sm"}`}
                     style={{ opacity: tone().opacity, color: tone().color }}
                   >
                     {row().line.text}

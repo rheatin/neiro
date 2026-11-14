@@ -31,7 +31,7 @@ function QueueRow(props: { path: string; index: number; current: boolean }) {
       </View>
       <Cover path={props.path} size={28} fallback="music" />
       <View class="min-w-0 flex-1 gap-0.5">
-        <Text class={`line-clamp-1 text-xs ${props.current ? "font-semibold text-foreground" : "text-foreground"}`}>
+        <Text class={`line-clamp-1 text-xs ${props.current ? "font-bold text-foreground" : "text-foreground"}`}>
           {track()?.title || props.path.split(/[\\/]/).pop() || "—"}
         </Text>
         <Text class="line-clamp-1 text-[10px] text-muted-foreground">{track()?.artist || "—"}</Text>
@@ -58,7 +58,7 @@ export function QueuePanel() {
   return (
     <View class="w-full gap-2 rounded-(--radius-panel) border border-border bg-card p-3" accessibilityLabel="待播列表">
       <View class="flex-row items-center justify-between">
-        <Text class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">待播</Text>
+        <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">待播</Text>
         <Text class="text-[10px] text-muted-foreground">{rest().length} 首</Text>
       </View>
       <If when={current()}>

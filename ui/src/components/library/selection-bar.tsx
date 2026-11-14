@@ -36,7 +36,7 @@ export function SelectionBar(props: { allPaths: string[]; bottom: number }) {
               <Icon name="check" size={11} color="primary-foreground" />
             </If>
           </View>
-          <Text class="text-xs font-semibold text-foreground">全选</Text>
+          <Text class="text-xs font-bold text-foreground">全选</Text>
         </Button>
         <Text class="text-xs text-muted-foreground">已选 {count()} 首</Text>
       </View>
@@ -48,7 +48,7 @@ export function SelectionBar(props: { allPaths: string[]; bottom: number }) {
         class={`h-7 flex-row items-center gap-1.5 rounded-(--radius) px-2.5 transition duration-150 ease-out hover:bg-muted active:opacity-60 disabled:opacity-40 ${focusRing}`}
       >
         <Icon name="plus" size={14} color="muted-foreground" />
-        <Text class="text-xs font-semibold text-foreground">加入待播</Text>
+        <Text class="text-xs font-bold text-foreground">加入待播</Text>
       </Button>
       <Button
         accessibilityLabel="批量收藏"
@@ -64,7 +64,7 @@ export function SelectionBar(props: { allPaths: string[]; bottom: number }) {
         class={`h-7 flex-row items-center gap-1.5 rounded-(--radius) px-2.5 transition duration-150 ease-out hover:bg-muted active:opacity-60 disabled:opacity-40 ${focusRing}`}
       >
         <Icon name="heart" size={14} color="muted-foreground" />
-        <Text class="text-xs font-semibold text-foreground">收藏</Text>
+        <Text class="text-xs font-bold text-foreground">收藏</Text>
       </Button>
       <Button
         accessibilityLabel="批量添加到曲单"
@@ -77,7 +77,7 @@ export function SelectionBar(props: { allPaths: string[]; bottom: number }) {
         class={`h-7 flex-row items-center gap-1.5 rounded-(--radius) px-2.5 transition duration-150 ease-out hover:bg-muted active:opacity-60 disabled:opacity-40 ${focusRing}`}
       >
         <Icon name="folderPlus" size={14} color="muted-foreground" />
-        <Text class="text-xs font-semibold text-foreground">曲单</Text>
+        <Text class="text-xs font-bold text-foreground">曲单</Text>
       </Button>
       <View class="h-5 w-px bg-border" />
       <ActionButton label="完成" onPress={() => endSelection()} />

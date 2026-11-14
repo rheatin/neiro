@@ -63,7 +63,7 @@ export function LyricsSearchSheet() {
     >
       <View class="h-full flex-col">
         <View class="flex-row items-center justify-between px-5 pt-4 pb-2">
-          <Text class="text-sm font-semibold text-foreground">在线歌词</Text>
+          <Text class="text-sm font-bold text-foreground">在线歌词</Text>
           <Button
             accessibilityLabel="关闭"
             onPress={() => setLyricsSearchOpen(false)}
@@ -111,7 +111,7 @@ export function LyricsSearchSheet() {
               }}
               class={`h-8 flex-row items-center rounded-full bg-foreground px-3 ${focusRing}`}
             >
-              <Text class="text-xs font-semibold text-background">搜索</Text>
+              <Text class="text-xs font-bold text-background">搜索</Text>
             </Button>
           </View>
         </View>
@@ -181,7 +181,7 @@ export function LyricsSearchSheet() {
                           }}
                           class={`h-8 flex-row items-center self-end rounded-full bg-foreground px-3 ${focusRing}`}
                         >
-                          <Text class="text-xs font-semibold text-background">用这份歌词</Text>
+                          <Text class="text-xs font-bold text-background">用这份歌词</Text>
                         </Button>
                       </View>
                     </If>

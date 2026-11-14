@@ -52,7 +52,7 @@ export function PlaylistsPage() {
     <AppPage title="曲单" testID="page-playlists">
       <View class={`flex-1 gap-3 px-6 pt-2 ${pageEnd()}`}>
         <View class="flex-row items-center gap-3">
-          <Text role="header" class="text-3xl font-extrabold text-foreground">
+          <Text role="header" class="text-3xl font-bold text-foreground">
             曲单
           </Text>
           <View class="flex-1" />
@@ -70,7 +70,7 @@ export function PlaylistsPage() {
                 class={`flex-row items-center gap-3 rounded-(--radius) px-3 py-2.5 hover:bg-row-hover active:scale-[0.99] ${focusRing}`}
               >
                 <Icon name="music" size={18} color="muted-foreground" />
-                <Text class="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">{list().name || "—"}</Text>
+                <Text class="min-w-0 flex-1 truncate text-sm font-bold text-foreground">{list().name || "—"}</Text>
                 <Text class="shrink-0 text-xs tabular-nums text-muted-foreground">{list().trackCount}</Text>
               </Button>
             )}
@@ -157,7 +157,7 @@ function CollectionPage(props: { title: string; kind: CollectionKind }) {
                       selected={sortKey() === entry()[0]}
                       onPress={() => sortKey.set(entry()[0])}
                       class={`rounded-(--radius) px-2 py-1 transition duration-150 ease-out ${
-                        sortKey() === entry()[0] ? "bg-secondary font-semibold text-foreground" : "text-muted-foreground hover:bg-row-hover"
+                        sortKey() === entry()[0] ? "bg-secondary font-bold text-foreground" : "text-muted-foreground hover:bg-row-hover"
                       } ${focusRing}`}
                     >
                       <Text class="text-[11px]">{entry()[1]}</Text>
@@ -243,7 +243,7 @@ function UserHeader(props: {
       </View>
       <View class="min-w-0 flex-1 gap-1 self-stretch justify-center">
         <View style={wordsIn}>
-          <Text role="header" class="line-clamp-1 text-3xl font-extrabold text-foreground">
+          <Text role="header" class="line-clamp-1 text-3xl font-bold text-foreground">
             {props.title || "—"}
           </Text>
         </View>

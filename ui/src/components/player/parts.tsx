@@ -228,7 +228,7 @@ export function NowPlayingSummary(props: { cover?: number; round?: boolean; open
   );
   const words = (selectable: boolean) => (
     <View class={`min-w-0 flex-1 gap-0.5 ${props.center ? "items-center" : ""}`} style={wordsIn.style} selectable={selectable}>
-      <Text class={`line-clamp-1 font-semibold text-foreground ${props.large ? "text-3xl font-extrabold" : "text-sm"} ${props.center ? "text-center" : ""}`}>
+      <Text class={`line-clamp-1 font-bold text-foreground ${props.large ? "text-3xl font-bold" : "text-sm"} ${props.center ? "text-center" : ""}`}>
         {title()}
       </Text>
       <Text class={`line-clamp-1 min-w-0 shrink text-muted-foreground ${props.large ? "text-base" : "text-xs"} ${props.center ? "text-center" : ""}`}>

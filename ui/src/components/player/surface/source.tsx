@@ -9,7 +9,7 @@
 // 明确印着 `PPM LEVEL (dBFS)` 和 dB 刻度——看得懂它是读数，不是滑杆。
 
 import { Animated, createAnimatedValue, createMotion, effect, reduceMotion, Text, View } from "nsh";
-import { isLossless, MetaChip, NowPlayingBadges } from "../../ui/format-badges";
+import { codecDisplayName, isLossless, MetaChip, NowPlayingBadges } from "../../ui/format-badges";
 import { HARDWARE, Led, ModuleHeader, Screen, Silkscreen } from "../../ui/hardware";
 import { engine } from "../../../backend/engine";
 import { player } from "../../../state/player";
@@ -166,7 +166,9 @@ function RateBox(props: {
     <View
       class="flex-row items-center gap-2 rounded-md px-2.5"
       style={{
-        width: 92,
+        // Wide enough for the longest rate this shows (`44.1 kHz` at 13pt in
+        // the mono face); at 92 it wrapped and the second line was cut off.
+        width: 108,
         height: 40,
         backgroundImage: amber
           ? "linear-gradient(180deg, rgba(245,166,35,0.22) 0%, rgba(245,166,35,0.07) 55%, rgba(245,166,35,0.03) 100%)"
@@ -191,7 +193,7 @@ function RateBox(props: {
           {props.label}
         </Text>
         <Text
-          class="font-mono text-[13px] font-bold tabular-nums"
+          class="whitespace-nowrap font-mono text-[13px] font-bold tabular-nums"
           style={{ color: amber ? HARDWARE.amberBright : HARDWARE.text }}
         >
           {props.value}
@@ -267,7 +269,7 @@ export function SourceStage(props: {
     // The codec is the engine's own answer; the extension only names the
     // box. A bare extension was wrong for `.m4a`, which carries AAC and ALAC.
     const codec = track().codec;
-    return codec === "" ? ext : `${ext} · ${codec.toUpperCase()}`;
+    return codec === "" ? ext : `${ext} · ${codecDisplayName(codec)}`;
   };
   /** The engine's own bit rate for the stream, in kbps. A container that does
    * not report one (WAV, AIFF) says so rather than showing a zero. */
@@ -306,7 +308,7 @@ export function SourceStage(props: {
     if (container !== "—") {
       const [ext] = container.split(" · ");
       rows.push({ label: ext, tone: "solid" });
-      if (codec !== "") rows.push({ label: codec, tone: "solid" });
+      if (codec !== "") rows.push({ label: codecDisplayName(codec), tone: "solid" });
     }
     rows.push({ label: depthLabel(), tone: "quiet" });
     rows.push({ label: channelLabel(), tone: "quiet" });
@@ -348,7 +350,7 @@ export function SourceStage(props: {
             says about itself on the right — one line, read left to right. */}
         <View class="flex-row items-center gap-2 pb-2.5">
           <Led lit={props.playing} tone="amber" size={7} />
-          <Text class="min-w-0 shrink line-clamp-1 text-[13px] font-semibold" style={{ color: HARDWARE.text }}>
+          <Text class="min-w-0 shrink line-clamp-1 text-[13px] font-bold" style={{ color: HARDWARE.text }}>
             {name()}
           </Text>
           <View class="flex-1" />

@@ -27,7 +27,7 @@ export function EngineDownPage() {
               <View class="h-8 w-[3px] rounded-full bg-muted" />
             </View>
           </View>
-          <Text role="header" class="text-2xl font-extrabold text-foreground">
+          <Text role="header" class="text-2xl font-bold text-foreground">
             引擎未连接
           </Text>
         </View>

@@ -202,7 +202,7 @@ export function MasterBus() {
         >
           <View class="flex-row items-center gap-2">
             <Led lit={bitPerfect()} tone={bitPerfect() ? "emerald" : "amber"} size={9} />
-            <Text class="line-clamp-1 font-mono text-[11px] font-extrabold tracking-[0.14em]" style={{ color: bitPerfect() ? "#34D399" : HARDWARE.text }}>
+            <Text class="line-clamp-1 font-mono text-[11px] font-bold tracking-[0.14em]" style={{ color: bitPerfect() ? "#34D399" : HARDWARE.text }}>
               BIT-PERFECT
             </Text>
           </View>
@@ -217,7 +217,7 @@ export function MasterBus() {
         </Text>
         <If when={bitPerfect()}>
           <View class="rounded px-2 py-1" style={{ backgroundColor: "rgba(16,185,129,0.10)", borderWidth: 1, borderColor: "rgba(16,185,129,0.45)" }}>
-            <Text class="font-mono text-[9px] font-semibold" style={{ color: "#34D399" }}>
+            <Text class="font-mono text-[9px] font-bold" style={{ color: "#34D399" }}>
               ● 整条通路未改动：采样与源一致、独占、音量 100%、所有 DSP 与 OPRA 旁通
             </Text>
           </View>
@@ -232,7 +232,7 @@ export function MasterBus() {
                 borderColor: "rgba(245,166,35,0.45)",
               }}
             >
-              <Text class="font-mono text-[9px] font-semibold" style={{ color: HARDWARE.amberBright }}>
+              <Text class="font-mono text-[9px] font-bold" style={{ color: HARDWARE.amberBright }}>
                 {cause()}
               </Text>
             </View>

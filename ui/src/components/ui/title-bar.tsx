@@ -83,7 +83,7 @@ export function TitleBar(props: { brand?: boolean; children?: JSX.Element }) {
           <Logo size={18} />
           {/* A logotype, not a label: upper case, mono, spaced — the same
               lettering family the console's silkscreen uses. */}
-          <Text class="mr-4 font-mono text-[12px] font-semibold uppercase tracking-[0.3em] text-foreground">
+          <Text class="mr-4 font-mono text-[12px] font-bold uppercase tracking-[0.3em] text-foreground">
             NEIRO
           </Text>
         </If>

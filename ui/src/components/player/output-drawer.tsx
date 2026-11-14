@@ -160,7 +160,7 @@ function OutputStageCard(props: {
           <StageArt body={props.art} size={30} color={activeColor()} />
         </View>
         <View class="min-w-0 gap-0.5">
-          <Text class={`line-clamp-1 text-sm font-semibold ${props.active ? "text-foreground" : "text-muted-foreground"}`}>
+          <Text class={`line-clamp-1 text-sm font-bold ${props.active ? "text-foreground" : "text-muted-foreground"}`}>
             {props.title}
           </Text>
           <Text class={`text-[10px] text-muted-foreground`}>{props.active ? "active" : "bypassed"}</Text>
@@ -209,7 +209,7 @@ function EmptyNote(props: { text: string }) {
 function SectionHeader(props: { title: string; subtitle: string }) {
   return (
     <View class="gap-0.5">
-      <Text role="header" class="text-[11px] font-semibold uppercase tracking-wider text-foreground">
+      <Text role="header" class="text-[11px] font-bold uppercase tracking-wider text-foreground">
         {props.title}
       </Text>
       <Text class="text-[10px] text-muted-foreground">{props.subtitle}</Text>
@@ -411,7 +411,7 @@ function ResamplerPanel() {
   });
   return (
     <View class="gap-1.5">
-      <Text class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Policy</Text>
+      <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Policy</Text>
       <Text class="text-[10px] text-muted-foreground">输出策略（native = 源速率；device = 端点授予；fixed = 指定 96000）</Text>
       <View class="flex-row gap-1">
         <Each of={["native", "device", "fixed"] as PolicyKind[]}>
@@ -435,7 +435,7 @@ function ResamplerPanel() {
                 }
               }}
               class={`min-w-0 flex-1 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out ${
-                chosenPolicy() === kind() ? "bg-secondary font-semibold text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
+                chosenPolicy() === kind() ? "bg-secondary font-bold text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
               } ${focusRing}`}
             >
               <Text class="text-center text-xs">{POLICY_LABEL[kind()]}</Text>
@@ -466,7 +466,7 @@ function ResamplerPanel() {
                 }
               }}
               class={`min-w-0 flex-1 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out ${
-                shareKind() === kind() ? "bg-secondary font-semibold text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
+                shareKind() === kind() ? "bg-secondary font-bold text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
               } ${focusRing}`}
             >
               <Text class="text-center text-xs">{SHARE_LABEL[kind()]}</Text>
@@ -541,7 +541,7 @@ function EqPanel() {
                 preset() === item().name ? "border-primary/60 bg-accent" : "border-border hover:bg-row-hover"
               } ${focusRing}`}
             >
-              <Text class={`text-xs ${preset() === item().name ? "font-semibold text-accent-foreground" : "text-foreground"}`}>
+              <Text class={`text-xs ${preset() === item().name ? "font-bold text-accent-foreground" : "text-foreground"}`}>
                 {item().name}
               </Text>
             </Button>
@@ -591,7 +591,7 @@ function ReplayGainPanel() {
   const settings = engine.settings;
   return (
     <View class="gap-1.5">
-      <Text class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">mode</Text>
+      <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">mode</Text>
       <View class="flex-row gap-1">
         <Each of={[0, 1, 2]}>
           {(mode) => (
@@ -607,7 +607,7 @@ function ReplayGainPanel() {
                 }
               }}
               class={`flex-1 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out ${
-                settings()?.replayGainMode === mode() ? "bg-secondary font-semibold text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
+                settings()?.replayGainMode === mode() ? "bg-secondary font-bold text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
               } ${focusRing}`}
             >
               <Text class="text-center text-xs">{RG_LABEL[mode()]}</Text>
@@ -892,7 +892,7 @@ function BitPerfectMedal() {
             </If>
           </View>
           <View class="items-center gap-0.5">
-            <Text class={`text-sm font-extrabold ${bitPerfect() ? "text-foreground" : "text-muted-foreground"}`}>
+            <Text class={`text-sm font-bold ${bitPerfect() ? "text-foreground" : "text-muted-foreground"}`}>
               bit-perfect {bitPerfect() ? "· lit" : "· off"}
             </Text>
             <If when={reasonText()}>
@@ -1024,7 +1024,7 @@ function QueueStage() {
                   return (
                     <View class={`flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 ${isCurrent ? "bg-accent" : "hover:bg-row-hover"}`}>
                       <Text class="w-4 text-right font-mono text-[11px] text-muted-foreground">{index() + 1}</Text>
-                      <Text class={`min-w-0 flex-1 line-clamp-1 text-xs ${isCurrent ? "font-semibold text-foreground" : "text-foreground"}`}>
+                      <Text class={`min-w-0 flex-1 line-clamp-1 text-xs ${isCurrent ? "font-bold text-foreground" : "text-foreground"}`}>
                         {titleFor(path())}
                       </Text>
                       <If when={isCurrent}>
@@ -1507,7 +1507,7 @@ function OutputContent() {
           <Text class="text-[10px] font-bold uppercase tracking-[0.2em]" style={{ color: HARDWARE.amber }}>
             NEIRO · OUTPUT PATH
           </Text>
-          <Text role="header" class="text-lg font-extrabold text-foreground">
+          <Text role="header" class="text-lg font-bold text-foreground">
             Output 控制台
           </Text>
         </View>

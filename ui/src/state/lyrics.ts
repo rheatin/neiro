@@ -150,7 +150,11 @@ export const lyricsSearchOpen = signal(false);
 
 export function setLyricsSearchOpen(open: boolean): void {
   lyricsSearchOpen.set(open);
-  if (open) startLyricsSearch();
+  if (!open) return;
+  // The previous track's answer is not this track's: opening the sheet starts
+  // a new search and shows nothing of the old one while it runs.
+  lyricsSearch.set({ status: "searching" });
+  startLyricsSearch();
 }
 
 /** What a search asks for. The fields start as the file reports them and the

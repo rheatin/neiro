@@ -124,7 +124,7 @@ function ServerList(props: { onNew: () => void; onEdit: (server: RemoteServer) =
                   style={{ backgroundColor: online(server()) ? token("chart-1") : token("muted-foreground") }}
                 />
                 <View class="min-w-0 flex-1">
-                  <Text class="line-clamp-1 text-sm font-semibold text-foreground">{server().label}</Text>
+                  <Text class="line-clamp-1 text-sm font-bold text-foreground">{server().label}</Text>
                   <Text class="line-clamp-1 text-[11px] text-muted-foreground">
                     {KIND_LABEL[kindOfServer(server())]} · {server().baseUrl}
                   </Text>
@@ -217,7 +217,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       </View>
 
       <View class="gap-2">
-        <Text class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">类型</Text>
+        <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">类型</Text>
         <View class="flex-row gap-1">
           <Each of={KIND_ORDER}>
             {(key) => (
@@ -228,7 +228,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
                   kind() === key() ? "bg-secondary text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
                 } ${focusRing}`}
               >
-                <Text class="line-clamp-1 text-center text-xs font-semibold">{KIND_LABEL[key()]}</Text>
+                <Text class="line-clamp-1 text-center text-xs font-bold">{KIND_LABEL[key()]}</Text>
               </Button>
             )}
           </Each>
@@ -303,7 +303,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
 function Field(props: { label: string; hint?: string; children: JSX.Element }) {
   return (
     <View class="gap-1.5">
-      <Text class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{props.label}</Text>
+      <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">{props.label}</Text>
       <View class="h-10 flex-row items-center gap-2 rounded-(--radius) border border-border bg-secondary px-3 focus-within:border-muted-foreground">
         {props.children}
       </View>

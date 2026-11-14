@@ -71,7 +71,7 @@ export function UnsupportedPage(): JSX.Element {
   return (
     <View class="flex-1 items-center justify-center bg-sidebar px-8">
       <View class="max-w-md gap-3 rounded-(--radius-panel) border border-border bg-card p-8">
-        <Text class="text-xl font-extrabold text-foreground">Neiro 是桌面应用</Text>
+        <Text class="text-xl font-bold text-foreground">Neiro 是桌面应用</Text>
         <Text class="text-sm text-muted-foreground">
           这里是{platform.idiom === "terminal" ? "终端" : "浏览器"}环境。Neiro 通过本机音频引擎播放文件，请用桌面窗口运行（nsh run）。
         </Text>

@@ -135,10 +135,10 @@ function Header(props: {
       </View>
       <View class="min-w-0 flex-1 gap-1 self-stretch justify-center">
         <View style={kindIn}>
-          <Text class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{props.kind}</Text>
+          <Text class="text-xs font-bold uppercase tracking-wider text-muted-foreground">{props.kind}</Text>
         </View>
         <View style={nameIn}>
-          <Text role="header" class="line-clamp-1 text-3xl font-extrabold text-foreground">
+          <Text role="header" class="line-clamp-1 text-3xl font-bold text-foreground">
             {props.title || "—"}
           </Text>
         </View>

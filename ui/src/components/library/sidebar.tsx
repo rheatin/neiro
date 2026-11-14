@@ -264,7 +264,7 @@ function SourceRow(props: {
       </View>
       <If when={!props.compact}>
         <Text
-          class={`min-w-0 flex-1 truncate text-left text-xs font-semibold ${
+          class={`min-w-0 flex-1 truncate text-left text-xs font-bold ${
             props.active ? "text-foreground" : "text-muted-foreground"
           }`}
         >

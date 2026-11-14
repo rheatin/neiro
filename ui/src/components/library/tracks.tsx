@@ -97,7 +97,7 @@ export function TrackRow(props: {
         </View>
         </If>
         <View class="min-w-0 flex-1 gap-0.5">
-          <Text class={`line-clamp-1 text-sm text-foreground ${current() ? "font-semibold" : "font-medium"}`}>
+          <Text class={`line-clamp-1 text-sm text-foreground ${current() ? "font-bold" : "font-medium"}`}>
             {trackTitle(props.track) || "—"}
           </Text>
           <Text class="line-clamp-1 flex-1 text-xs text-muted-foreground">{trackArtist(props.track) || "—"}</Text>
@@ -192,9 +192,9 @@ export function TrackHeader(props: { showAlbum: boolean }) {
     <View class="mx-6 mb-1 h-8 flex-row items-center gap-3 border-b border-border/60 px-3">
       {/* The number column has no heading; 标题 starts where the covers do. */}
       <View class="w-6" />
-      <Text class="flex-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">标题</Text>
+      <Text class="flex-1 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">标题</Text>
       <If when={props.showAlbum}>
-        <Text class="flex-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">专辑</Text>
+        <Text class="flex-1 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">专辑</Text>
       </If>
       <View class="w-12 items-end">
         <Icon name="clock" size={14} color="muted-foreground" />

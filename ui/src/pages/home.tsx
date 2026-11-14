@@ -98,7 +98,7 @@ export function HomePage() {
   return (
     <AppPage title="首页" testID="page-home">
       <Scroll class="flex-1" contentClass={pageEnd()}>
-        <Text role="header" class="px-6 pt-2 pb-4 text-4xl font-extrabold text-foreground" style={enter("fadeInUp")}>
+        <Text role="header" class="px-6 pt-2 pb-4 text-4xl font-bold text-foreground" style={enter("fadeInUp")}>
           {greeting()}
         </Text>
         <SourceTabs />
@@ -146,7 +146,9 @@ function SourceTabs() {
   const activeId = () => activeSource().id;
   return (
     <View class="flex-row items-center gap-1.5 px-3 pb-6">
-      <Scroll horizontal scrollbar={false} style={{ height: 40 }} contentStyle={{ paddingRight: 8 }}>
+      {/* The strip is exactly as tall as a chip: a taller box centred the
+          chips against a shorter button and the + sat a few points low. */}
+      <Scroll horizontal scrollbar={false} style={{ height: 32 }} contentStyle={{ paddingRight: 8 }}>
         <View class="flex-row items-center gap-1.5 px-1">
           <Each of={list()}>
             {(src) => {
@@ -175,9 +177,9 @@ function SourceTabs() {
         <Button
           accessibilityLabel="添加来源"
           onPress={() => openSourceDialog()}
-          class={`h-8 w-8 items-center justify-center rounded-full text-muted-foreground transition duration-150 ease-out hover:bg-row-hover ${focusRing}`}
+          class={`h-8 w-8 shrink-0 items-center justify-center rounded-full p-0 text-muted-foreground transition duration-150 ease-out hover:bg-row-hover ${focusRing}`}
         >
-          <Icon name="plus" size={15} color="muted-foreground" />
+          <Icon name="plus" size={16} color="muted-foreground" />
         </Button>
       </View>
     </View>
@@ -421,7 +423,7 @@ function RemoteHomeCard(props: { row: RemoteTrack; index: number }) {
         </If>
       </View>
       <View class="gap-0.5">
-        <Text class="line-clamp-1 text-sm font-semibold text-foreground">{row().title || "—"}</Text>
+        <Text class="line-clamp-1 text-sm font-bold text-foreground">{row().title || "—"}</Text>
         <Text class="line-clamp-2 text-xs text-muted-foreground">{sub()}</Text>
       </View>
     </Button>
@@ -480,9 +482,9 @@ function MostPlayedCard(props: { row: MostPlayedRow; index: number }) {
         </If>
       </View>
       <View class="gap-0.5">
-        <Text class="line-clamp-1 text-sm font-semibold text-foreground">{trackTitle(track()) || "—"}</Text>
+        <Text class="line-clamp-1 text-sm font-bold text-foreground">{trackTitle(track()) || "—"}</Text>
         <Text class="line-clamp-1 text-xs text-muted-foreground">{trackArtist(track()) || "—"}</Text>
-        <Text class="text-[11px] font-semibold text-liked">{row().playCount} 次播放</Text>
+        <Text class="text-[11px] font-bold text-liked">{row().playCount} 次播放</Text>
       </View>
     </Button>
   );

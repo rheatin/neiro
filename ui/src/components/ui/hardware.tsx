@@ -373,7 +373,7 @@ export function Silkscreen(props: { children: string; tone?: "dim" | "faint" | "
   };
   return (
     <Text
-      class={`text-[9px] font-semibold uppercase tracking-[0.14em] ${props.class ?? ""}`}
+      class={`text-[9px] font-bold uppercase tracking-[0.14em] ${props.class ?? ""}`}
       style={{ color: colour() }}
     >
       {props.children}

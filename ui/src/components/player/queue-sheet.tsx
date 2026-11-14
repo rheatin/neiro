@@ -16,7 +16,7 @@ export function QueueSheet() {
         <View class="flex-row items-center justify-between">
           <Text role="header" class="text-xl font-bold text-foreground">
             待播
-            <Text class="text-xs font-semibold text-muted-foreground"> 播放队列</Text>
+            <Text class="text-xs font-bold text-muted-foreground"> 播放队列</Text>
           </Text>
           <Button
             accessibilityLabel="关闭待播"

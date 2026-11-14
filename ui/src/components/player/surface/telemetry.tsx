@@ -149,7 +149,7 @@ function Telemetry() {
   const figure = (label: string, value: string, tone?: string) => (
     <View class="min-w-0 flex-1 gap-0.5">
       <Silkscreen tone="faint">{label}</Silkscreen>
-      <Text class="line-clamp-1 font-mono text-[10px] font-semibold" style={{ color: tone ?? HARDWARE.text }}>
+      <Text class="line-clamp-1 font-mono text-[10px] font-bold" style={{ color: tone ?? HARDWARE.text }}>
         {value}
       </Text>
     </View>

@@ -40,7 +40,7 @@ export function EqPage() {
             <Text class="text-[10px] font-bold uppercase tracking-[0.2em]" style={{ color: HARDWARE.amber }}>
               02B // RACK UNIT A
             </Text>
-            <Text role="header" class="text-2xl font-extrabold text-foreground">
+            <Text role="header" class="text-2xl font-bold text-foreground">
               32 段机架均衡器
             </Text>
           </View>

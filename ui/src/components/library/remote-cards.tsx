@@ -98,7 +98,7 @@ export function RemoteGroupCard(props: {
         </If>
       </View>
       <View class="gap-0.5">
-        <Text class="line-clamp-1 text-sm font-semibold text-foreground">{item().name || "—"}</Text>
+        <Text class="line-clamp-1 text-sm font-bold text-foreground">{item().name || "—"}</Text>
         <Text class="line-clamp-2 text-xs text-muted-foreground">{item().sub}</Text>
       </View>
     </Button>

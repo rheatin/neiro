@@ -107,7 +107,7 @@ export function TracksPage() {
           )}
           header={() => (
             <View class="px-6 pb-4 pt-2">
-              <Text class="text-3xl font-extrabold text-foreground" style={enter("fadeInUp")}>
+              <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
                 {`${remoteTracks().length} 首远程曲目`}
               </Text>
             </View>
@@ -142,7 +142,7 @@ function TracksHead(props: { count: number; total: number; state: string }) {
         : "";
   return (
     <If when={label()}>
-      <Text class="px-6 pb-4 text-3xl font-extrabold text-foreground" style={enter("fadeInUp")}>
+      <Text class="px-6 pb-4 text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
         {label()}
       </Text>
     </If>

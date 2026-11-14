@@ -142,10 +142,10 @@ export function RemotePage() {
     <AppPage title="远程库" testID="page-remote">
       <Scroll class="flex-1" contentClass="pb-28">
         <View class="px-6 pt-2 pb-2 gap-1" role="header">
-          <Text class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
             {kind() === "navidrome" ? "Navidrome" : "Jellyfin"} · {baseUrl()}
           </Text>
-          <Text class="text-3xl font-extrabold text-foreground" style={enter("fadeInUp")}>
+          <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
             远程库
           </Text>
         </View>
@@ -229,7 +229,7 @@ function PlaylistsStrip() {
   return (
     <If when={playlists().length > 0}>
       <View class="gap-2 px-6 pb-6" accessibilityLabel="远程播放列表">
-        <Text class="flex-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">播放列表</Text>
+        <Text class="flex-1 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">播放列表</Text>
         <Scroll horizontal scrollbar={false} style={{ height: 44 }} contentStyle={{ paddingRight: 24 }}>
           <View class="flex-row gap-2 px-2">
             <Each of={playlists()}>
@@ -239,7 +239,7 @@ function PlaylistsStrip() {
                   class={`flex-row shrink-0 items-center gap-2 rounded-full border border-border bg-secondary px-4 py-2 hover:border-muted-foreground active:scale-[0.98] ${focusRing}`}
                 >
                   <Icon name="folder" size={16} color="muted-foreground" />
-                  <Text class="text-sm font-semibold text-foreground">{list().name || "播放列表"}</Text>
+                  <Text class="text-sm font-bold text-foreground">{list().name || "播放列表"}</Text>
                   <Text class="text-xs text-muted-foreground">{list().trackCount}</Text>
                 </Button>
               )}
@@ -269,8 +269,8 @@ export function RemotePlaylistPage(props: { id: string; name: string }) {
     <AppPage title={props.name || "播放列表"} testID={`page-remote-playlist-${props.id}`}>
       <Scroll class="flex-1" contentClass="pb-28">
         <View class="px-6 pt-2 pb-4 gap-1" role="header">
-          <Text class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">播放列表</Text>
-          <Text class="text-3xl font-extrabold text-foreground" style={enter("fadeInUp")}>
+          <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">播放列表</Text>
+          <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
             {props.name || "—"}
           </Text>
           <If when={rows.length > 0}>
@@ -302,8 +302,8 @@ export function RemoteAlbumPage(props: { serverId: string; album: string; artist
     <AppPage title={props.album} testID="page-remote-album">
       <Scroll class="flex-1" contentClass="pb-28">
         <View class="px-6 pt-2 pb-4 gap-1" role="header">
-          <Text class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">远程专辑</Text>
-          <Text class="text-3xl font-extrabold text-foreground" style={enter("fadeInUp")}>
+          <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">远程专辑</Text>
+          <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
             {props.album || "—"}
           </Text>
           <Text class="text-sm text-muted-foreground">
@@ -334,8 +334,8 @@ export function RemoteArtistPage(props: { serverId: string; artist: string }) {
     <AppPage title={props.artist} testID="page-remote-artist">
       <Scroll class="flex-1" contentClass="pb-28">
         <View class="px-6 pt-2 pb-4 gap-1" role="header">
-          <Text class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">远程歌手</Text>
-          <Text class="text-3xl font-extrabold text-foreground" style={enter("fadeInUp")}>
+          <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">远程歌手</Text>
+          <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
             {props.artist || "—"}
           </Text>
           <Text class="text-sm text-muted-foreground">{rows.length} 首</Text>
