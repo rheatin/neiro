@@ -76,9 +76,6 @@ function NowPlayingContent() {
   // sits above the rest; wide and short, beside it; with too little room
   // for either, the words and controls stay.
   const side = () => windowSize().width >= 640 && windowSize().height < 560;
-  /** Narrow enough that two columns would each be too thin to read: the sheet
-   * stacks instead — words above, the lyrics whole, the controls below. */
-  const narrow = () => windowSize().width < 720;
   const coverSize = () => {
     const { width, height } = windowSize();
     const size = side() ? Math.min(height - 120, width * 0.38) : Math.min(width - 48, height - 400);
@@ -86,7 +83,7 @@ function NowPlayingContent() {
     return fitted < 96 ? 0 : fitted;
   };
   // Rearranging (above / beside / no cover), it glides there.
-  animateLayoutOn(() => `${narrow()}|${side()}|${coverSize() > 0}|${lyricsOpen()}`);
+  animateLayoutOn(() => `${side()}|${coverSize() > 0}|${lyricsOpen()}`);
 
   const track = () => trackForPath(player().path ?? "");
   const openAlbum = () => {
@@ -168,9 +165,6 @@ function NowPlayingContent() {
         </View>
       </View>
       <If
-        when={narrow()}
-        else={
-        <If
         when={side()}
         else={
           // The row is as tall as the sheet; each column decides what to do
@@ -219,28 +213,6 @@ function NowPlayingContent() {
                 <LyricsPanel large />
               </View>
             </If>
-          </View>
-        </View>
-        </If>
-        }
-      >
-        {/* Narrow: one column. The words on top, the lyrics taking what is
-            left, the position and the transport at the foot. The cover is not
-            shown — at this width it would be the only thing competing with
-            the words, and the words are the page. */}
-        <View class="min-h-0 flex-1 gap-3 px-5 pb-5">
-          <View class="gap-0.5 pt-1">
-            <NowPlayingSummary cover={0} center />
-          </View>
-          <View class="min-h-0 flex-1">
-            <LyricsPanel large hideLabel />
-          </View>
-          <View class="gap-3">
-            <SeekBar quiet center={<NowPlayingBadges class="justify-center" wrap={false} />} />
-            <View class="flex-row items-center justify-center gap-5">
-              <TransportControls quiet />
-              <NowPlayingHeart size={20} />
-            </View>
           </View>
         </View>
       </If>

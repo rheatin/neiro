@@ -93,7 +93,7 @@ export function AlbumsPage() {
             when={remoteGroups().length > 0}
             else={<EmptyState title="没有专辑" detail="服务器上的曲目还没有专辑名可分。" />}
           >
-            <RemoteCardsRow variant="album" items={remoteGroups()} />
+            <RemoteCardsRow grid variant="album" items={remoteGroups()} />
           </If>
         </If>
       </Scroll>

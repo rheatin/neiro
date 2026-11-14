@@ -88,7 +88,7 @@ export function ArtistsPage() {
             when={remoteGroups().length > 0}
             else={<EmptyState title="没有歌手" detail="服务器上的曲目还没有歌手名可分。" />}
           >
-            <RemoteCardsRow variant="artist" items={remoteGroups()} />
+            <RemoteCardsRow grid variant="artist" items={remoteGroups()} />
           </If>
         </If>
       </Scroll>

@@ -393,12 +393,11 @@ export function SourceStage(props: {
                     boxShadow: bitPerfect() ? [{ x: 0, y: 0, blur: 6, color: "rgba(245,166,35,0.6)" }] : undefined,
                   }}
                 />
-                {/* The pulse: a highlight crossing the wire, started once and
-                    left to loop while the stream stays bit-perfect. Its slot is
-                    always there — letting it appear and vanish would shift both
-                    plates every time the verdict changed. */}
-                <View class="items-center justify-center" style={{ width: 26, height: 14 }}>
-                  <If when={pulseRunning()}>
+                {/* The pulse rides the wire only when nothing was resampled,
+                    and the SRC box appears only when something was — they can
+                    never both be here, so neither needs a reserved slot. */}
+                <If when={pulseRunning()}>
+                  <View class="items-center justify-center" style={{ width: 26, height: 14 }}>
                     <View style={wirePulse.style}>
                       <View
                         style={{
@@ -410,8 +409,8 @@ export function SourceStage(props: {
                         }}
                       />
                     </View>
-                  </If>
-                </View>
+                  </View>
+                </If>
                 <If when={srcRatio() !== null}>
                   <View
                     class="items-center justify-center rounded"

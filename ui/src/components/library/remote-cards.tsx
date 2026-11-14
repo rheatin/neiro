@@ -32,7 +32,19 @@ export function RemoteCardsRow(props: {
   variant: "album" | "artist";
   items: RemoteCardItem[];
   wave?: ListWave;
+  /** A page that owns the whole screen lays its cards out as a filling grid;
+   * a home-page section keeps them in a row. */
+  grid?: boolean;
 }) {
+  if (props.grid) {
+    return (
+      <View class="grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))" }}>
+        <Each of={props.items} key={(item) => item.key}>
+          {(item, index) => <RemoteGroupCard variant={props.variant} item={item()} index={index()} fill />}
+        </Each>
+      </View>
+    );
+  }
   return (
     <List
       horizontal
@@ -43,7 +55,7 @@ export function RemoteCardsRow(props: {
       snapToAlignment="start"
       decelerationRate="fast"
       scrollbar={false}
-      class="-mx-3 h-[196px]"
+      class="-mx-3 h-[228px]"
       contentClass="px-3 pt-1"
     >
       {(item, index) => <RemoteGroupCard variant={props.variant} item={item()} index={index()} />}
@@ -55,6 +67,8 @@ export function RemoteGroupCard(props: {
   variant: "album" | "artist";
   item: RemoteCardItem;
   index: number;
+  /** Stretched by a grid cell instead of a fixed 160. */
+  fill?: boolean;
 }) {
   const item = () => props.item;
   const cover = () => remoteCoverOf(item().track.id, item().track.coverArt);
@@ -70,7 +84,7 @@ export function RemoteGroupCard(props: {
         }
       }}
       class={`group shrink-0 gap-2 rounded-(--radius-card) p-2.5 transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none motion-reduce:active:scale-100 ${focusRing}`}
-      style={{ width: 160 }}
+      style={props.fill ? { flex: 1 } : { width: 160 }}
     >
       <View
         class={`relative overflow-hidden bg-secondary shadow-md items-center justify-center ${
