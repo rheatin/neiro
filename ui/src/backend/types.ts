@@ -324,6 +324,19 @@ export interface RemoteStatus {
   baseUrl: string;
 }
 
+/** One set of words an online provider offers for a track. `synced` is the
+ * timestamped text (LRC), `plain` the untimed one; a provider has either,
+ * both, or (for a match with no words) neither. */
+export interface LyricsCandidate {
+  id: number;
+  track: string;
+  artist: string;
+  album: string;
+  durationS: number;
+  synced: string | null;
+  plain: string | null;
+}
+
 /** One row of a remote listing. */
 export interface RemoteTrack {
   id: string;

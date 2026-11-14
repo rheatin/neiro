@@ -280,6 +280,22 @@ pub struct RemoteTrack {
     pub cover_art: Option<String>,
 }
 
+/// One set of words an online provider offers for a track.
+///
+/// `synced` is the provider's timestamped text (LRC), `plain` its untimed one.
+/// A provider may have either, both, or neither — an instrumental row has a
+/// name and no words, which is a result the interface shows rather than hides.
+#[derive(Debug, Clone, Default, PartialEq, JsObject)]
+pub struct LyricsCandidate {
+    pub id: f64,
+    pub track: String,
+    pub artist: String,
+    pub album: String,
+    pub duration_s: f64,
+    pub synced: Option<String>,
+    pub plain: Option<String>,
+}
+
 /// A playlist on the server.
 #[derive(Debug, Clone, Default, PartialEq, JsObject)]
 pub struct RemotePlaylist {
@@ -391,6 +407,82 @@ impl<T: CallbackArgs + Clone + 'static> Listeners<T> {
     }
 }
 
+/// LRCLIB's search: the provider that needs no key and returns both timed and
+/// untimed words for the same song.
+///
+/// A miss is an empty list. The interface asks this once per press, so a
+/// provider that is down costs a delay and no error state.
+fn fetch_lyrics(
+    artist: String,
+    title: String,
+    album: Option<String>,
+    duration_s: Option<f64>,
+) -> Vec<LyricsCandidate> {
+    let mut url = String::from("https://lrclib.net/api/search?track_name=");
+    url.push_str(&percent(&title));
+    if !artist.trim().is_empty() {
+        url.push_str("&artist_name=");
+        url.push_str(&percent(&artist));
+    }
+    if let Some(album) = album.as_deref().filter(|album| !album.trim().is_empty()) {
+        url.push_str("&album_name=");
+        url.push_str(&percent(album));
+    }
+    let response = ureq::get(&url)
+        .header("User-Agent", "Neiro/0.1 (https://github.com/rheatin/neiro)")
+        .header("Accept", "application/json")
+        .call();
+    let Ok(mut response) = response else {
+        return Vec::new();
+    };
+    let Ok(body) = response.body_mut().read_to_string() else {
+        return Vec::new();
+    };
+    let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let text = |key: &str| row.get(key).and_then(|v| v.as_str()).map(str::to_string);
+            let duration = row.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            // The caller's length is a hint the row shows, not a filter: a
+            // live version or a remaster differs by minutes and still carries
+            // the words. `duration_s` stays in the signature for that display.
+            let _ = duration_s;
+            let synced = text("syncedLyrics").filter(|t| !t.trim().is_empty());
+            let plain = text("plainLyrics").filter(|t| !t.trim().is_empty());
+            if synced.is_none() && plain.is_none() {
+                return None;
+            }
+            Some(LyricsCandidate {
+                id: row.get("id").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                track: text("trackName").unwrap_or_default(),
+                artist: text("artistName").unwrap_or_default(),
+                album: text("albumName").unwrap_or_default(),
+                duration_s: duration,
+                synced,
+                plain,
+            })
+        })
+        .take(10)
+        .collect()
+}
+
+/// Percent-encoding for a query value. Only the unreserved set survives: a
+/// Japanese title is UTF-8 bytes, and an unencoded `&` would split the query.
+fn percent(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// The state the listeners last heard. Every field has one owner, here.
 #[derive(Default)]
 struct Inner {
@@ -423,6 +515,7 @@ struct Inner {
     on_albums: Listeners<Vec<Album>>,
     on_artists: Listeners<Vec<Artist>>,
     on_search: Listeners<SearchPage>,
+    on_lyrics_found: Listeners<Vec<LyricsCandidate>>,
     on_artwork_list: Listeners<ArtworkList>,
     on_artwork_data: Listeners<ArtworkBytes>,
     on_scan: Listeners<ScanEvent>,
@@ -1807,6 +1900,66 @@ impl Base {
     }
 
     /// Stops reporting changes under `root`; answered on `on_scan`.
+    /// Write a lyrics text into the file's tag families.
+    ///
+    /// `families` are the tag families the container holds (`id3v2`,
+    /// `vorbis_comments`, `mp4_ilst`, ...). The caller picks them from the
+    /// file that is open; a family the container cannot hold is refused by Base
+    /// before anything is written, so a wrong guess reports an error rather
+    /// than silently doing nothing.
+    pub fn write_lyrics(&self, path: String, text: String, families: Vec<String>) -> Result<(), String> {
+        let fields: Vec<serde_json::Value> = families
+            .iter()
+            .map(|family| {
+                serde_json::json!({ "family": family, "key": "Lyrics", "value": text })
+            })
+            .collect();
+        self.command(&serde_json::json!({
+            "command": "write_tags",
+            "path": path,
+            "fields": fields,
+            "policy": { "write": families },
+        }))
+    }
+
+    /// Ask the online lyrics provider for this track's words.
+    ///
+    /// One round trip on a worker thread; answered on `onLyricsFound` with
+    /// every match, so the interface can show which carry timings. A provider
+    /// that cannot be reached answers with an empty list rather than throwing:
+    /// a failed lookup is not a broken app.
+    pub fn search_lyrics(
+        &self,
+        artist: String,
+        title: String,
+        album: Option<String>,
+        duration_s: Option<f64>,
+    ) -> Result<(), String> {
+        if title.trim().is_empty() {
+            return Err("E_LYRICS: 这首歌没有标题，无法搜索。".into());
+        }
+        // Runs on the engine thread: the request is blocking, and the answer
+        // is posted from the same thread Base's own events arrive on. A task
+        // spawned here would land on a thread with no reactive runtime.
+        let candidates = fetch_lyrics(artist, title, album, duration_s);
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.on_lyrics_found.post(&candidates);
+        }
+        Ok(())
+    }
+
+    /// Calls `listener` after every online lyrics search.
+    pub fn on_lyrics_found(
+        &self,
+        #[args(candidates)] listener: Callback<Vec<LyricsCandidate>>,
+    ) -> Stop {
+        self.subscribe(
+            |inner| &mut inner.on_lyrics_found,
+            |_inner| None,
+            listener,
+        )
+    }
+
     /// Stops reporting changes under `root` and deletes what was indexed under
     /// it; answered on `on_scan`.
     pub fn forget_folder(&self, root: String) -> Result<(), String> {

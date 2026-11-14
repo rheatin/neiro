@@ -9,7 +9,14 @@
 import { effect, Scroll, Text, token, untracked, View } from "nsh";
 import { animateLayoutOn } from "../ui/motion";
 import { player } from "../../state/player";
-import { activeLine, ensureLyrics, trackLyrics } from "../../state/lyrics";
+import {
+  activeLine,
+  ensureLyrics,
+  setLyricsSearchOpen,
+  trackLyrics,
+} from "../../state/lyrics";
+import { Button } from "nsh/base";
+import { focusRing } from "../ui/controls";
 
 /** How far a line is from the one playing, as a weight. The line at the
  * centre is the only one at full strength; the two either side of it are
@@ -60,17 +67,35 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
       {/* In the one-column layout the page *is* the lyrics; a label there would
           sit under the artist and name what is already obvious. */}
       <If when={!props.hideLabel && lyrics().present}>
-        <Text class={`text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground ${props.large ? "self-center" : "px-1"}`}>
-          歌词
-        </Text>
+        <View class={`flex-row items-center gap-2 ${props.large ? "self-center" : "px-1"}`}>
+          <Text class="text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+            歌词
+          </Text>
+          <Button
+            accessibilityLabel="换一份歌词"
+            onPress={() => setLyricsSearchOpen(true)}
+            class={`flex-row items-center rounded-full px-2 py-0.5 hover:bg-row-hover ${focusRing}`}
+          >
+            <Text class="text-[10px] text-muted-foreground">换一份</Text>
+          </Button>
+        </View>
       </If>
       <If
         when={lyrics().present}
         else={
-          <View class="flex-1 items-center justify-center">
+          <View class="flex-1 items-center justify-center gap-3">
             <Text class="text-sm text-muted-foreground">
               {player().path ? "这首歌没有内嵌歌词。" : "没有播放中的曲目。"}
             </Text>
+            <If when={player().path !== ""}>
+              <Button
+                accessibilityLabel="在线搜索歌词"
+                onPress={() => setLyricsSearchOpen(true)}
+                class={`h-8 flex-row items-center rounded-full bg-row-hover px-3 ${focusRing}`}
+              >
+                <Text class="text-xs font-medium text-foreground">在线搜索歌词</Text>
+              </Button>
+            </If>
           </View>
         }
       >

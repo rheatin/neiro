@@ -43,8 +43,8 @@
       "chart-3": "#c98a2e",
       "chart-4": "#a1703a",
       "chart-5": "#e2a53f",
-      "font-sans": "\"Segoe UI Variable Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif",
-      "font-mono": "\"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace"
+      "font-sans": "Microsoft YaHei UI",
+      "font-mono": "Consolas"
     },
     "dark": {
       "background": "#0b0c0d",
@@ -82,8 +82,8 @@
       "chart-3": "#f4c98a",
       "chart-4": "#9a6214",
       "chart-5": "#6e4510",
-      "font-sans": "\"Segoe UI Variable Text\", \"Segoe UI\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", system-ui, sans-serif",
-      "font-mono": "\"JetBrains Mono\", \"SF Mono\", ui-monospace, Menlo, Consolas, monospace"
+      "font-sans": "Microsoft YaHei UI",
+      "font-mono": "Consolas"
     }
   }
 }

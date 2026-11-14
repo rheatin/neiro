@@ -10,7 +10,7 @@
 // closes what is there and builds again.
 
 import { signal, Storage, type Accessor } from "nsh";
-import type { TagFields } from "./types";
+import type { LyricsCandidate, TagFields } from "./types";
 import {
   Base,
   type Album as NativeAlbum,
@@ -120,6 +120,8 @@ const playlistEntriesSig = signal<PlaylistEntriesPage | null>(null);
 const mostPlayedSig = signal<MostPlayed[]>([]);
 const remoteStatusSig = signal<RemoteStatus>({ configured: false, kind: null, baseUrl: "" });
 const remoteTracksSig = signal<RemoteTrack[]>([]);
+/** The last online lyrics search's answer. */
+const lyricsFoundSig = signal<LyricsCandidate[]>([]);
 const remotePlaylistsSig = signal<RemotePlaylist[]>([]);
 const remoteItemsSig = signal<RemoteItemsPage | null>(null);
 const remoteFetchedSig = signal<RemoteFetched | null>(null);
@@ -303,6 +305,18 @@ function remoteStatusOf(n: NativeRemoteStatus | undefined | null): RemoteStatus 
   };
 }
 
+function lyricsCandidateOf(n: any): LyricsCandidate {
+  return {
+    id: typeof n?.id === "number" ? n.id : 0,
+    track: text(n?.track),
+    artist: text(n?.artist),
+    album: text(n?.album),
+    durationS: typeof n?.durationS === "number" ? n.durationS : 0,
+    synced: typeof n?.synced === "string" ? n.synced : null,
+    plain: typeof n?.plain === "string" ? n.plain : null,
+  };
+}
+
 function remoteTrackOf(n: NativeRemoteTrack): RemoteTrack {
   return {
     id: text(n.id),
@@ -392,6 +406,7 @@ export class Engine implements Backend {
   #errorSubs = new Set<Fanout<EngineOpError>>();
   #remoteFetchedSubs = new Set<Fanout<RemoteFetched>>();
   #remoteArtworkSubs = new Set<Fanout<RemoteArtwork | null>>();
+  #lyricsFoundSubs = new Set<Fanout<LyricsCandidate[]>>();
 
   /** Builds the Base, absorbs its snapshot through the first listener calls
    * and reports `failed` with the engine's own words when there is none. */
@@ -431,6 +446,10 @@ export class Engine implements Backend {
       base.onError((e) => this.#fan(this.#errorSubs, { op: text(e?.op), message: text(e?.message) })),
       base.onRemote((s) => remoteStatusSig.set(remoteStatusOf(s))),
       base.onRemoteTracks((t) => remoteTracksSig.set((t ?? []).map(remoteTrackOf))),
+      base.onLyricsFound((list) => {
+        lyricsFoundSig.set((list ?? []).map(lyricsCandidateOf));
+        this.#fan(this.#lyricsFoundSubs, lyricsFoundSig());
+      }),
       base.onRemotePlaylists((p) => remotePlaylistsSig.set((p ?? []).map(remotePlaylistOf))),
       base.onRemoteItems((page) => remoteItemsSig.set(remoteItemsOf(page))),
       base.onRemoteFetched((f) => {
@@ -504,6 +523,12 @@ export class Engine implements Backend {
   subscribeArtworkList(sub: Fanout<ArtworkList>): () => void {
     this.#artListSubs.add(sub);
     return () => this.#artListSubs.delete(sub);
+  }
+
+  /** The answer to one online lyrics search, as the provider returned it. */
+  subscribeLyricsFound(sub: Fanout<LyricsCandidate[]>): () => void {
+    this.#lyricsFoundSubs.add(sub);
+    return () => this.#lyricsFoundSubs.delete(sub);
   }
 
   subscribeArtworkData(sub: Fanout<NativeArtworkBytes>): () => void {
@@ -737,6 +762,16 @@ export class Engine implements Backend {
   }
 
   /** One page of the remote index (default 200; a short page ends it). */
+  /** Asks the online provider for this track's words; the answer arrives on
+   * `subscribeLyricsFound`. */
+  searchLyrics(artist: string, title: string, album: string, durationS: number | null): void {
+    this.#command((base) => {
+      const search = (base as any).searchLyrics;
+      if (typeof search !== "function") throw new Error("E_LYRICS: 这个构建没有歌词搜索。");
+      search.call(base, artist, title, album ?? null, durationS ?? null);
+    });
+  }
+
   listRemote(start: number, limit: number): void {
     this.#command((base) => base.listRemote(start, limit));
   }

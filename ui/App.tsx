@@ -13,11 +13,12 @@ import { OutputSheet } from "./src/components/player/output-drawer";
 import { enumerateAtStartup } from "./src/components/player/surface/output-interface";
 import { Toaster } from "./src/components/ui/feedback";
 import { ServerDialog } from "./src/components/ui/server-dialog";
+import { LyricsSearchSheet } from "./src/components/player/lyrics-search";
 import { PlaylistDialogs } from "./src/components/library/playlist-dialogs";
 import { ContextMenuHost } from "./src/components/ui/context-menu";
 import { QueueSheet } from "./src/components/player/queue-sheet";
 import { bumpVolume, next, toggle as togglePlayback } from "./src/state/player";
-import { subscribeLyrics } from "./src/state/lyrics";
+import { loadAdoptedLyrics, subscribeLyrics } from "./src/state/lyrics";
 import { outputOpen, setOutputOpen } from "./src/state/overlays";
 
 // The engine connects once, at the root: a throw becomes the failed
@@ -26,6 +27,8 @@ if (health().status === "starting") engine.connect();
 
 // Lyric text arrives as a tag answer; one subscription carries every answer.
 subscribeLyrics();
+// Words chosen from the online search are remembered across launches.
+void loadAdoptedLyrics();
 
 // Enumerate the endpoints once, while nothing is playing: an endpoint list is a
 // fact about the machine that cannot be read while a stream holds a device.
@@ -78,6 +81,7 @@ function App() {
       <OutputSheet />
       <QueueSheet />
       <ServerDialog />
+      <LyricsSearchSheet />
       <PlaylistDialogs />
       <ContextMenuHost />
       <Toaster bottomOffset={96} />
