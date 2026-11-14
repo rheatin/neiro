@@ -163,13 +163,6 @@ function SourcesPanel(props: { compact?: boolean }) {
           />
         )}
       </Each>
-      <SourceRow
-        compact={compact()}
-        icon="plus"
-        label="添加来源"
-        testID="rail-source-add"
-        onPress={() => openSourceDialog()}
-      />
       <Each of={roots()}>
         {(root) => (
           <SourceRow
@@ -177,10 +170,22 @@ function SourcesPanel(props: { compact?: boolean }) {
             icon="folder"
             label={root()}
             testID="source-root"
-            onPress={() => switchTo(TRACKS)}
+            onPress={() => {
+              // A folder row means that folder, not the whole library.
+              selectSource(`local:${root()}`);
+              switchTo(TRACKS);
+            }}
           />
         )}
       </Each>
+      <SourceRow
+        compact={compact()}
+        icon="plus"
+        label="添加来源"
+        testID="rail-source-add"
+        onPress={() => openSourceDialog()}
+      />
+
     </View>
   );
 }
