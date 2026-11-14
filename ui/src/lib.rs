@@ -1943,6 +1943,35 @@ impl Base {
     /// file that is open; a family the container cannot hold is refused by Base
     /// before anything is written, so a wrong guess reports an error rather
     /// than silently doing nothing.
+    /// Ask the online lyrics provider for this track's words.
+    ///
+    /// The request runs on a thread of its own and answers through the
+    /// channel `lyrics_pump` drains: it blocks for as long as the provider
+    /// takes, and the interface must keep painting while it does.
+    pub fn search_lyrics(
+        &self,
+        artist: String,
+        title: String,
+        album: Option<String>,
+        duration_s: Option<f64>,
+    ) -> Result<(), String> {
+        if title.trim().is_empty() {
+            return Err("E_LYRICS: 这首歌没有标题，无法搜索。".into());
+        }
+        let sender = LYRICS_RESULTS
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        std::thread::spawn(move || {
+            let candidates = fetch_lyrics(artist, title, album, duration_s);
+            if let Some(sender) = sender {
+                let _ = sender.send(candidates);
+            }
+        });
+        Ok(())
+    }
+
     /// Calls `listener` after every online lyrics search.
     pub fn on_lyrics_found(
         &self,

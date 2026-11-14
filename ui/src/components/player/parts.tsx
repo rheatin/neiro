@@ -96,10 +96,13 @@ export function SeekBar(props: { inline?: boolean; quiet?: boolean; center?: JSX
   return (
     <View class="w-full gap-1">
       <View class="flex-row">{slider}</View>
-      <View class="flex-row items-center justify-between gap-3">
-        {elapsedTime()}
+      {/* The clocks take the same width whatever they say: they are the row's
+          two ends, and a `—` on one side would otherwise pull the middle slot
+          off the row's centre — and the centre is the play button's line. */}
+      <View class="flex-row items-center gap-3">
+        <View class="w-12 items-start">{elapsedTime()}</View>
         <View class="min-w-0 flex-1 items-center">{props.center}</View>
-        {totalTime()}
+        <View class="w-12 items-end">{totalTime()}</View>
       </View>
     </View>
   );

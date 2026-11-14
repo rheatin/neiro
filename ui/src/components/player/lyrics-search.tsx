@@ -101,17 +101,27 @@ export function LyricsSearchSheet() {
             <Text class="text-[10px] text-muted-foreground">
               {fields().durationS ? `按 ${clockOf(fields().durationS!)} 的时长比对` : "没有时长，只按文字比对"}
             </Text>
+            {/* The press has to show: a request that answers in a second
+                would otherwise look like a button that does nothing. */}
             <Button
               accessibilityLabel="搜索歌词"
+              disabled={state().status === "searching"}
               onPress={() => {
                 chosen.set(null);
                 // An empty title would ask the provider for nothing; the
                 // track's own fields are the answer in that case.
                 startLyricsSearch(fields().title.trim() === "" ? undefined : fields());
               }}
-              class={`h-8 flex-row items-center rounded-full bg-foreground px-3 ${focusRing}`}
+              class={`h-8 flex-row items-center gap-1.5 rounded-full bg-foreground px-3 ${focusRing} ${
+                state().status === "searching" ? "opacity-70" : ""
+              }`}
             >
-              <Text class="text-xs font-bold text-background">搜索</Text>
+              <If when={state().status === "searching"}>
+                <Spinner label="搜索中" />
+              </If>
+              <Text class="text-xs font-bold text-background">
+                {state().status === "searching" ? "搜索中…" : "搜索"}
+              </Text>
             </Button>
           </View>
         </View>
@@ -127,6 +137,11 @@ export function LyricsSearchSheet() {
           <If when={state().status === "done" && results().length === 0}>
             <View class="px-5 py-4">
               <Text class="text-sm text-muted-foreground">没有找到匹配的歌词。</Text>
+            </View>
+          </If>
+          <If when={state().status === "done" && results().length > 0}>
+            <View class="px-5 pb-1">
+              <Text class="text-[10px] text-muted-foreground">{results().length} 份歌词，按匹配度排列</Text>
             </View>
           </If>
 
