@@ -44,14 +44,18 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
    * every line evenly. */
   const window = () => {
     const lines = lyrics().lines;
-    const at = active();
-    if (!lyrics().synced || at < 0) return lines.map((line, index) => ({ line, index }));
+    if (!lyrics().synced) return lines.map((line, index) => ({ line, index }));
+    // Before the first timestamp nothing is playing yet, but the file *has*
+    // timings: it belongs in the synced layout, centred on its first line.
+    // Falling back to the untimed layout made the opening seconds look like a
+    // different panel — small, left, two lines.
+    const at = Math.max(active(), 0);
     const span = props.large ? 4 : 3;
     const from = Math.max(0, at - span);
     const to = Math.min(lines.length, at + span + 1);
     return lines.slice(from, to).map((line, offset) => ({ line, index: from + offset }));
   };
-  const centred = () => lyrics().synced && active() >= 0;
+  const centred = () => lyrics().synced;
   return (
     <View class={`min-h-24 flex-1 justify-start ${props.large ? "gap-3" : "gap-1.5"}`} accessibilityLabel="歌词">
       {/* In the one-column layout the page *is* the lyrics; a label there would
