@@ -15,10 +15,12 @@ import {
   ensureLyrics,
   lyricOffset,
   nudgeLyricOffset,
+  setLyricOffset,
   setLyricsSearchOpen,
   trackLyrics,
 } from "../../state/lyrics";
 import { seek } from "../../state/player";
+import { openContextMenu } from "../ui/context-menu";
 import { Button } from "nsh/base";
 import { focusRing } from "../ui/controls";
 
@@ -67,47 +69,30 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
     return lines.slice(from, to).map((line, offset) => ({ line, index: from + offset }));
   };
   return (
-    <View class={`min-h-24 flex-1 justify-start ${props.large ? "gap-3" : "gap-1.5"}`} accessibilityLabel="歌词">
-      {/* In the one-column layout the page *is* the lyrics; a label there would
-          sit under the artist and name what is already obvious. */}
-      <If when={!props.hideLabel && lyrics().present}>
-        <View class={`flex-row items-center gap-2 ${props.large ? "self-center" : "px-1"}`}>
-          <Text class="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">
-            歌词
-          </Text>
-          <Button
-            accessibilityLabel="换一份歌词"
-            onPress={() => setLyricsSearchOpen(true)}
-            class={`flex-row items-center rounded-full px-2 py-0.5 hover:bg-row-hover ${focusRing}`}
-          >
-            <Text class="text-[10px] text-muted-foreground">换一份</Text>
-          </Button>
-          {/* The only entry that would change the audio file, so it asks. */}
-          <Button
-            accessibilityLabel="写入歌词到文件"
-            onPress={() => askWriteLyrics()}
-            class={`flex-row items-center rounded-full px-2 py-0.5 hover:bg-row-hover ${focusRing}`}
-          >
-            <Text class="text-[10px] text-muted-foreground">写入文件</Text>
-          </Button>
-        </View>
-      </If>
+    <View
+      class={`min-h-24 flex-1 justify-start ${props.large ? "gap-3" : "gap-1.5"}`}
+      accessibilityLabel="歌词"
+      onContextMenu={(e: { pagePosition: { x: number; y: number } }) =>
+        openContextMenu(e.pagePosition, [
+          { label: lyrics().present ? "换一份歌词…" : "在线搜索歌词…", onSelect: () => setLyricsSearchOpen(true) },
+          { label: "写入文件…", onSelect: () => askWriteLyrics(), disabled: !lyrics().present },
+          { label: "歌词提前 0.5 秒", onSelect: () => nudgeLyricOffset(-500), separated: true, disabled: !lyrics().synced },
+          { label: "歌词延后 0.5 秒", onSelect: () => nudgeLyricOffset(500), disabled: !lyrics().synced },
+          {
+            label: lyricOffset() === 0 ? "已同步" : `已偏移 ${(lyricOffset() / 1000).toFixed(1)}s，重置`,
+            onSelect: () => setLyricOffset(0),
+            disabled: lyricOffset() === 0,
+          },
+        ])
+      }
+    >
       <If
         when={lyrics().present}
         else={
-          <View class="flex-1 items-center justify-center gap-3">
+          <View class="flex-1 items-center justify-center">
             <Text class="text-sm text-muted-foreground">
               {player().path ? "这首歌没有内嵌歌词。" : "没有播放中的曲目。"}
             </Text>
-            <If when={player().path !== ""}>
-              <Button
-                accessibilityLabel="在线搜索歌词"
-                onPress={() => setLyricsSearchOpen(true)}
-                class={`h-8 flex-row items-center rounded-full bg-row-hover px-3 ${focusRing}`}
-              >
-                <Text class="text-xs font-medium text-foreground">在线搜索歌词</Text>
-              </Button>
-            </If>
           </View>
         }
       >
@@ -172,27 +157,6 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
             </Each>
           </View>
         </If>
-      </If>
-      <If when={lyrics().synced && lyrics().present}>
-        <View class="flex-row items-center justify-center gap-2 pt-1">
-          <Button
-            accessibilityLabel="歌词提前半秒"
-            onPress={() => nudgeLyricOffset(-500)}
-            class={`h-6 rounded-full px-2 hover:bg-row-hover ${focusRing}`}
-          >
-            <Text class="font-mono text-[10px] text-muted-foreground">-0.5s</Text>
-          </Button>
-          <Text class="font-mono text-[10px] tabular-nums text-muted-foreground">
-            {lyricOffset() === 0 ? "同步" : `${lyricOffset() > 0 ? "+" : ""}${(lyricOffset() / 1000).toFixed(1)}s`}
-          </Text>
-          <Button
-            accessibilityLabel="歌词延后半秒"
-            onPress={() => nudgeLyricOffset(500)}
-            class={`h-6 rounded-full px-2 hover:bg-row-hover ${focusRing}`}
-          >
-            <Text class="font-mono text-[10px] text-muted-foreground">+0.5s</Text>
-          </Button>
-        </View>
       </If>
     </View>
   );
