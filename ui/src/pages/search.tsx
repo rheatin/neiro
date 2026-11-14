@@ -99,22 +99,6 @@ export function SearchPage() {
   return (
     <AppPage title="搜索" testID="page-search">
       <Scroll class="flex-1" contentClass={pageEnd()}>
-        <View class="flex-row items-center gap-3 px-6 pb-4">
-          <Input
-            value={searchQuery()}
-            onChange={({ value }) => searchQuery.set(value)}
-            placeholder={remote() ? "搜索远程曲目、专辑或歌手" : "搜索曲目、专辑或歌手"}
-            accessibilityLabel={remote() ? "搜索远程库" : "搜索曲库"}
-            returnKeyType="search"
-            submitBehavior="submit"
-            autoFocus
-            class="flex-1 text-base text-foreground"
-            style={{ placeholderColor: token("muted-foreground"), caretColor: token("foreground") }}
-          />
-          <If when={!remote() && searchRunning()}>
-            <Spinner label="搜索中" />
-          </If>
-        </View>
         <If
           when={term()}
           else={
