@@ -879,6 +879,18 @@ impl Library {
         Ok(out)
     }
 
+    /// Delete every file indexed under `root` (and the tags read from them).
+    /// A root the listener removed is not a library any more, so leaving its
+    /// rows behind would keep its tracks in every list and in every count.
+    pub fn forget_root(&mut self, root: &Path) -> Result<usize> {
+        let root_text = path_text(root)?;
+        let tx = self.db.transaction()?;
+        tx.execute("DELETE FROM tags WHERE path IN (SELECT path FROM files WHERE root = ?1)", params![root_text.clone()])?;
+        let removed = tx.execute("DELETE FROM files WHERE root = ?1", params![root_text])?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
     pub fn apply_scan(
         &mut self,
         root: &Path,

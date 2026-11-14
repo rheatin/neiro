@@ -705,6 +705,11 @@ pub enum Command {
     UnwatchFolder {
         root: PathBuf,
     },
+    /// Stop watching a root and forget everything indexed under it: the
+    /// listener removed the folder, so its rows are no longer the library.
+    ForgetFolder {
+        root: PathBuf,
+    },
     /// Reconcile every watched root this often, on the folder worker.
     /// Answered as `reconcile_changed`. Zero turns it off.
     ///

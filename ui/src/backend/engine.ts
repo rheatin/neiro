@@ -152,6 +152,7 @@ function playerOf(n: NativePlayer | null | undefined): Player {
     volume: gain(n.volume),
     bitrateKbps: gain(n.bitrateKbps),
     codec: text(n.codec),
+    codecProfile: text(n.codecProfile),
     trackSerial: num(n.trackSerial),
     resolvedJson: n.resolvedJson ?? null,
   };

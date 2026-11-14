@@ -37,6 +37,9 @@ export interface Player {
   /** The codec the engine decoded with (`flac`, `alac`, `aac`), as the
    * analysis named it. Empty before one arrives. */
   codec: string;
+  /** The codec's profile (`Dolby Digital Plus + Dolby Atmos`, `LC`, …),
+   * empty before the analysis arrives. */
+  codecProfile: string;
   trackSerial: number;
   /** 引擎 `NAE_ResolvedPath` 的 JSON 原文（每次 track 变化/重解析都换），
    * `onResolved` 通道与它同一内容。“输出为什么”的事实（垫帧数、缓冲缝
@@ -66,6 +69,7 @@ export const EMPTY_PLAYER: Player = {
   volume: null,
   bitrateKbps: null,
   codec: "",
+  codecProfile: "",
   trackSerial: 0,
 };
 

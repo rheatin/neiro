@@ -407,6 +407,7 @@ impl Control {
             Command::ScanFolder { root } => self.scan_folder(root),
             Command::WatchFolder { root } => self.watch_folder(root),
             Command::UnwatchFolder { root } => self.unwatch_folder(root),
+            Command::ForgetFolder { root } => self.forget_folder(root),
             Command::SetReconcileInterval { seconds } => self.set_reconcile_interval(seconds),
             Command::SetArtwork {
                 path,
@@ -943,6 +944,22 @@ impl Control {
     fn scan_folder(&mut self, root: PathBuf) {
         if let Err(e) = self.folders.send(crate::scan::Job::Scan { root }) {
             self.emit_error("folders", &e.to_string());
+        }
+    }
+
+    /// Stop watching and drop the root's rows in one step. Two steps would
+    /// leave a window where a scan in flight re-adds what was just deleted.
+    fn forget_folder(&mut self, root: PathBuf) {
+        if let Err(e) = self.folders.send(crate::scan::Job::Unwatch { root: root.clone() }) {
+            self.emit_error("folders", &e.to_string());
+        }
+        match self.library.as_mut() {
+            Some(library) => {
+                if let Err(e) = library.forget_root(&root) {
+                    self.emit_error("library", &e.to_string());
+                }
+            }
+            None => self.emit_error("library", "library not open"),
         }
     }
 

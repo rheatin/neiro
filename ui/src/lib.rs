@@ -60,6 +60,9 @@ pub struct PlayerState {
     /// as the analysis named it. The container in the file's extension is a
     /// guess — `.m4a` carries AAC and ALAC — so this is what the panel shows.
     pub codec: String,
+    /// FFmpeg's codec profile; the fact that separates E-AC-3 JOC (Dolby
+    /// Atmos) from plain DD+ at the same channel count.
+    pub codec_profile: String,
     /// Increments inside one session each time a preloaded track takes
     /// over: how a gapless seam is told from a new stream.
     pub track_serial: f64,
@@ -544,7 +547,8 @@ impl Inner {
                         player.artist = String::new();
                         player.album = String::new();
                         player.bitrate_kbps = None;
-                    player.codec = String::new();
+                        player.codec = String::new();
+                    player.codec_profile = String::new();
                     }
                     player.path = Some(path);
                     player.track_serial += 1.0;
@@ -597,6 +601,7 @@ impl Inner {
                     player.album = analysis.album.clone();
                     player.bitrate_kbps = Some(analysis.bitrate_kbps as f64);
                     player.codec = analysis.codec.clone();
+                    player.codec_profile = analysis.codec_profile.clone();
                     self.on_player.post(player);
                 }
             }
@@ -852,6 +857,7 @@ impl Inner {
             volume: snapshot.render_path.as_ref().map(|path| path.volume),
             bitrate_kbps: Some(analysis.bitrate_kbps as f64),
             codec: analysis.codec.clone(),
+            codec_profile: analysis.codec_profile.clone(),
             track_serial: snapshot.track_serial as f64,
             resolved_json: resolved_json.clone(),
         };
