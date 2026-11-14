@@ -76,7 +76,7 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
           else={
             // No timestamps: nothing marks a "now", so the whole text is shown
             // at one weight rather than pretending the top line is playing.
-            <Scroll class="min-h-0 flex-1" contentClass="gap-1 px-1 pb-2">
+            <Scroll class="min-h-0 flex-1" contentClass="flex-1 justify-between gap-2 px-1 py-2">
               <Each of={lyrics().lines}>
                 {(line) => (
                   <Text class={`text-left leading-snug ${props.large ? "text-2xl" : "text-sm"} text-muted-foreground`}>
