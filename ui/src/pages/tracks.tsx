@@ -12,6 +12,7 @@ import {
   tracksState,
   tracksTotal,
   homeTracks,
+  scopedRoot,
 } from "../state/catalog";
 import { AppPage } from "../components/page";
 import { TrackHeader, TrackRow } from "../components/library/tracks";
@@ -39,9 +40,18 @@ export function TracksPage() {
   const showAlbum = wideTracks();
 
   const remote = () => activeSource().kind === "remote";
+  /** A folder picked in the sidebar is this page's subject: it says which one
+   * instead of claiming to be every track. */
+  const rootName = () => {
+    const root = scopedRoot();
+    if (root === null) return "";
+    const parts = root.split(/[\\/]/).filter((part) => part !== "");
+    return parts.length > 0 ? parts[parts.length - 1] : root;
+  };
+  const title = () => (rootName() === "" ? "全部曲目" : rootName());
   const paths = () => list.map((t) => t.path);
   return (
-    <AppPage title="全部曲目" testID="page-tracks">
+    <AppPage title={title()} testID="page-tracks">
       <If
         when={remote()}
         else={
@@ -52,7 +62,7 @@ export function TracksPage() {
         empty={() => <EmptyTracks state={state} />}
         header={() => (
           <View class="pt-2">
-            <TracksHead count={homeTracks().length} total={tracksTotal()} state={state} />
+            <TracksHead count={homeTracks().length} total={scopedRoot() === null ? tracksTotal() : homeTracks().length} state={scopedRoot() === null ? state : "complete"} />
             <TrackHeader showAlbum={showAlbum} />
           </View>
         )}

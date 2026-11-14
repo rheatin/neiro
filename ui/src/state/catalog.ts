@@ -189,6 +189,9 @@ export function setHomeRoot(root: string | null): void {
   homeRoot.set(root);
 }
 
+/** The root the list is scoped to, or null for the whole library. */
+export const scopedRoot = (): string | null => homeRoot();
+
 /** 首页来源 Tab 的可见层：按 activeSource 的本地根过滤。 */
 export const homeTracks: Accessor<Track[]> = computed(() => {
   const root = homeRoot();
