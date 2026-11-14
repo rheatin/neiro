@@ -143,6 +143,9 @@ export const lyricsSearch = signal<LyricsSearchState>({ status: "idle" });
 
 let searchStop: (() => void) | null = null;
 let searchOpen = false;
+/** The last words asked for, and whether the narrower retry has been spent. */
+let askedFor: LyricsQuery | null = null;
+let fallbackTried = false;
 
 /** Whether the search sheet is up. Opening it starts a search for the track
  * that is playing; a second press on the panel reopens the last answer. */
@@ -197,11 +200,22 @@ export function startLyricsSearch(query?: LyricsQuery): void {
   if (path === "") return;
   if (searchStop === null) {
     searchStop = engine.subscribeLyricsFound((candidates) => {
+      // A provider indexes 「奇洛李维斯回信」 under a name this file does not
+      // carry, and an artist it spells differently: an empty answer with three
+      // fields filled is worth one more ask, with the title alone.
+      const asked = askedFor;
+      if (candidates.length === 0 && !fallbackTried && asked && (asked.artist !== "" || asked.album !== "")) {
+        fallbackTried = true;
+        engine.searchLyrics("", asked.title, "", null);
+        return;
+      }
       lyricsSearch.set({ status: "done", candidates });
     });
   }
   lyricsSearch.set({ status: "searching" });
   const asked = query ?? lyricsQueryForCurrent();
+  askedFor = asked;
+  fallbackTried = false;
   try {
     engine.searchLyrics(asked.artist, asked.title, asked.album, asked.durationS);
   } catch (error) {

@@ -5,8 +5,13 @@
 name: windows
 
 on:
+  # A build per tag, not per push: the trunk moves many times an hour and a
+  # runner per commit says nothing a local check did not.
   push:
+    tags:
+      - "v*"
   pull_request:
+  workflow_dispatch:
 
 jobs:
   verify:

@@ -134,9 +134,7 @@ function NowPlayingContent() {
         <NowPlayingSummary large cover={0} center={lyricsOpen()} />
       </View>
       <View style={enter("fadeInUp", 200)}>
-        {/* The verdict sits between the two clocks: the one place on this
-            sheet that is the same distance from both ends of the track. */}
-        <SeekBar quiet center={<NowPlayingBadges class="justify-center" wrap={false} />} />
+        <SeekBar quiet />
       </View>
       <View class="flex-row items-center justify-center gap-6" style={enter("fadeInUp", 260)}>
         <TransportControls large quiet />
@@ -180,8 +178,8 @@ function NowPlayingContent() {
           <View class="min-h-0 flex-1">
             <LyricsPanel large />
           </View>
-          <View class="gap-4">
-            <SeekBar quiet center={<NowPlayingBadges class="justify-center" wrap={false} />} />
+          <View class="gap-3">
+            <SeekBar quiet />
             <View class="flex-row items-center justify-center gap-6">
               <TransportControls large quiet />
               <NowPlayingHeart size={22} />

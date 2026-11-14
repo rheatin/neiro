@@ -13,12 +13,12 @@ export function LyricsWriteDialog() {
   };
   return (
     <AppDialog open={asked() !== null} onOpenChange={(open) => !open && cancelWriteLyrics()}>
-      <View class="w-100 gap-3 rounded-(--radius-panel) bg-popover p-5">
+      <View class="w-96 gap-3 rounded-(--radius-panel) bg-popover p-5">
         <Text class="text-sm font-bold text-foreground">把歌词写进文件？</Text>
         <Text class="text-xs leading-relaxed text-muted-foreground">
           这份歌词会写进「{name()}」的标签里，覆盖文件里原有的歌词。音频本身不会变。
         </Text>
-        <View class="flex-row items-center justify-end gap-3 pt-1">
+        <View class="flex-row items-center justify-end gap-4 pt-2">
           <TextLink label="取消" onPress={() => cancelWriteLyrics()} />
           <ActionButton label="写入" onPress={() => confirmWriteLyrics()} />
         </View>
