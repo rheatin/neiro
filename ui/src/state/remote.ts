@@ -269,10 +269,20 @@ function handleListed(tracks: RemoteTrack[]): void {
     // A listing that arrives with no items and a password on file is the one
     // case worth repeating: the engine may be holding a token from an older
     // sign-in. Signing in again costs one request and answers the question.
+    // The engine's own config may be a token; the roster is where the
+    // password lives. Either way, one empty answer is worth one fresh
+    // sign-in before the page claims the server is empty.
     const cfg = remoteConfig();
-    if (!emptyHandled && cfg && cfg.kind === "jellyfin" && (cfg.password ?? "") !== "") {
+    const roster = activeRemoteServer();
+    const password = (cfg?.password ?? "") !== "" ? cfg?.password : roster?.password;
+    if (!emptyHandled && cfg && (password ?? "") !== "") {
       emptyHandled = true;
-      void saveRemoteConfig({ ...cfg }).then(() => loadRemote());
+      void saveRemoteConfig({
+        kind: cfg.kind,
+        baseUrl: cfg.baseUrl,
+        user: (cfg.user ?? "") !== "" ? cfg.user : roster?.user ?? "",
+        password,
+      }).then(() => loadRemote());
     }
     if (freshList !== null && freshList.length > 0) remoteTracks.set(freshList);
     else if (freshList !== null) remoteTracks.set([]);

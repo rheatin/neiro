@@ -121,7 +121,7 @@ export function GradeBadge(props: { grade: Grade; size?: "sm" | "md" }) {
       }}
       accessibilityLabel={props.grade}
     >
-      <Text class="font-mono text-[9px] font-bold tracking-[0.08em]" style={{ color: tone().text }}>
+      <Text class="font-mono text-[9px] font-bold" style={{ color: tone().text }}>
         {props.grade}
       </Text>
     </View>
@@ -174,7 +174,7 @@ function Plate(props: { label: string; tone: "amber" | "plain" }) {
       accessibilityLabel={props.label}
     >
       <Text
-        class="font-mono text-[9px] font-bold tracking-[0.08em]"
+        class="font-mono text-[9px] font-bold"
         style={{ color: amber ? HARDWARE.amberBright : HARDWARE.text }}
       >
         {props.label}
