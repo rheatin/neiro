@@ -116,10 +116,12 @@ function LibraryPanel(props: { compact: boolean }) {
   };
   const favCount = favourites().length;
   const likedRow = () => (
-    <View class="flex-row items-center">
-      <NavRow icon="heartFilled" label="喜欢的歌曲" route={LIKED} compact={props.compact} />
+    <View class="w-full flex-row items-center">
+      <View class="min-w-0 flex-1">
+        <NavRow icon="heartFilled" label="喜欢的歌曲" route={LIKED} compact={props.compact} />
+      </View>
       <If when={favCount > 0 && !props.compact}>
-        <Text class="-ml-2 shrink-0 pr-2 text-xs tabular-nums text-muted-foreground">{favCount}</Text>
+        <Text class="shrink-0 pl-1 pr-2 text-xs tabular-nums text-muted-foreground">{favCount}</Text>
       </If>
     </View>
   );
@@ -188,6 +190,7 @@ function SourceIconRow(props: {
 }
 
 function SourcesPanel(props: { compact?: boolean }) {
+  const menu = signal(false);
   const scanning = () => scan().running;
   const count = () => scan().lastAdded;
   const dialog = setServerDialogOpen;
@@ -197,7 +200,7 @@ function SourcesPanel(props: { compact?: boolean }) {
     <>
       <If when={props.compact === true}>
         <View class="gap-1 rounded-(--radius-panel) border border-border bg-card p-2" accessibilityLabel="来源" role="navigation">
-          <SourceIconRow icon="folderPlus" label="添加文件夹" testID="rail-source-add-folder" onPress={() => void addRoot()} />
+          <SourceIconRow icon="folder" label="曲库" testID="rail-source-library" onPress={() => switchTo(TRACKS)} />
           <If when={roots().length > 0}>
             <SourceIconRow
               testID="rail-source-rescan"
@@ -221,7 +224,16 @@ function SourcesPanel(props: { compact?: boolean }) {
               />
             )}
           </Each>
-          <SourceIconRow icon="plus" label="添加服务器" testID="rail-source-add-server" onPress={() => dialog(true)} />
+          <SourceIconRow
+            icon="plus"
+            label="添加来源"
+            testID="rail-source-add"
+            onPress={() => menu.set(!menu())}
+          />
+          <If when={menu()}>
+            <SourceIconRow icon="folderPlus" label="添加文件夹" testID="rail-source-add-folder" onPress={() => void addRoot()} />
+            <SourceIconRow icon="server" label="添加远程库" testID="rail-source-add-server" onPress={() => dialog(true)} />
+          </If>
         </View>
       </If>
       <If when={props.compact !== true}>
@@ -260,11 +272,50 @@ function SourcesPanel(props: { compact?: boolean }) {
         </If>
       </View>
 
+      {/* One entrance for both kinds of source, in both widths. */}
+      <Button
+        accessibilityLabel="添加来源"
+        onPress={() => menu.set(!menu())}
+        class={`flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out hover:bg-row-hover active:scale-[0.98] ${focusRing}`}
+      >
+        <Icon name="plus" size={16} color="muted-foreground" />
+        <Text class="text-xs font-semibold text-foreground">添加</Text>
+      </Button>
+      <If when={menu()}>
+        <View class="gap-0.5 pl-6">
+          <Button
+            accessibilityLabel="添加文件夹"
+            onPress={() => {
+              menu.set(false);
+              void addRoot();
+            }}
+            class={`flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-row-hover ${focusRing}`}
+          >
+            <Icon name="folderPlus" size={14} color="muted-foreground" />
+            <Text class="text-xs text-foreground">文件夹…</Text>
+          </Button>
+          <Button
+            accessibilityLabel="添加远程库"
+            onPress={() => {
+              menu.set(false);
+              dialog(true);
+            }}
+            class={`flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 hover:bg-row-hover ${focusRing}`}
+          >
+            <Icon name="server" size={14} color="muted-foreground" />
+            <Text class="text-xs text-foreground">远程库…</Text>
+          </Button>
+        </View>
+      </If>
+
       {/* The remote half: one row per configured server, the glyph carrying
           the state instead of a coloured dot. */}
       <View class="my-1 h-px" style={{ backgroundColor: token("border") }} />
       <Text class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">远程</Text>
       <If when={list().length === 0}>
+        <Text class="px-2 pb-1 text-xs text-muted-foreground">还没有远程库。用下面的加号连接。</Text>
+      </If>
+      <If when={false}>
         <Button
           accessibilityLabel="连接服务器"
           onPress={() => dialog(true)}

@@ -23,11 +23,15 @@ test("窄侧栏：来源只剩图标，动作仍可达", async () => {
     height: 900,
     storage: { "library:roots": "[]" },
   });
-  await app.waitFor("id:rail-source-add-folder");
+  // One 曲库 entry and one 加号; the two kinds of source live behind the 加号.
+  await app.waitFor("id:rail-source-add");
   const texts = app.texts();
   expect(texts.includes("本地")).toBe(false);
   expect(texts.some((t) => t.includes("还没有文件夹"))).toBe(false);
   expect(texts.includes("远程")).toBe(false);
+  expect(app.shows("id:rail-source-library")).toBe(true);
+  await app.press("id:rail-source-add");
+  await app.waitFor("id:rail-source-add-folder", { timeout: 5_000 });
   expect(app.shows("id:rail-source-add-server")).toBe(true);
   expect(app.shows("label:添加文件夹")).toBe(true);
 }, 60_000);
