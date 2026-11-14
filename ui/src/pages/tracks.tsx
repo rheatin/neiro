@@ -11,7 +11,7 @@ import {
   retryTracks,
   tracksState,
   tracksTotal,
-  visibleTracks,
+  homeTracks,
 } from "../state/catalog";
 import { AppPage } from "../components/page";
 import { TrackHeader, TrackRow } from "../components/library/tracks";
@@ -35,7 +35,7 @@ export function TracksPage() {
   // in on their own).
   const wave = createListWave({ isTop: () => currentRoute().name === "tracks", reenter: rootOpens });
   const state = tracksState();
-  const list = visibleTracks();
+  const list = homeTracks();
   const showAlbum = wideTracks();
 
   const remote = () => activeSource().kind === "remote";
@@ -52,7 +52,7 @@ export function TracksPage() {
         empty={() => <EmptyTracks state={state} />}
         header={() => (
           <View class="pt-2">
-            <TracksHead count={visibleTracks().length} total={tracksTotal()} state={state} />
+            <TracksHead count={homeTracks().length} total={tracksTotal()} state={state} />
             <TrackHeader showAlbum={showAlbum} />
           </View>
         )}
