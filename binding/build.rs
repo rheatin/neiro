@@ -72,6 +72,20 @@ fn main() {
     // is already named for the -l flag.
     println!("cargo:rustc-link-lib=dylib=nae");
 
+    // macOS: `libnae.dylib` has an install name of `@rpath/libnae.dylib`, and a
+    // crate that links it gets no `LC_RPATH` of its own. Without this the
+    // dylib loads nothing beside the engine's build directory — the host
+    // reports `Library not loaded: @rpath/libnae.dylib, no LC_RPATH's found`,
+    // which reads like a missing file rather than a missing search path. The
+    // packaged app rewrites its own copies to `@loader_path`; this is the
+    // build-tree case.
+    if cfg!(target_os = "macos") {
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            build_dir.display()
+        );
+    }
+
     // Put the freshly built library next to the executable that will load it.
     //
     // Without this, the copy in the application's target directory is whatever
