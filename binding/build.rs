@@ -80,8 +80,14 @@ fn main() {
     // packaged app rewrites its own copies to `@loader_path`; this is the
     // build-tree case.
     if cfg!(target_os = "macos") {
+        // `rustc-link-arg` reaches binaries, not the cdylib this crate is;
+        // the flag has to name the artifact kind.
         println!(
-            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            "cargo:rustc-link-arg-cdylib=-Wl,-rpath,{}",
+            build_dir.display()
+        );
+        println!(
+            "cargo:rustc-link-arg-bins=-Wl,-rpath,{}",
             build_dir.display()
         );
     }
