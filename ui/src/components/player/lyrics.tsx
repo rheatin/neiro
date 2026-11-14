@@ -56,7 +56,7 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
     <View class={`min-h-24 flex-1 ${props.large ? "gap-3" : "gap-1.5"}`} accessibilityLabel="歌词">
       {/* In the one-column layout the page *is* the lyrics; a label there would
           sit under the artist and name what is already obvious. */}
-      <If when={!props.hideLabel}>
+      <If when={!props.hideLabel && lyrics().present}>
         <Text class={`text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground ${props.large ? "self-center" : "px-1"}`}>
           歌词
         </Text>
@@ -64,9 +64,11 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
       <If
         when={lyrics().present}
         else={
-          <Text class="px-1 text-sm text-muted-foreground">
-            {player().path ? "这首歌没有内嵌歌词。" : "没有播放中的曲目。"}
-          </Text>
+          <View class="flex-1 items-center justify-center">
+            <Text class="text-sm text-muted-foreground">
+              {player().path ? "这首歌没有内嵌歌词。" : "没有播放中的曲目。"}
+            </Text>
+          </View>
         }
       >
         <If
