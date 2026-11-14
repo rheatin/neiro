@@ -60,8 +60,9 @@ export function NowPlayingSheet() {
 }
 
 function NowPlayingContent() {
-  // Lyrics start hidden. The cover is the switch: press it and the words take
-  // the right half while the rest moves left; press it again and they go.
+  // Lyrics start hidden. The cover is the switch: on a wide window the words
+  // take the right half while the rest moves left; when there is not room for
+  // two columns the cover goes away and the words take the whole sheet.
   // A new track's cover settles in, as in the bar.
   const coverIn = createMotion();
   let shown = player().path;
@@ -73,8 +74,8 @@ function NowPlayingContent() {
   cleanup(() => coverIn.stop());
 
   // Responsive: the cover takes what room the window leaves. Tall, it
-  // sits above the rest; wide and short, beside it; with too little room
-  // for either, the words and controls stay.
+  // sits above the rest; wide and short, beside it; with lyrics open on a
+  // narrow window, it is dropped entirely so the words are never clipped.
   const side = () => windowSize().width >= 640 && windowSize().height < 560;
   const coverSize = () => {
     const { width, height } = windowSize();
@@ -82,8 +83,12 @@ function NowPlayingContent() {
     const fitted = Math.min(320, Math.floor(size));
     return fitted < 96 ? 0 : fitted;
   };
+  /** Two columns need a cover plus a lyric column wide enough to read.
+   * Narrower than this, the words take the whole sheet. */
+  const TWO_COLUMN = 880;
+  const lyricsOnly = () => lyricsOpen() && windowSize().width < TWO_COLUMN;
   // Rearranging (above / beside / no cover), it glides there.
-  animateLayoutOn(() => `${side()}|${coverSize() > 0}|${lyricsOpen()}`);
+  animateLayoutOn(() => `${side()}|${coverSize() > 0}|${lyricsOpen()}|${lyricsOnly()}`);
 
   const track = () => trackForPath(player().path ?? "");
   const openAlbum = () => {
@@ -160,10 +165,31 @@ function NowPlayingContent() {
         <View class="flex-1" />
         <View class="flex-row items-center gap-1">
           <IconButton name="info" label="输出信息" size={22} hint onPress={() => setOutputOpen(true)} />
+          <If when={lyricsOnly()}>
+            <IconButton name="disc" label="显示封面" size={22} onPress={() => lyricsOpen.set(false)} />
+          </If>
           <VolumeControl quiet />
           <LightMenu />
         </View>
       </View>
+      <If when={lyricsOnly()}>
+        {/* Narrow: the words take the whole sheet. A 320pt cover in a 200pt
+            column was overlapping the lines; dropping it leaves the transport
+            so playback stays controllable. */}
+        <View class="min-h-0 flex-1 gap-4 px-8 pb-8">
+          <View class="min-h-0 flex-1">
+            <LyricsPanel large />
+          </View>
+          <View class="gap-4">
+            <SeekBar quiet center={<NowPlayingBadges class="justify-center" wrap={false} />} />
+            <View class="flex-row items-center justify-center gap-6">
+              <TransportControls large quiet />
+              <NowPlayingHeart size={22} />
+            </View>
+          </View>
+        </View>
+      </If>
+      <If when={!lyricsOnly()}>
       <If
         when={side()}
         else={
@@ -209,12 +235,15 @@ function NowPlayingContent() {
           >
             <View class="min-w-0 max-w-140 flex-1 gap-5">{details()}</View>
             <If when={lyricsOpen()}>
-              <View class="min-h-0 flex-1">
+              {/* Stretched, not centred: the words line up with the cover's top
+                  and run down beside it, instead of floating mid-column. */}
+              <View class="min-h-0 flex-1 self-stretch">
                 <LyricsPanel large />
               </View>
             </If>
           </View>
         </View>
+      </If>
       </If>
     </View>
   );

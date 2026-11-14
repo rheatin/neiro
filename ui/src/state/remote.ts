@@ -276,6 +276,7 @@ export function loadRemote(): void {
   // The cached rows stay on screen while this runs; `freshList` replaces them
   // in one swap when the last page lands.
   freshList = [];
+  lastSyncAt = Date.now();
   remoteLoadingState.set(remoteTracks().length > 0 ? "idle" : "loading");
   try {
     engine.listRemote(0, REMOTE_PAGE);

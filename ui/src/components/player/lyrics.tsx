@@ -53,7 +53,7 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
   };
   const centred = () => lyrics().synced && active() >= 0;
   return (
-    <View class={`min-h-24 flex-1 ${props.large ? "gap-3" : "gap-1.5"}`} accessibilityLabel="歌词">
+    <View class={`min-h-24 flex-1 justify-start ${props.large ? "gap-3" : "gap-1.5"}`} accessibilityLabel="歌词">
       {/* In the one-column layout the page *is* the lyrics; a label there would
           sit under the artist and name what is already obvious. */}
       <If when={!props.hideLabel && lyrics().present}>
@@ -76,7 +76,7 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
           else={
             // No timestamps: nothing marks a "now", so the whole text is shown
             // at one weight rather than pretending the top line is playing.
-            <Scroll class="min-h-0 flex-1" contentClass="flex-1 justify-between gap-2 px-1 py-2">
+            <Scroll class="min-h-0 flex-1" contentClass="gap-1 px-1 pb-2">
               <Each of={lyrics().lines}>
                 {(line) => (
                   <Text class={`text-left leading-snug ${props.large ? "text-2xl" : "text-sm"} text-muted-foreground`}>
