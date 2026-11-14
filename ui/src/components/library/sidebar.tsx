@@ -10,13 +10,14 @@ import { Text } from "nsh";
 import { ALBUMS, ARTISTS, LIKED, PLAYLISTS, REMOTE, TRACKS, currentRoot, switchTo, type Route } from "../../nav";
 import { favourites } from "../../state/user-catalog";
 import { setNewPlaylistOpen } from "./playlist-dialogs";
-import { roots } from "../../state/catalog";
+import { removeRoot, roots, setHomeRoot } from "../../state/catalog";
 import type { Playlist } from "../../backend/types";
-import { activeRemoteServer, isRemoteConfigured } from "../../state/remote";
+import { activeRemoteServer, isRemoteConfigured, removeServerById } from "../../state/remote";
 import { selectSource, servers } from "../../state/sources";
 import { openSourceDialog } from "../ui/server-dialog";
 import { Hint, focusRing, LAYER } from "../ui/controls";
 import { iconMotion, Icon, type IconName } from "../ui/icons";
+import { openContextMenu } from "../ui/context-menu";
 
 /** A sidebar row's height and the gap under it (h-11, pb-1): rows are 48pt
  * apart in both panels. */
@@ -154,8 +155,10 @@ function SourcesPanel(props: { compact?: boolean }) {
             compact={compact()}
             icon="server"
             label={server().label}
+            detail={server().baseUrl}
             active={active(server().id)()}
             testID="source-server"
+            onRemove={() => void removeServerById(server().id)}
             onPress={() => {
               selectSource(`remote:${server().id}`);
               switchTo(REMOTE);
@@ -168,11 +171,14 @@ function SourcesPanel(props: { compact?: boolean }) {
           <SourceRow
             compact={compact()}
             icon="folder"
-            label={root()}
+            label={leafOf(root())}
+            detail={root()}
             testID="source-root"
+            onRemove={() => removeRoot(root())}
             onPress={() => {
               // A folder row means that folder, not the whole library.
               selectSource(`local:${root()}`);
+              setHomeRoot(root());
               switchTo(TRACKS);
             }}
           />
@@ -192,19 +198,37 @@ function SourcesPanel(props: { compact?: boolean }) {
 
 /** One source: a server or a folder. Narrow, it is the icon alone — the label
  * lives in the tooltip and the accessible name. */
+/** The last segment of a path: what the folder is called, not where it is. */
+function leafOf(path: string): string {
+  const parts = path.split(/[\\/]/).filter((part) => part !== "");
+  return parts.length > 0 ? parts[parts.length - 1] : path;
+}
+
 function SourceRow(props: {
   compact: boolean;
   icon: IconName;
   label: string;
+  /** The full fact behind a short label: a path, a server URL. */
+  detail?: string;
   onPress: () => void;
+  /** Right click: 移除 this source. */
+  onRemove?: () => void;
   active?: boolean;
   testID?: string;
 }) {
   return (
+    // The menu lives on the wrapper: ButtonProps has no onContextMenu.
+    <View
+      onContextMenu={
+        props.onRemove
+          ? (e) => openContextMenu(e.pagePosition, [{ label: `移除 ${props.label}`, onSelect: props.onRemove! }])
+          : undefined
+      }
+    >
     <Button
       testID={props.testID}
-      accessibilityLabel={props.label}
-      tooltip={props.compact ? <Hint label={props.label} /> : undefined}
+      accessibilityLabel={props.detail ?? props.label}
+      tooltip={<Hint label={props.detail ?? props.label} />}
       onPress={props.onPress}
       class={`h-11 flex-row items-center rounded-(--radius-inset) transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none ${focusRing} ${
         props.active ? "bg-secondary" : ""
@@ -223,6 +247,7 @@ function SourceRow(props: {
         </Text>
       </If>
     </Button>
+    </View>
   );
 }
 
