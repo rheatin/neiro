@@ -7,7 +7,7 @@
 // (the sidebar shows 连接服务器 instead); configured but the server
 // unreachable is the error+重试 state below.
 
-import { Scroll, Text, effect, untracked, View, token } from "nsh";
+import { Scroll, Text, effect, signal, untracked, View, token } from "nsh";
 import { Button, Input } from "nsh/base";
 import { Digits } from "../components/ui/digits";
 import { clock, type RemoteTrack } from "../backend/types";
@@ -113,9 +113,20 @@ export function RemoteTrackRow(props: { track: RemoteTrack; number: number }) {
 
 /** The server's own列表, as the engine answers it. */
 export function RemotePage() {
+  // One retry per visit: a server that has just connected can answer its first
+  // list with nothing, and the page used to need a second visit to show songs.
+  const retried = signal(false);
   effect(() => {
     untracked(() => loadRemote());
-
+  });
+  effect(() => {
+    if (retried()) return;
+    if (remoteLoadingState() === "idle" && remoteTracks().length === 0) {
+      untracked(() => {
+        retried.set(true);
+        loadRemote();
+      });
+    }
   });
   const state = remoteLoadingState();
   const rows = filteredRemoteTracks();
