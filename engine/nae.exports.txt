@@ -36,6 +36,7 @@ _NAE_OpenFileWithBuffer
 _NAE_OpenFileWithRouting
 _NAE_OpenNativeDsd
 _NAE_OpenNativeDsdSink
+_NAE_OutputPolicyDefaults
 _NAE_ParamAt
 _NAE_ParamCount
 _NAE_Pause
@@ -47,6 +48,7 @@ _NAE_PlaySine
 _NAE_Position
 _NAE_PreloadNext
 _NAE_QueryDecodePath
+_NAE_QueryDeviceCaps
 _NAE_QueryEnvelope
 _NAE_QueryReplayGain
 _NAE_QuerySignalPath
