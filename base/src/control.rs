@@ -387,6 +387,7 @@ impl Control {
                 fields,
                 policy,
             } => self.write_tags(path, fields, policy),
+            Command::WriteLyrics { path, text } => self.write_lyrics(path, text),
             Command::ListTagKeys { families } => self.publish_tag_keys(families),
             Command::ListTracks { offset, limit } => self.list_tracks(offset, limit),
             Command::ListAlbums => self.list_albums(),
@@ -1016,6 +1017,21 @@ impl Control {
     /// The policy says what was asked for; the file says what happened. Only
     /// the second is published, and it is read back rather than assumed, so a
     /// subscriber that hears about the write can re-read and agree with it.
+    /// Writes the words, then asks for the tags again: the index is a cache of
+    /// the file, and the panel reads it back from there.
+    fn write_lyrics(&mut self, path: PathBuf, text: String) {
+        self.suppressed.mark(&path);
+        let written = crate::tag::write_lyrics(&path, &text);
+        match &written {
+            Ok(()) => self.suppressed.mark(&path),
+            Err(_) => self.suppressed.clear(&path),
+        }
+        if let Err(e) = written {
+            return self.emit_error("tags", &e.to_string());
+        }
+        self.index_paths(vec![path]);
+    }
+
     fn write_tags(
         &mut self,
         path: PathBuf,

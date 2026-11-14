@@ -342,6 +342,53 @@ export async function loadAdoptedLyrics(): Promise<void> {
   }
 }
 
+// ---- 写回文件 --------------------------------------------------------------
+
+/** The write the listener is being asked to confirm: the text, and where it
+ * would go. Nothing reaches the file before this is answered. */
+export const lyricsWrite = signal<{ path: string; text: string } | null>(null);
+
+/** The current words as the text a file stores: stamps kept when the lines
+ * have them, so a written copy is still in step with the audio. */
+export function lyricsTextOf(lines: LyricLine[]): string {
+  return lines
+    .map((line) => (line.at === null ? line.text : `[${stampOf(line.at)}]${line.text}`))
+    .join("\n");
+}
+
+export function askWriteLyrics(): void {
+  const path = player().path ?? "";
+  const lyrics = trackLyrics();
+  if (path === "" || !lyrics.present) return;
+  lyricsWrite.set({ path, text: lyricsTextOf(lyrics.lines) });
+}
+
+/** The listener answered no: nothing reaches the file. */
+export function cancelWriteLyrics(): void {
+  lyricsWrite.set(null);
+}
+
+/** The listener answered yes. The file is edited; the panel then re-reads it,
+ * because the file is now what the words come from. */
+export function confirmWriteLyrics(): void {
+  const asked = lyricsWrite();
+  lyricsWrite.set(null);
+  if (!asked) return;
+  try {
+    engine.writeLyrics(asked.path, asked.text);
+    const next = new Map(adopted());
+    next.delete(asked.path);
+    adopted.set(next);
+    persistAdopted(next);
+    asking.add(asked.path);
+    const reread = new Map(cache());
+    reread.delete(asked.path);
+    cache.set(reread);
+  } catch (error) {
+    console.warn("neiro: 歌词没有写进文件:", String(error));
+  }
+}
+
 // ---- 手动对轴 --------------------------------------------------------------
 
 /** How far ahead (positive) or behind the words this track's timing sits, in

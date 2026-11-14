@@ -700,7 +700,39 @@ pub fn read_tags(path: &Path) -> Result<TagSnapshot, TagError> {
             });
         }
     }
+    // ID3v2 keeps words in a USLT frame, and the generic tag this loop walks
+    // has no item for it — a lyrics frame written by any program would read
+    // back as absent. MP3 is therefore read twice: once for the tags the
+    // engine indexes, once for the words.
+    if file.file_type() == lofty::file::FileType::Mpeg {
+        if let Some(text) = mp3_lyrics(path) {
+            if !families.contains(&TagFamily::Id3v2) {
+                families.push(TagFamily::Id3v2);
+            }
+            fields.push(TagEntry {
+                family: TagFamily::Id3v2,
+                key: ItemKey::Lyrics,
+                value: ItemValue::Text(text),
+            });
+        }
+    }
     Ok(TagSnapshot { path: path.to_path_buf(), families, fields })
+}
+
+/// An MP3's USLT text, when it has one.
+fn mp3_lyrics(path: &Path) -> Option<String> {
+    use id3::TagLike as _;
+    let tag = id3::Tag::read_from_path(path).ok()?;
+    let frame = tag.get("USLT")?;
+    let id3::frame::Content::Lyrics(lyrics) = frame.content() else {
+        return None;
+    };
+    let text = lyrics.text.clone();
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// The families a file of this kind can carry.
@@ -847,6 +879,50 @@ pub fn write_tags(path: &Path, fields: &[TagField], policy: &TagPolicy) -> Resul
         },
     )?;
     Ok(())
+}
+
+/// Write (or replace) the lyrics text in `path`.
+///
+/// MP3 goes through the `id3` crate: a USLT frame is what carries words in
+/// ID3v2, and `lofty`'s generic tag drops a `Lyrics` item on the way to frames,
+/// so the words would be reported as written while nothing was. The other
+/// containers take the field through the tag writer, where it is ordinary text.
+///
+/// Everything else in the file is preserved: the `id3` crate re-reads the
+/// existing tag and writes it back with the one frame added.
+pub fn write_lyrics(path: &Path, text: &str) -> Result<(), TagError> {
+    let is_mp3 = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("mp3"))
+        .unwrap_or(false);
+    if is_mp3 {
+        use id3::TagLike as _;
+        let mut tag = match id3::Tag::read_from_path(path) {
+            Ok(tag) => tag,
+            // A file with no tag yet is a file to tag, not a failure.
+            Err(id3::Error { kind: id3::ErrorKind::NoTag, .. }) => id3::Tag::new(),
+            Err(e) => return Err(TagError::Backend(format!("{e}"))),
+        };
+        // One lyrics frame per file, so the panel reads back what was
+        // written rather than the first of several.
+        tag.remove("USLT");
+        tag.add_frame(id3::frame::Lyrics {
+            lang: "jpn".to_string(),
+            description: String::new(),
+            text: text.to_string(),
+        });
+        return tag
+            .write_to_path(path, id3::Version::Id3v24)
+            .map_err(|e| TagError::Backend(format!("{e}")));
+    }
+    let fields = vec![TagField::text(ItemKey::Lyrics, text.to_string())];
+    let families = writable_families(path)?;
+    let policy = TagPolicy {
+        write: families.into_iter().collect(),
+        ..TagPolicy::default()
+    };
+    write_tags(path, &fields, &policy)
 }
 
 /// Remove one family from the file being rewritten.

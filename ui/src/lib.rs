@@ -1943,55 +1943,6 @@ impl Base {
     /// file that is open; a family the container cannot hold is refused by Base
     /// before anything is written, so a wrong guess reports an error rather
     /// than silently doing nothing.
-    pub fn write_lyrics(&self, path: String, text: String, families: Vec<String>) -> Result<(), String> {
-        let fields: Vec<serde_json::Value> = families
-            .iter()
-            .map(|family| {
-                serde_json::json!({ "family": family, "key": "Lyrics", "value": text })
-            })
-            .collect();
-        self.command(&serde_json::json!({
-            "command": "write_tags",
-            "path": path,
-            "fields": fields,
-            "policy": { "write": families },
-        }))
-    }
-
-    /// Ask the online lyrics provider for this track's words.
-    ///
-    /// One round trip on a worker thread; answered on `onLyricsFound` with
-    /// every match, so the interface can show which carry timings. A provider
-    /// that cannot be reached answers with an empty list rather than throwing:
-    /// a failed lookup is not a broken app.
-    pub fn search_lyrics(
-        &self,
-        artist: String,
-        title: String,
-        album: Option<String>,
-        duration_s: Option<f64>,
-    ) -> Result<(), String> {
-        if title.trim().is_empty() {
-            return Err("E_LYRICS: 这首歌没有标题，无法搜索。".into());
-        }
-        // The request blocks for as long as the provider takes, and it must
-        // not run on a thread the interface waits for: a search that is slow
-        // froze the whole window. The answer comes back through the channel
-        // `lyrics_pump` drains.
-        let sender = LYRICS_RESULTS
-            .get_or_init(|| std::sync::Mutex::new(None))
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone());
-        std::thread::spawn(move || {
-            let candidates = fetch_lyrics(artist, title, album, duration_s);
-            if let Some(sender) = sender {
-                let _ = sender.send(candidates);
-            }
-        });
-        Ok(())
-    }
-
     /// Calls `listener` after every online lyrics search.
     pub fn on_lyrics_found(
         &self,
@@ -2002,6 +1953,14 @@ impl Base {
             |_inner| None,
             listener,
         )
+    }
+
+    pub fn write_lyrics(&self, path: String, text: String) -> Result<(), String> {
+        self.command(&serde_json::json!({
+            "command": "write_lyrics",
+            "path": path,
+            "text": text,
+        }))
     }
 
     /// Stops reporting changes under `root` and deletes what was indexed under

@@ -762,6 +762,12 @@ export class Engine implements Backend {
   }
 
   /** One page of the remote index (default 200; a short page ends it). */
+  /** Writes words into the file's own tag. The caller confirms first: this
+   * is the only call that changes an audio file. */
+  writeLyrics(path: string, text: string): void {
+    this.#command((base) => (base as any).writeLyrics(path, text));
+  }
+
   /** Asks the online provider for this track's words; the answer arrives on
    * `subscribeLyricsFound`. */
   searchLyrics(artist: string, title: string, album: string, durationS: number | null): void {

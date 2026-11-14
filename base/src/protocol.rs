@@ -582,6 +582,15 @@ pub enum Command {
         fields: Vec<crate::tag::TagFieldValue>,
         policy: crate::tag::TagPolicy,
     },
+    /// Write a lyrics text into the file.
+    ///
+    /// A command of its own rather than a `WriteTags` field: ID3v2 carries
+    /// words in a USLT frame, and the generic tag writer drops that item, so
+    /// the path from a text to a file is different for this one field.
+    WriteLyrics {
+        path: PathBuf,
+        text: String,
+    },
     /// The field names a family accepts, for a control to offer.
     ///
     /// Answered as `tag_keys_changed`. An empty `families` asks for all of

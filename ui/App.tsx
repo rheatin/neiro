@@ -14,6 +14,7 @@ import { enumerateAtStartup } from "./src/components/player/surface/output-inter
 import { Toaster } from "./src/components/ui/feedback";
 import { ServerDialog } from "./src/components/ui/server-dialog";
 import { LyricsSearchSheet } from "./src/components/player/lyrics-search";
+import { LyricsWriteDialog } from "./src/components/player/lyrics-write-dialog";
 import { PlaylistDialogs } from "./src/components/library/playlist-dialogs";
 import { ContextMenuHost } from "./src/components/ui/context-menu";
 import { QueueSheet } from "./src/components/player/queue-sheet";
@@ -82,6 +83,7 @@ function App() {
       <QueueSheet />
       <ServerDialog />
       <LyricsSearchSheet />
+      <LyricsWriteDialog />
       <PlaylistDialogs />
       <ContextMenuHost />
       <Toaster bottomOffset={96} />

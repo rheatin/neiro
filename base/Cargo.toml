@@ -35,6 +35,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # audio-only.
 lofty = "0.25"
 ureq = { version = "3.5.1", features = ["rustls"] }
+# USLT/ID3v2 writing. `lofty` drops a `Lyrics` item when it converts a generic
+# tag to ID3v2 frames, so the one field it cannot write needs a writer that
+# speaks the frame directly.
+id3 = "1"
 notify = "8.2.1"
 md-5 = "0.11.0"
 

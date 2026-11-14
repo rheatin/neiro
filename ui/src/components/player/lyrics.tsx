@@ -11,6 +11,7 @@ import { animateLayoutOn } from "../ui/motion";
 import { player } from "../../state/player";
 import {
   activeLine,
+  askWriteLyrics,
   ensureLyrics,
   lyricOffset,
   nudgeLyricOffset,
@@ -80,6 +81,14 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
             class={`flex-row items-center rounded-full px-2 py-0.5 hover:bg-row-hover ${focusRing}`}
           >
             <Text class="text-[10px] text-muted-foreground">换一份</Text>
+          </Button>
+          {/* The only entry that would change the audio file, so it asks. */}
+          <Button
+            accessibilityLabel="写入歌词到文件"
+            onPress={() => askWriteLyrics()}
+            class={`flex-row items-center rounded-full px-2 py-0.5 hover:bg-row-hover ${focusRing}`}
+          >
+            <Text class="text-[10px] text-muted-foreground">写入文件</Text>
           </Button>
         </View>
       </If>
