@@ -338,3 +338,43 @@ mono 加 `SF Mono`/`Menlo`）——之前只有 `font-mono`，没有 `font-sans`
 Mac 没有凭据，也没有 cmake/ninja/ffmpeg；今晚没做。
 
 `nsh run --target macos` 可以在那台机器上热重载开发。
+
+
+## macOS, the second build (2026-11-14)
+
+The engine builds and plays on macOS from this tree, which it did not before.
+
+```sh
+# 1. The LGPL FFmpeg the engine links (vendor/ffmpeg-lgpl, ~4 minutes)
+./scripts/build-ffmpeg-lgpl-macos.sh
+
+# 2. The engine. The core alone is the default; `libnae.dylib` is behind the
+#    WIP flag and does build.
+cmake -S engine -B engine/build-macos -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DNEIRO_BACKEND=COREAUDIO -DNEIRO_WIP_ENGINE_MACOS=ON
+cmake --build engine/build-macos --target nae
+
+# 3. Base (links against engine/build-macos/libnae.dylib)
+cd base && cargo build --release && cd ..
+
+# 4. The UI, then the bundle
+cd ui && nsh package --target macos && cd ..
+./scripts/bundle-macos-app.sh
+```
+
+Two things had to be fixed for that to work, both of them link-time:
+
+- `engine/nae.exports.txt` omitted `NAE_QueryDeviceCaps` and
+  `NAE_OutputPolicyDefaults`, so the dylib exported neither and Base failed with
+  "undefined symbols for architecture arm64". A symbol the export list leaves
+  out is not a build error in C — it is a missing symbol in Rust.
+- `binding/build.rs` gave the crate no `LC_RPATH`, and `libnae.dylib` has an
+  install name of `@rpath/libnae.dylib`. The dylib loaded nothing:
+  "Library not loaded ... no LC_RPATH's found". The flag has to be
+  `rustc-link-arg-cdylib`; `rustc-link-arg` reaches binaries only.
+
+Proof, on the Mac: `engine/build-macos/macos_play_check /tmp/tone.wav` prints
+`position 0.000 -> 2.107 s` and `playback check passed`; a headless app open
+reports `engine down page: false` and lists the shell pages; the packaged
+`Neiro.app` launches with `libneiro_base.dylib`, `libnae.dylib` and the FFmpeg
+dylibs beside it, all references rewritten to `@loader_path`.
