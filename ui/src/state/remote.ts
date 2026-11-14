@@ -163,6 +163,13 @@ export const activeRemoteServer = computed<RemoteServer | null>(() => {
 
 /** 激活一台服务器：配置引擎（等 remote_changed）→ 重拉列表。已连同一台
  * （baseUrl/kind/user 全同）时只重拉，不重复下发配置。 */
+/** Re-sends the server's credentials to the engine and lists again: what a
+ * listener wants from 重新连接, without editing anything. */
+export async function reconnectServer(serverId: string): Promise<void> {
+  await activateServer(serverId);
+  if (remoteTracks().length === 0) loadRemote();
+}
+
 export async function activateServer(serverId: string): Promise<void> {
   const server = servers().find((s) => s.id === serverId);
   if (!server) {
@@ -240,6 +247,10 @@ const REMOTE_PAGE = 200;
  * swap happens when the last page lands, so a re-listing never blanks the
  * page and never mixes two listings. */
 let freshList: RemoteTrack[] | null = null;
+/** One re-sign-in per session after an empty answer: a token left over from an
+ * earlier sign-in can belong to another account on the same server, and its
+ * listing is empty rather than refused. */
+let emptyHandled = false;
 let lastSyncAt = 0;
 
 /** How long a listing is trusted before the page refreshes it again. */
@@ -255,6 +266,14 @@ function handleListed(tracks: RemoteTrack[]): void {
   // 页丢掉（曾经只拉到 200 首）。
   remoteLoadingState.set("idle");
   if (tracks.length === 0) {
+    // A listing that arrives with no items and a password on file is the one
+    // case worth repeating: the engine may be holding a token from an older
+    // sign-in. Signing in again costs one request and answers the question.
+    const cfg = remoteConfig();
+    if (!emptyHandled && cfg && cfg.kind === "jellyfin" && (cfg.password ?? "") !== "") {
+      emptyHandled = true;
+      void saveRemoteConfig({ ...cfg }).then(() => loadRemote());
+    }
     if (freshList !== null && freshList.length > 0) remoteTracks.set(freshList);
     else if (freshList !== null) remoteTracks.set([]);
     freshList = null;
@@ -291,6 +310,8 @@ function finishServerCache(): void {
 }
 
 export function loadRemote(): void {
+  // A new listing is a new question; the re-sign-in is allowed again.
+  emptyHandled = false;
   // Only a request that is still in flight blocks a new one. A flag left set
   // by a request that never answered used to make the page empty forever.
   if (remoteFetching() && remoteLoadingState() === "loading") return;

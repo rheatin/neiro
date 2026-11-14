@@ -19,17 +19,19 @@ import { isFavourite, toggleFavourite } from "../../state/user-catalog";
 function PlaybarHeart() {
   const path = () => player().path ?? "";
   const liked = () => isFavourite(path());
+  // Always drawn: a heart that appears when playback starts moves the
+  // transport under the pointer. Greyed and unpressed is the honest state
+  // when there is nothing to like.
   return (
-    <If when={hasTrack()}>
-      <IconButton
-        name={liked() ? "heartFilled" : "heart"}
-        label={liked() ? "取消收藏" : "收藏"}
-        pressed={liked()}
-        pressedColor="liked"
-        size={18}
-        onPress={() => toggleFavourite(path())}
-      />
-    </If>
+    <IconButton
+      name={liked() ? "heartFilled" : "heart"}
+      label={liked() ? "取消收藏" : "收藏"}
+      pressed={liked()}
+      pressedColor="liked"
+      size={18}
+      disabled={!hasTrack()}
+      onPress={() => toggleFavourite(path())}
+    />
   );
 }
 

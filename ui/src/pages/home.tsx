@@ -39,9 +39,11 @@ import {
   remoteAlbumGroups,
   remoteArtistGroups,
   remoteLoadingState,
+  reconnectServer,
   retryRemote,
   remoteError,
 } from "../state/remote";
+import { engine } from "../backend/engine";
 import { AppPage } from "../components/page";
 import { pageEnd, wideTracks } from "../components/layout";
 import { CardRow } from "../components/library/cards";
@@ -211,6 +213,15 @@ function RemoteHomeSections(props: { wave: ListWave }) {
           {server()!.label} · {server()!.kind === "navidrome" ? "Navidrome" : "Jellyfin"} · {remoteTracks().length} 首
         </Text>
       </View>
+      {/* Configured and reachable are two different answers; the page said
+          "empty" for both, which reads as a server with no music. */}
+      <If when={!engine.remoteStatus().configured}>
+        <View class="px-3 pb-8">
+          <EmptyState title="服务器未连接" detail="引擎还没有这台服务器的登录状态：重新连接一次；密码若改过，在「添加来源」里更新它。">
+            <ActionButton label="重新连接" onPress={() => void reconnectServer(server()!.id)} />
+          </EmptyState>
+        </View>
+      </If>
       <If when={state === "loading" && remoteTracks().length === 0}>
         <View class="gap-4 px-3 pb-8">
           <CardsSkeleton rows={1} />
