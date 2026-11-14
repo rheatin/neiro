@@ -8,7 +8,7 @@
 
 import { computed, effect, signal, Storage } from "nsh";
 import type { RemoteKind } from "../backend/types";
-import { addRoot, roots, rootsLoaded, setHomeRoot } from "./catalog";
+import { addRoot, roots, rootsLoaded, scopedRoot, setHomeRoot } from "./catalog";
 
 export type SourceKind = "local" | "remote";
 
@@ -165,8 +165,13 @@ effect(() => {
       // 2) 激活来源：读 `source:active`；指向远程 → 恢复该服务器。
       const activeId = (await Storage.getItem(ACTIVE_KEY)) ?? LOCAL_ALL_ID;
       activeSourceId.set(activeId);
-      if (activeId.startsWith("local:") && activeId !== LOCAL_ALL_ID) setHomeRoot(activeId.slice("local:".length));
-      else setHomeRoot(null);
+      if (activeId.startsWith("local:") && activeId !== LOCAL_ALL_ID) {
+        setHomeRoot(activeId.slice("local:".length));
+      } else if (scopedRoot() === null) {
+        // Nothing picked since boot: the stored choice stands. A folder picked
+        // while this read was in flight is the newer fact, not this one.
+        setHomeRoot(null);
+      }
       // 远程来源的连接恢复由 remote.ts 的启动种子做（它等引擎 ready；这里
       // 的 activator 此刻尚未注册——注册发生在 remote.ts 模块初始化）。
     } catch (error) {
