@@ -473,13 +473,45 @@ pub struct SearchPage {
 /// `None` once `dispose` ran; the pump ends when it sees that.
 type Shared = Arc<Mutex<Option<Engine>>>;
 
+/// Where this app keeps its own data, per platform.
+///
+/// It used to be `LOCALAPPDATA` with `"."` as the fallback, which is a Windows
+/// variable: on macOS the root became the *current directory*, and a packaged
+/// app launched from Finder runs with `/` as its cwd — so Base tried to open
+/// `/Neiro/library.db`, could not, and the window said "引擎未连接" beside a
+/// library that was perfectly built and loadable.
+fn data_root() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("Library")
+            .join("Application Support")
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .map(|home| home.join(".local").join("share"))
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+}
+
 /// The path of Base's SQLite library: favourites and playlists persist
 /// across runs because this path never moves.
 fn library_path() -> std::path::PathBuf {
-    let root = std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    root.join("Neiro").join("library.db")
+    data_root().join("Neiro").join("library.db")
 }
 
 /// Where remote downloads and covers land — stable across runs, because a
@@ -1025,7 +1057,15 @@ impl Base {
     /// Throws `E_ENGINE: …` when the DLL is missing or Base cannot start;
     /// the interface then says the engine is not connected.
     pub fn new(cx: CallCx<'_>) -> Result<Self, String> {
-        let (engine, receiver) = Engine::open(&library_path())?;
+        // Base opens a SQLite file; SQLite creates the file, not its
+        // directory. A packaged app's data directory may not exist yet, so it
+        // is made here, once, before anything asks for the file.
+        let library = library_path();
+        if let Some(dir) = library.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("E_ENGINE: 无法创建数据目录 {}：{e}", dir.display()))?;
+        }
+        let (engine, receiver) = Engine::open(&library)?;
         // The snapshot is a synchronous read: the listeners about to register
         // get the whole current state before any event arrives, so the first
         // paint is the engine's, not an empty page.
