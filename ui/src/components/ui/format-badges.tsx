@@ -29,7 +29,7 @@ export function gradeOf(rateHz: number, bits: number, dsd: boolean): Grade {
   return "PCM";
 }
 
-const LOSSY = /\.(mp3|aac|m4a|opus|ogg|wma|mp2|ac3)$/i;
+const LOSSY = /\.(mp3|aac|m4a|m4b|mp4|opus|ogg|wma|mp2|ac3|ec3|eac3|mka)$/i;
 const LOSSLESS = /\.(flac|wav|wave|aif|aiff|alac|ape|wv|dsf|dff)$/i;
 
 /** Whether the file carries its samples as a codec that keeps them. An
@@ -41,7 +41,7 @@ const LOSSLESS = /\.(flac|wav|wave|aif|aiff|alac|ape|wv|dsf|dff)$/i;
 export function isLossless(path: string, codec?: string): boolean {
   if (codec && codec !== "") {
     if (/^(alac|flac|ape|wavpack|wv|dsd|dff|mlp|truehd|tta)/i.test(codec)) return true;
-    if (/^(aac|mp3|mp2|opus|vorbis|ac3|eac3|wmav?)/i.test(codec)) return false;
+    if (/^(aac|mp3|mp2|opus|vorbis|ac3|eac3|ec3|wmav?)/i.test(codec)) return false;
     // `pcm_s24le` and friends: lossless by construction.
     if (/^pcm/i.test(codec)) return true;
   }
@@ -49,9 +49,25 @@ export function isLossless(path: string, codec?: string): boolean {
   return LOSSLESS.test(path);
 }
 
+/** The codec the engine decoded with, as a listener reads it. The .m4a box
+ * carries AAC, ALAC and E-AC-3 alike, so its extension cannot name the codec. */
+export function codecDisplayName(codec: string): string {
+  const c = codec.toLowerCase();
+  if (c === "eac3" || c === "ec3") return "E-AC-3";
+  if (c === "ac3") return "AC-3";
+  return codec.toUpperCase();
+}
+
+/** The engine's codec profile is the only fact that separates E-AC-3 JOC
+ * (Dolby Atmos) from plain DD+ 5.1; both report the codec `eac3`. */
+export function isAtmos(codecProfile: string): boolean {
+  return /atmos/i.test(codecProfile);
+}
+
 /** The codec a lossy file is in, named so the reader sees why no grade plate
- * appeared. `AAC` for the .m4a family, which is what a phone writes. */
-export function lossyCodec(path: string): string {
+ * appeared. The engine's own answer wins over the extension guess. */
+export function lossyCodec(path: string, codec?: string): string {
+  if (codec && codec !== "") return codecDisplayName(codec);
   const match = path.match(/\.([a-z0-9]+)$/i);
   const ext = match ? match[1].toLowerCase() : "";
   if (ext === "m4a" || ext === "aac") return "AAC";
@@ -59,6 +75,8 @@ export function lossyCodec(path: string): string {
   if (ext === "opus") return "OPUS";
   if (ext === "ogg") return "VORBIS";
   if (ext === "wma") return "WMA";
+  if (ext === "ec3" || ext === "eac3") return "E-AC-3";
+  if (ext === "ac3") return "AC-3";
   return ext === "" ? "LOSSY" : ext.toUpperCase();
 }
 
@@ -124,7 +142,7 @@ export function MetaChip(props: { label: string; tone?: "solid" | "quiet" }) {
       accessibilityLabel={props.label}
     >
       <Text
-        class={`text-[9px] ${solid ? "font-bold lowercase" : "font-mono font-semibold"}`}
+        class={`text-[9px] ${solid ? "font-mono font-bold" : "font-mono font-semibold"}`}
         style={{ color: solid ? token("background") : HARDWARE.textDim }}
       >
         {props.label}
@@ -176,7 +194,9 @@ a   * line to spend turns it off, so two plates never stack. */
   wrap?: boolean;
 }) {
   const path = () => resolvedPath();
-  const lossless = () => isLossless(engine.player().path ?? "", engine.player().codec);
+  const codec = () => engine.player().codec;
+  const lossless = () => isLossless(engine.player().path ?? "", codec());
+  const atmos = () => isAtmos(engine.player().codecProfile);
   const grade = () => {
     const p = path();
     if (!p) return null;
@@ -198,14 +218,23 @@ a   * line to spend turns it off, so two plates never stack. */
         <Plate label="LOSSLESS" tone="plain" />
       </If>
       {/* A lossy file is still named: a row of plates that says nothing
-          leaves the reader wondering whether the badges failed to load. */}
-      <If when={!props.hideCodec && !lossless() && grade() === null}>
-        <Plate label={lossyCodec(engine.player().path ?? "")} tone="plain" />
+          leaves the reader wondering whether the badges failed to load.
+          Atmos names itself, so its plate replaces the codec one. */}
+      <If when={!props.hideCodec && !lossless() && grade() === null && !atmos()}>
+        <Plate label={lossyCodec(engine.player().path ?? "", codec())} tone="plain" />
+      </If>
+      <If when={atmos()}>
+        <Plate label="DOLBY ATMOS" tone="amber" />
       </If>
       {/* Why the two rates differ. The source column already names the
           container, so this is the one fact the middle column adds. */}
       <If when={props.resampled === true}>
         <Plate label={props.resampleLabel ?? "RESAMPLED"} tone="plain" />
+      </If>
+      {/* FFmpeg calls the object-audio variants of E-AC-3 and TrueHD by name;
+          no other field in the chain can tell them apart. */}
+      <If when={/atmos/i.test(engine.player().codecProfile)}>
+        <Plate label="ATMOS" tone="amber" />
       </If>
       <If when={bitPerfect()}>
         <Plate label="BIT-PERFECT" tone="amber" />
