@@ -47,7 +47,11 @@ fn wait_for_playing(
         if left.is_zero() {
             return None;
         }
-        let _ = rx.recv_timeout(left.min(Duration::from_millis(50)));
+        // The engine says why it stopped; a probe that swallowed that left
+        // "DID NOT PLAY" as the only evidence.
+        if let Ok(Event::Error { op, message }) = rx.recv_timeout(left.min(Duration::from_millis(50))) {
+            eprintln!("  engine error ({op}): {message}");
+        }
     }
 }
 
