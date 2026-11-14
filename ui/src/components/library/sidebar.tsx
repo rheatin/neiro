@@ -177,7 +177,6 @@ function SourcesPanel(props: { compact?: boolean }) {
             onRemove={() => removeRoot(root())}
             onPress={() => {
               // A folder row means that folder, not the whole library.
-              selectSource(`local:${root()}`);
               setHomeRoot(root());
               switchTo(TRACKS);
             }}
