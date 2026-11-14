@@ -454,6 +454,7 @@ add_library(nae SHARED
   nae.cpp
   session.cpp
   backend_wasapi.cpp
+  backend_asio.cpp
 )
 target_link_libraries(nae PRIVATE neiro_core)
 if(NEIRO_HAVE_FFMPEG)
@@ -1297,6 +1298,14 @@ add_executable(backend_check backend_check.cpp)
 target_include_directories(backend_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(backend_check PRIVATE nae)
 add_dependencies(backend_check nae)
+
+# ASIO, end to end and by consequence: the registry entry, the driver's own
+# description of itself, an open through the engine's normal file path, and a
+# position that moves because device frames moved rather than because time passed.
+add_executable(asio_probe asio_probe.cpp)
+target_include_directories(asio_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(asio_probe PRIVATE nae)
+add_dependencies(asio_probe nae)
 
 add_executable(buffer_policy_check buffer_policy_check.cpp)
 target_include_directories(buffer_policy_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

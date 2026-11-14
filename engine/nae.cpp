@@ -43,6 +43,7 @@ extern "C" const char* avutil_license(void);
 #endif
 
 #ifdef _WIN32
+#include "backend_asio.h"
 #include "wasapi_compat.hpp"
 #include "wasapi_device.h"
 #endif
@@ -648,24 +649,39 @@ constexpr size_t kEnvelopeFrames = 4096;
 
 static constexpr size_t kSpectrumFft = 4096;
 
-static void feedSpectrum(NAE_Handle* handle, const double* samples, size_t frames) {
+// `left` is channel 0, the channel the FFT window and `rms` describe. `right` is
+// channel 1 when the stream has one, and null on a mono stream and on the pause
+// branch; its ring then holds zeros, which is what `peakR` has to read -- there
+// is no right channel in either case.
+static void feedSpectrum(NAE_Handle* handle, const double* left, const double* right,
+                         size_t frames) {
     if (!handle) return;
-    if (handle->spectrumRing.empty()) handle->spectrumRing.assign(kSpectrumFft, 0.0);
+    if (handle->spectrumRing.empty()) {
+        handle->spectrumRing.assign(kSpectrumFft, 0.0);
+        // Allocated with the left ring, so a mono stream never reallocates and a
+        // pause cannot force an allocation on the render thread.
+        handle->spectrumRingRight.assign(kSpectrumFft, 0.0);
+    }
     if (frames == 0) return;
     std::lock_guard<std::mutex> guard(handle->spectrumLock);
-    // A rate change invalidates the window: a ring holding samples from two rates
-    // is not a measurement of either, so it is emptied rather than blended.
+    // A rate or channel-count change invalidates the window: a ring holding
+    // samples from two formats is not a measurement of either, so it is emptied
+    // rather than blended.
     const uint32_t rate = handle->fmt.rate;
-    if (handle->spectrumRate != rate) {
+    const uint32_t channels = handle->fmt.channels;
+    if (handle->spectrumRate != rate || handle->spectrumChannels != channels) {
         handle->spectrumRate = rate;
+        handle->spectrumChannels = channels;
         handle->spectrumRing.assign(kSpectrumFft, 0.0);
+        handle->spectrumRingRight.assign(kSpectrumFft, 0.0);
         handle->spectrumWrite = 0;
         handle->spectrumFilled = 0;
     }
     if (frames >= kSpectrumFft) {
         // Longer than the window: only the tail can be in it.
         const size_t tail = frames - kSpectrumFft;
-        samples = samples ? samples + tail : nullptr;
+        left = left ? left + tail : nullptr;
+        right = right ? right + tail : nullptr;
         handle->spectrumWrite = 0;
         handle->spectrumFilled = 0;
         frames = kSpectrumFft;
@@ -674,14 +690,15 @@ static void feedSpectrum(NAE_Handle* handle, const double* samples, size_t frame
     if (std::getenv("NAE_TRACE_SPECTRUM")) {
         std::fprintf(stderr, "[nae:feed] n=%zu first:", frames);
         for (size_t i = 0; i < 3 && i < frames; ++i) {
-            std::fprintf(stderr, " %.5f", samples ? samples[i] : 0.0);
+            std::fprintf(stderr, " %.5f", left ? left[i] : 0.0);
         }
         std::fprintf(stderr, "  write=%zu filled=%zu totalFed=%llu\n", handle->spectrumWrite,
                      handle->spectrumFilled,
                      static_cast<unsigned long long>(handle->spectrumFramesFed));
     }
     for (size_t i = 0; i < frames; ++i) {
-        handle->spectrumRing[handle->spectrumWrite] = samples ? samples[i] : 0.0;
+        handle->spectrumRing[handle->spectrumWrite] = left ? left[i] : 0.0;
+        handle->spectrumRingRight[handle->spectrumWrite] = right ? right[i] : 0.0;
         if (++handle->spectrumWrite == kSpectrumFft) handle->spectrumWrite = 0;
         if (handle->spectrumFilled < kSpectrumFft) ++handle->spectrumFilled;
     }
@@ -722,7 +739,7 @@ static void feedSpectrum(NAE_Handle* handle, const double* samples, size_t frame
     const size_t hop =
         rate ? static_cast<size_t>(static_cast<double>(rate) * kEnvelopeHopMs / 1000.0) : 0;
     if (hop > 0) {
-        // `samples` 为 nullptr 表示静音，而静音是被喂进去而不是跳过的。
+        // `left` 为 nullptr 表示静音，而静音是被喂进去而不是跳过的。
         // 跳过会让包络里留着上一段音乐，于是暂停的播放器会继续报告一首已经停下
         // 的歌的节拍——而 `framesFed` 也不再推进，读者无法分辨这两者。
         // **一帧 = 连续的 `hop` 个样本，跨调用攒够才写。**（见 handle 上那两个字
@@ -733,7 +750,7 @@ static void feedSpectrum(NAE_Handle* handle, const double* samples, size_t frame
         // 里留着上一段音乐，于是暂停的播放器会继续报告一首已经停下的歌的节拍——而
         // `framesFed` 也不再推进，读者无法分辨这两者。
         for (size_t i = 0; i < frames; ++i) {
-            if (samples != nullptr) handle->envelopeAccum += std::fabs(samples[i]);
+            if (left != nullptr) handle->envelopeAccum += std::fabs(left[i]);
             if (++handle->envelopeAccumN < hop) continue;
             handle->envelope[handle->envelopeFill++] = static_cast<float>(
                 handle->envelopeAccum / static_cast<double>(hop));
@@ -849,6 +866,9 @@ char* enumerateDevicesImpl() {
     if (FAILED(ensureCom())) return nullptr;
 
     std::string json = "[";
+    // Declared here rather than inside the WASAPI loop: the ASIO devices are
+    // appended after it, and they share the comma.
+    bool first = true;
 
     ComPtr<IMMDeviceEnumerator> enumerator;
     if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
@@ -858,7 +878,6 @@ char* enumerateDevicesImpl() {
         if (SUCCEEDED(enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection)) &&
             collection) {
             const UINT count = neiro::wasapi::collectionCount(collection.Get());
-            bool first = true;
             for (UINT i = 0; i < count; ++i) {
                 ComPtr<IMMDevice> device;
                 if (FAILED(collection->Item(i, &device)) || !device) continue;
@@ -922,6 +941,20 @@ char* enumerateDevicesImpl() {
                         jsonEscape(info.name) + "\"," + flags + "}";
             }
         }
+    }
+
+    // ASIO devices come from the registry, because that is the only place ASIO
+    // publishes one -- there is no enumeration interface. Their format is left at
+    // zero rather than measured here: measuring it means opening the driver, and a
+    // host calls this to draw a list, not to open every driver on the machine.
+    // `NAE_QueryDeviceCaps` is the call that asks the device about itself.
+    for (const auto& device : neiro::asio::enumerateDevices(nullptr)) {
+        if (!first) json += ",";
+        first = false;
+        json += "{\"id\":\"" + jsonEscape(device.id) + "\",\"name\":\"" +
+                jsonEscape(device.name) +
+                "\",\"sampleRate\":0,\"bitsPerSample\":32,\"validBits\":24,\"channels\":0,"
+                "\"exclusive\":true,\"shared\":false}";
     }
 
     json += "]";
@@ -1330,6 +1363,8 @@ int32_t NAE_QueryTags(NAE_Handle* handle, NAE_Tags* out) NAE_NOEXCEPT {
     copyField(local.album, sizeof(local.album), info.album);
     copyField(local.artist, sizeof(local.artist), info.artist);
     local.bitrateKbps = static_cast<uint32_t>(info.bitrate_kbps);
+    // 同一次读取，同一个来源：标签、还是文件大小 ÷ 时长。
+    local.bitrateFromTag = info.bitrate_from_tag ? 1 : 0;
 #endif
     return NAE_OK;
 }
@@ -3072,62 +3107,104 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
 
     if (FAILED(ensureCom())) return NAE_ERR_COM;
 
-    ComPtr<IMMDeviceEnumerator> enumerator;
-    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&enumerator))) ||
-        !enumerator) {
-        return NAE_ERR_NO_DEVICE;
-    }
-
-    ComPtr<IMMDevice> device;
-    if (FAILED(enumerator->GetDevice(std::wstring(deviceId, deviceId + strlen(deviceId)).c_str(),
-                                     &device)) ||
-        !device) {
-        return NAE_ERR_NO_DEVICE;
+    // The device family is decided by the id prefix and by nothing else. An
+    // `asio:` id goes to the ASIO layer; every other id is a WASAPI endpoint and
+    // takes exactly the path it took before ASIO existed.
+    const bool asioDevice = neiro::asio::isAsioDeviceId(deviceId);
+    if (asioDevice && shareMode == AUDCLNT_SHAREMODE_SHARED) {
+        // Asked for a name in the same words the device layer uses: ASIO has one
+        // mode, and honouring a shared request by quietly opening exclusively would
+        // report a mode the caller did not ask for.
+        g_lastErrorText = "ASIO has no shared mode; this device opens exclusively";
+        return NAE_ERR_DEVICE_CANNOT_CARRY_FORMAT;
     }
 
     WAVEFORMATEX native{};
     uint16_t nativeValidBits = 0;
-    if (!readNativeFormat(device.Get(), &native, &nativeValidBits)) {
-        return NAE_ERR_NO_NATIVE_FORMAT;
-    }
-
-    // Decide the rate to open at. This is the whole point of the mode
-    // parameter: the endpoint's native rate is only the default, not a
-    // constraint. A 44.1 kHz file on a 192 kHz interface is a conversion, not a
-    // reason to reformat the device down to 44.1 kHz.
-    //
-    // sourceRate 0 means "use the endpoint's native rate", which is what the
-    // older sine-only entry point asks for. Resolved here because the native
-    // rate is only known once readNativeFormat has run.
-    const uint32_t effectiveSourceRate =
-        sourceRate > 0 ? static_cast<uint32_t>(sourceRate) : native.nSamplesPerSec;
-
-    // Ask the driver what it will actually open, once per device.
-    //
-    // This happens *before* the rate is chosen, because choosing first and
-    // opening second is what produced the DSD failure: a DSD64 file decodes to
-    // 352.8 kHz, the mode says "352.8 kHz", Initialize refuses, and the listener
-    // is told their file is unsupported. It is not; the driver simply does not do
-    // 352.8 kHz, and every other file in the library plays.
-    neiro::wasapi::RateCache& cache = neiro::wasapi::rateCache();
     std::vector<uint32_t> cachedRates;
-    {
-        std::lock_guard<std::mutex> lock(neiro::wasapi::rateCacheMutex());
-        if (cache.deviceId != deviceId || cache.nativeRate != native.nSamplesPerSec) {
-            bool probed = false;
-            cache.rates = neiro::wasapi::probeSupportedRates(device.Get(), native, nativeValidBits, &probed);
-            cache.deviceId = deviceId;
-            cache.nativeRate = native.nSamplesPerSec;
-            cache.probed = probed;
+    if (asioDevice) {
+        // The driver answers for itself: its current rate, its output channels and
+        // the rates it will take. A driver that will not initialise has no format
+        // to open, and its own reason is what a listener reads.
+        NAE_DeviceCaps caps{};
+        caps.structSize = sizeof(caps);
+        std::string capsError;
+        const int32_t rc = neiro::asio::queryAsioCaps(deviceId, NAE_SHARE_MODE_EXCLUSIVE, &caps,
+                                                      &capsError);
+        if (rc != NAE_OK || caps.nativeRate == 0 || caps.nativeChannels == 0) {
+            g_lastErrorText = capsError.empty() ? "the ASIO driver could not describe its device"
+                                                : capsError;
+            return NAE_ERR_NO_DEVICE;
         }
-        // A copy, so the probe's result is read after the lock is released: the
-        // rates are used by the resolver below and the cache may be replaced by
-        // another open in between.
-        cachedRates = cache.rates;
+        // The container the core renders is 24 valid bits in 32. ASIO has no
+        // format negotiation beyond the rate and the driver's channel type, so
+        // these are the numbers the rest of the engine needs, not a request.
+        native.wFormatTag = WAVE_FORMAT_EXTENSIBLE;  // integer PCM
+        native.nChannels = static_cast<WORD>(caps.nativeChannels);
+        native.nSamplesPerSec = caps.nativeRate;
+        native.wBitsPerSample = 32;
+        native.nBlockAlign = static_cast<WORD>(native.nChannels * 4);
+        native.nAvgBytesPerSec = native.nSamplesPerSec * native.nBlockAlign;
+        nativeValidBits = 24;
+        cachedRates.assign(caps.rates, caps.rates + caps.rateCount);
+    } else {
+        ComPtr<IMMDeviceEnumerator> enumerator;
+        if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&enumerator))) ||
+            !enumerator) {
+            return NAE_ERR_NO_DEVICE;
+        }
+
+        ComPtr<IMMDevice> device;
+        if (FAILED(enumerator->GetDevice(
+                std::wstring(deviceId, deviceId + strlen(deviceId)).c_str(), &device)) ||
+            !device) {
+            return NAE_ERR_NO_DEVICE;
+        }
+
+        if (!readNativeFormat(device.Get(), &native, &nativeValidBits)) {
+            return NAE_ERR_NO_NATIVE_FORMAT;
+        }
+
+        // Ask the driver what it will actually open, once per device.
+        //
+        // This happens *before* the rate is chosen, because choosing first and
+        // opening second is what produced the DSD failure: a DSD64 file decodes to
+        // 352.8 kHz, the mode says "352.8 kHz", Initialize refuses, and the
+        // listener is told their file is unsupported. It is not; the driver simply
+        // does not do 352.8 kHz, and every other file in the library plays.
+        neiro::wasapi::RateCache& cache = neiro::wasapi::rateCache();
+        {
+            std::lock_guard<std::mutex> lock(neiro::wasapi::rateCacheMutex());
+            if (cache.deviceId != deviceId || cache.nativeRate != native.nSamplesPerSec) {
+                bool probed = false;
+                cache.rates = neiro::wasapi::probeSupportedRates(device.Get(), native,
+                                                                 nativeValidBits, &probed);
+                cache.deviceId = deviceId;
+                cache.nativeRate = native.nSamplesPerSec;
+                cache.probed = probed;
+            }
+            // A copy, so the probe's result is read after the lock is released:
+            // the rates are used by the resolver below and the cache may be
+            // replaced by another open in between.
+            cachedRates = cache.rates;
+        }
     }
+
     const neiro::SupportedRates supported{cachedRates.data(),
                                           static_cast<uint32_t>(cachedRates.size())};
+
+    // Decide the rate to open at. This is the whole point of the mode
+    // parameter: the device's own rate is only the default, not a constraint. A
+    // 44.1 kHz file on a 192 kHz interface is a conversion, not a reason to
+    // reformat the device down to 44.1 kHz.
+    //
+    // sourceRate 0 means "use the device's own rate", which is what the older
+    // sine-only entry point asks for. Resolved here because that rate is only
+    // known once the device has been read -- `readNativeFormat` on WASAPI,
+    // `ASIOGetSampleRate` on ASIO.
+    const uint32_t effectiveSourceRate =
+        sourceRate > 0 ? static_cast<uint32_t>(sourceRate) : native.nSamplesPerSec;
 
     neiro::OutputTarget target;
     const auto mode = static_cast<neiro::OutputMode>(
@@ -3141,9 +3218,10 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
     }
 
     // What to ask the device for. The request carries the numbers the resolver
-    // chose; the factory owns everything that talks to WASAPI -- activation,
-    // `Initialize` in either share mode, the render event, the buffer size and
-    // the render client -- and reports back only what the device granted.
+    // chose; the factory owns everything that talks to the device -- activation,
+    // format negotiation, the buffer size, the render client -- and reports back
+    // only what the device granted. Which factory is the id prefix's decision,
+    // made once, here.
     neiro::StreamFormatRequest want;
     want.deviceId = deviceId;
     want.rate = target.rate;
@@ -3173,7 +3251,8 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
 
     neiro::OpenedFormat opened;
     std::string error;
-    auto stream = neiro::openWasapiStream(want, &opened, &error);
+    auto stream = asioDevice ? neiro::asio::openAsioStream(want, &opened, &error)
+                             : neiro::openWasapiStream(want, &opened, &error);
 
     if (!stream && target.rate != native.nSamplesPerSec) {
         // The chosen rate was refused even though the probe said it would be
@@ -3191,7 +3270,8 @@ int32_t openExclusiveImpl(const char* deviceId, int32_t sourceRate, int32_t outp
         // request is not carried into it.
         want.bufferFrames = 0;
         error.clear();
-        stream = neiro::openWasapiStream(want, &opened, &error);
+        stream = asioDevice ? neiro::asio::openAsioStream(want, &opened, &error)
+                            : neiro::openWasapiStream(want, &opened, &error);
         if (stream) {
             // The reason changes with it. The listener asked for one rate, was
             // refused, and got another. "Resampled to the device rate" is true
@@ -3902,6 +3982,9 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
     // A local rather than a handle field because it belongs to this call, and
     // kept out of the loop body so it is allocated at most once per stream.
     std::vector<double> spectrumChannel;
+    // Channel 1 of the same buffer, for `peakR`. Empty on a mono stream, which
+    // is how the tap is told there is no second channel to measure.
+    std::vector<double> spectrumRight;
     int64_t& sourcePos = handle->sourcePos;
     int64_t& phase = handle->phase;
     if (fifo.capacity() < deviceBlock * 2 * static_cast<size_t>(ch)) {
@@ -4591,7 +4674,7 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
             // live music while nothing is playing. A paused player drawing a live
             // spectrum is claiming to be playing, and `framesFed` is what tells a
             // caller the reading is genuine silence rather than a leftover.
-            feedSpectrum(handle, nullptr, static_cast<size_t>(silentChunk));
+            feedSpectrum(handle, nullptr, nullptr, static_cast<size_t>(silentChunk));
             continue;
         }
 
@@ -4736,6 +4819,7 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
         // loop and only grown, because allocating inside the render loop spends
         // the runway the device gave this thread.
         if (spectrumChannel.size() < framesToWrite) spectrumChannel.resize(framesToWrite);
+        if (ch >= 2 && spectrumRight.size() < framesToWrite) spectrumRight.resize(framesToWrite);
 
         // The two measured levels. Cheap, unconditional, and only worth having
         // because "too quiet" has been impossible to place: every layer of the
@@ -4902,10 +4986,12 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
                 // actually produced rather than what the file claimed.
                 //
                 // Channel 0 only, matching the Web Audio route's
-                // `getChannelData(0)` so the two pictures are comparable. Dither
-                // is below this: it is about -96 dBFS, and a display floored
-                // anywhere near that is not showing the noise floor of the
-                // material.
+                // `getChannelData(0)` so the two pictures are comparable. Channel 1
+                // is staged separately below, and only its peak is reported: the
+                // bins and `rms` stay one channel, so two routes that draw a
+                // spectrum still describe the same channel. Dither is below this:
+                // it is about -96 dBFS, and a display floored anywhere near that
+                // is not showing the noise floor of the material.
                 if (c == 0) {
                     if (spectrumChannel.empty()) spectrumChannel.assign(framesToWrite, 0.0);
                     spectrumChannel[f] = s;
@@ -4940,6 +5026,10 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
                     if (spectrumChannel.empty()) spectrumChannel.assign(framesToWrite, 0.0);
                     spectrumChannel[f] = s;
                 }
+                // Channel 1, at the same point in the chain, for `peakR`. It is
+                // never resampled or merged with channel 0: an L/R meter that
+                // showed the same value twice would be reporting a mono sum.
+                if (c == 1) spectrumRight[f] = s;
                 BYTE* p = raw + f * static_cast<size_t>(bytesPerFrame) + c * bytesPerSample;
                 if (isFloat) {
                     const float v = static_cast<float>(s);
@@ -5033,7 +5123,8 @@ const double twoPiOverSource = 2.0 * 3.14159265358979323846 * kToneHz /
           // call per buffer would have been wrong here and right nowhere else.
           if (std::getenv("NAE_TRACE_SPECTRUM")) std::fprintf(stderr, "[nae:tap] realFrames=%zu framesToWrite=%zu ch=%zu\n", realFrames, framesToWrite, ch);
 
-        feedSpectrum(handle, spectrumChannel.data(), realFrames);
+        feedSpectrum(handle, spectrumChannel.data(),
+                     spectrumRight.empty() ? nullptr : spectrumRight.data(), realFrames);
 
         // Only the real frames left the fifo. The pad frames were invented for this
         // buffer and must not be consumed again on the next one.
@@ -5412,6 +5503,15 @@ int32_t NAE_QueryDeviceCaps(const char* deviceId, int32_t shareMode,
     // second place that asked a WASAPI endpoint about itself, beside the open;
     // two readers of one device is how `supportedShareModes` once ended up
     // contradicting `exclusiveSupported`.
+    //
+    // The id prefix is the whole routing rule, the same one the open uses, so a
+    // device can never be described by one layer and opened by the other.
+    if (neiro::asio::isAsioDeviceId(deviceId)) {
+        std::string error;
+        const int32_t rc = neiro::asio::queryAsioCaps(deviceId, shareMode, out, &error);
+        if (rc != NAE_OK && !error.empty()) g_lastErrorText = error;
+        return rc;
+    }
     return neiro::wasapi::queryWasapiCaps(deviceId, shareMode, out);
 }
 #else
@@ -5509,6 +5609,12 @@ int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bin
     uint64_t fed = 0;
     size_t filled = 0;
     size_t write = 0;
+    // The per-channel peaks, taken in the same locked read as the window itself.
+    // Measuring them from a second walk would let the two disagree about which
+    // moment they describe, which is exactly the class of bug that made
+    // `peak`/`rms` and the bins describe different frames once already.
+    double peakL = 0.0;
+    double peakR = 0.0;
     {
         std::lock_guard<std::mutex> guard(handle->spectrumLock);
         if (handle->spectrumRing.empty()) return NAE_OK;
@@ -5518,13 +5624,21 @@ int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bin
         local.sampleRate = handle->spectrumRate;
         // Read the ring oldest-first. `write` is where the next sample goes, so
         // the oldest sample is the one currently under it once the ring is full.
-        if (filled == kSpectrumFft) {
-            for (size_t i = 0; i < kSpectrumFft; ++i) {
-                re[i] = handle->spectrumRing[(write + i) % kSpectrumFft];
+        // Not full yet: the first `filled` entries are the only real ones.
+        const bool full = filled == kSpectrumFft;
+        const size_t count = full ? kSpectrumFft : filled;
+        const size_t oldest = full ? write : 0;
+        const bool haveRight = handle->spectrumRingRight.size() == kSpectrumFft;
+        for (size_t i = 0; i < count; ++i) {
+            const size_t at = (oldest + i) % kSpectrumFft;
+            const double v = handle->spectrumRing[at];
+            re[i] = v;
+            const double a = std::fabs(v);
+            if (a > peakL) peakL = a;
+            if (haveRight) {
+                const double ar = std::fabs(handle->spectrumRingRight[at]);
+                if (ar > peakR) peakR = ar;
             }
-        } else {
-            // Not full yet: the first `filled` entries are the only real ones.
-            for (size_t i = 0; i < filled; ++i) re[i] = handle->spectrumRing[i];
         }
     }
 
@@ -5615,17 +5729,20 @@ int32_t NAE_QuerySpectrum(NAE_Handle* handle, NAE_SpectrumInfo* info, float* bin
                      measuredHz);
     }
 
-    // Unnormalised level first, so `peak` and `rms` describe the signal rather
-    // than the window that was applied to it.
+    // Unnormalised level, so `peak` and `rms` describe the signal rather than the
+    // window that was applied to it.
+    //
+    // `peak` is the maximum of the two channel peaks and is not measured a third
+    // time: a host drawing one bar and a host drawing two then cannot disagree,
+    // which is the whole reason both fields exist.
     double sumSquares = 0.0;
-    double peak = 0.0;
     for (size_t i = 0; i < filled; ++i) {
         const double v = re[i];
         sumSquares += v * v;
-        const double a = std::fabs(v);
-        if (a > peak) peak = a;
     }
-    local.peak = peak;
+    local.peakL = peakL;
+    local.peakR = peakR;
+    local.peak = std::max(peakL, peakR);
     local.rms = std::sqrt(sumSquares / static_cast<double>(filled));
 
     // Hann, over the samples actually present rather than over the full window,

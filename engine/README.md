@@ -206,7 +206,10 @@ parked features are in [`ROADMAP.md`](ROADMAP.md); backend architecture is in
   bit-perfect with `NAE_REASON_SOURCE_PRECISION` rather than left to look clean.
 - **Windows and macOS.** The device layer is WASAPI on one and CoreAudio on the
   other; the C ABI, the CLI and everything above the device are the same code.
-  iOS and Android are not implemented.
+  Windows has a second device family as well -- ASIO drivers registered under
+  `HKLM\SOFTWARE\ASIO`, selected with an `asio:{CLSID}` id -- which hands the
+  render loop the same `OutputStream` shape, so nothing above the device knows
+  which of the two is playing. iOS and Android are not implemented.
 
 The detailed feature notes (volume/EQ/crossfeed/ReplayGain/gapless/crossfade
 semantics) are in the root README and in `VERIFICATION.md`.

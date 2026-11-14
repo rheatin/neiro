@@ -384,6 +384,13 @@ struct NAE_Handle {
     // A ring of the most recent `spectrumRing.size()` channel-0 device frames,
     // filled from inside the render loop and read by NAE_QuerySpectrum.
     //
+    // `spectrumRingRight` is the same window on channel 1, written in lockstep
+    // and only read to take its peak. The FFT and `rms` stay on channel 0, so
+    // this is a second ring rather than an interleaved one: interleaving would
+    // mean the transform has to deinterleave 4096 values it does not otherwise
+    // need, on the thread reading the tap. A mono stream feeds it zeros, which is
+    // what its right channel actually carries, so `peakR` reads 0 there.
+    //
     // The render loop's only cost here is copying one double per frame; the FFT
     // happens on whichever thread calls the query. That split matters, because the
     // render loop's entire budget is the runway the device gave it and a 4096-point
@@ -395,6 +402,7 @@ struct NAE_Handle {
     // the reader has to see a consistent window, so it needs the writer held off.
     std::mutex spectrumLock;
     std::vector<double> spectrumRing;
+    std::vector<double> spectrumRingRight;
     size_t spectrumWrite = 0;
     size_t spectrumFilled = 0;
     uint64_t spectrumFramesFed = 0;
@@ -403,6 +411,11 @@ struct NAE_Handle {
     /// and after a rate change a window holding samples from two rates would be a
     /// measurement of nothing.
     uint32_t spectrumRate = 0;
+    /// Channel count the ring was filled at. Same reason as `spectrumRate`: a
+    /// stereo window followed by a mono stream would otherwise leave a right
+    /// channel in the ring that nothing is writing to any more, and `peakR`
+    /// would keep reporting a track that has stopped.
+    uint32_t spectrumChannels = 0;
 
     // ---- 时域包络（节拍检测用）----
     //

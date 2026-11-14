@@ -1195,6 +1195,23 @@ pub struct Session {
     artwork_dir: Option<PathBuf>,
 }
 
+/// Change the listing field: a `List` answer merges into the session's
+/// accumulated listing by id (a later page's row for the same id wins), so a
+/// host that paged through 3,000 items can click any of them. The old rule
+/// ("the last listing replaces") made every click outside the last page fail
+/// with `no listed track has the id`. The protection worth keeping — an id
+/// nobody ever listed resolves to nothing — survives: only ids a real
+/// listing carried enter here. `Configure` clears the accumulator, so a
+/// server change cannot serve another server's ids.
+fn listing_upsert(listing: &mut Vec<RemoteTrack>, tracks: Vec<RemoteTrack>) {
+    for track in tracks {
+        match listing.iter_mut().find(|known| known.id == track.id) {
+            Some(known) => *known = track,
+            None => listing.push(track),
+        }
+    }
+}
+
 impl Session {
     /// Run one job, returning the event to publish.
     ///
@@ -1233,7 +1250,7 @@ impl Session {
                 None => self.error("no server is configured"),
                 Some(config) => match list_audio(config, start, limit) {
                     Ok(tracks) => {
-                        self.listing = tracks.clone();
+                        listing_upsert(&mut self.listing, tracks.clone());
                         crate::protocol::Event::RemoteListed { tracks }
                     }
                     Err(e) => self.error(&e.to_string()),

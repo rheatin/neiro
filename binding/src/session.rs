@@ -107,6 +107,23 @@ impl Session {
         quality: Quality,
         share: ShareKind,
     ) -> Result<Self> {
+        Self::open_with_dither(path, device_id, mode, quality, share, ffi::NAE_DITHER_AUTO)
+    }
+
+    /// The same open, asking for a dither algorithm (`NAE_DITHER_*`; `AUTO`
+    /// lets the engine decide from the container's width).
+    ///
+    /// The algorithm is an open-time setting: it travels in the output policy,
+    /// which the engine applies before the first sample. Asking for one is a
+    /// request — the resolved path reports what was actually applied.
+    pub fn open_with_dither(
+        path: &Path,
+        device_id: Option<&str>,
+        mode: OutputMode,
+        quality: Quality,
+        share: ShareKind,
+        dither: i32,
+    ) -> Result<Self> {
         let path_str = path
             .to_str()
             .ok_or_else(|| EngineError::BadPayload("path is not valid UTF-8".into()))?;
@@ -135,9 +152,18 @@ impl Session {
         };
 
         let mut raw: *mut ffi::NAE_Session = ptr::null_mut();
-        // SAFETY: `config` points at live locals, and its two string pointers
-        // outlive the call. `raw` is a live out-parameter.
-        let rc = unsafe { ffi::NAE_SessionOpen(&config, &mut raw) };
+        // SAFETY: every pointer below refers to live locals that outlive the
+        // call, and `raw` is a live out-parameter. The engine fills the policy
+        // defaults itself, so only the fields this host sets are overridden.
+        let rc = unsafe {
+            let mut policy = ffi::NAE_OutputPolicy::default();
+            let defaults = ffi::NAE_OutputPolicyDefaults(&mut policy);
+            if defaults != ffi::NAE_OK {
+                return Err(EngineError::from_code(defaults));
+            }
+            policy.dither_mode = dither;
+            ffi::NAE_SessionOpenWithPolicy(&config, &policy, &mut raw)
+        };
         if rc != ffi::NAE_OK {
             let error = if raw.is_null() {
                 EngineError::from_code(rc)
@@ -301,6 +327,8 @@ impl Session {
             sample_rate: info.sample_rate,
             valid_bits: info.valid_bits,
             peak: info.peak,
+            peak_l: info.peak_l,
+            peak_r: info.peak_r,
             rms: info.rms,
             frames_fed: info.frames_fed,
             complete: true,

@@ -107,6 +107,8 @@ struct NAE_Session {
     uint32_t tapSampleRate = 0;
     uint32_t tapValidBits = 0;
     double tapPeak = 0.0;
+    double tapPeakL = 0.0;
+    double tapPeakR = 0.0;
     double tapRms = 0.0;
     uint64_t tapFramesFed = 0;
     double tapEnvelopeHopMs = 0.0;
@@ -721,6 +723,8 @@ static void publishTaps(NAE_Session* s) {
     s->tapSampleRate = info.sampleRate;
     s->tapValidBits = info.validBits;
     s->tapPeak = info.peak;
+    s->tapPeakL = info.peakL;
+    s->tapPeakR = info.peakR;
     s->tapRms = info.rms;
     s->tapFramesFed = info.framesFed;
     s->tapEnvelopeHopMs = env.frame_hop_ms;
@@ -1803,6 +1807,8 @@ int32_t NAE_SessionQuerySpectrum(NAE_Session* session, NAE_SpectrumInfo* info,
         local.sampleRate = session->tapSampleRate;
         local.validBits = session->tapValidBits;
         local.peak = session->tapPeak;
+        local.peakL = session->tapPeakL;
+        local.peakR = session->tapPeakR;
         local.rms = session->tapRms;
         local.framesFed = session->tapFramesFed;
         local.binCount = static_cast<uint32_t>(session->tapBins.size());

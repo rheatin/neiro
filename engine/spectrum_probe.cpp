@@ -11,11 +11,18 @@
 // something else. So this asserts against a signal whose frequency and amplitude
 // are both known before the engine is involved:
 //
-//   * `NAE_OpenExclusiveSine` emits a 1 kHz sine at -20 dBFS, so 0.1 full scale.
-//     The peak bin must land on the bin 1000 Hz falls in, and its magnitude must
-//     be 0.1 times the Hann window's response at that bin's fractional offset.
+//   * `NAE_OpenExclusiveSine` emits a 1 kHz sine at a fixed amplitude, which this
+//     probe sets itself (`kToneAmplitude`) rather than reading back. The peak bin
+//     must land on the bin 1000 Hz falls in, and its magnitude must be the tone's
+//     amplitude times the Hann window's response at that bin's fractional offset.
 //     Both numbers are computed here rather than eyeballed, so a scaling mistake
 //     of 3 dB or a rate mistake shows up as a ratio and not as a plausible curve.
+//
+//   * `peakL` and `peakR` are each checked against that amplitude, and `peak` is
+//     checked for exact equality with their maximum. The tone is identical in
+//     both channels, so this cannot tell L from R -- what it can tell is a channel
+//     the tap never filled (0.000000) and a `peak` measured from somewhere other
+//     than the two channel peaks.
 //
 //   * The fractional offset matters and is not a detail. 4096 bins at 192 kHz is
 //     46.875 Hz per bin, so 1000 Hz sits between bins 21 and 22 and a rectangular
@@ -557,8 +564,8 @@ if (std::strcmp(mode, "envelope") == 0) {
     std::printf("window: fft %u  bins %u  rate %u Hz  bin width %.4f Hz  framesFed %llu\n",
                 last.info.fftSize, last.info.binCount, last.info.sampleRate, binHz,
                 static_cast<unsigned long long>(last.info.framesFed));
-    std::printf("peak %.6f  rms %.6f  valid %u bit\n", last.info.peak, last.info.rms,
-                last.info.validBits);
+    std::printf("peak %.6f (L %.6f, R %.6f)  rms %.6f  valid %u bit\n", last.info.peak,
+                last.info.peakL, last.info.peakR, last.info.rms, last.info.validBits);
     std::printf("\ncheck\n");
     std::printf("  %0.f Hz is bin %.4f, nearest bin %u (offset %+.4f)\n", kToneHz, exact, nearest,
                 offset);
@@ -608,13 +615,51 @@ if (std::strcmp(mode, "envelope") == 0) {
     std::printf("    expected %.6f   measured %.6f   ratio %.4f (%+.2f dB)\n", expectedEnergy,
                 energy, energyRatio, 20.0 * std::log10(std::max(1e-12, energyRatio)));
 
+    // ---- the per-channel peaks ----
+    //
+    // `peak` is defined as `max(peakL, peakR)` and nothing else, so the two ways
+    // of asking are compared for *exact* equality, not approximately. An
+    // approximate tolerance here would pass a build where `peak` was measured
+    // from a different window than the channel peaks, which is the fault that
+    // makes one bar and two bars disagree about the same instant.
+    //
+    // Each channel is then checked against the tone's own amplitude. The engine
+    // generates the tone in every channel, so a channel the tap never filled --
+    // an unfed `spectrumRingRight`, a channel index off by one -- reads 0.000000
+    // here and fails, and that number is printed either way.
+    const bool stereoOut = ch >= 2;
+    const double channelsMax = std::max(last.info.peakL, last.info.peakR);
+    const bool peakIsMax = last.info.peak == channelsMax;
+    const auto nearAmplitude = [](double v) {
+        return std::fabs(v - kToneAmplitude) <= kToneAmplitude * 0.02;
+    };
+    const bool leftOk = nearAmplitude(last.info.peakL);
+    // A mono output has no right channel to measure, and the contract there is
+    // that `peakR` is 0 rather than a copy of the left value.
+    const bool rightOk = stereoOut ? nearAmplitude(last.info.peakR) : last.info.peakR == 0.0;
+    std::printf("\n  per-channel peak, %s output, tone amplitude %.4f per channel\n",
+                stereoOut ? "stereo" : "mono", kToneAmplitude);
+    std::printf("    peakL %.6f  %s\n", last.info.peakL,
+                leftOk ? "in tolerance" : "OUT OF TOLERANCE");
+    std::printf("    peakR %.6f  %s\n", last.info.peakR,
+                stereoOut ? (rightOk ? "in tolerance" : "OUT OF TOLERANCE")
+                          : "must be 0: mono output");
+    std::printf("    peak  %.6f  max(peakL, peakR) %.6f  %s\n", last.info.peak, channelsMax,
+                peakIsMax ? "equal" : "NOT EQUAL");
+    const bool peaksPass = peakIsMax && leftOk && rightOk;
+    std::printf("  %s\n", peaksPass ? "PASS peakL/peakR populated, peak is their maximum"
+                                    : "FAIL the per-channel peaks disagree with the contract");
+
     // 0.5 dB is generous on purpose: the window straddles a buffer boundary and
     // the amplitude estimate carries the residual of that. A 3 dB scaling error or
     // a wrong rate would miss this by a wide margin, and those are the mistakes
     // that make a spectrum look plausible and measure something else.
-    const bool pass = ratio > 0.944 && ratio < 1.059 && energyRatio > 0.944 &&
-                      energyRatio < 1.059;
-    std::printf("\n  %s\n", pass ? "PASS within 0.5 dB" : "FAIL outside 0.5 dB");
+    const bool spectralPass = ratio > 0.944 && ratio < 1.059 && energyRatio > 0.944 &&
+                              energyRatio < 1.059;
+    const bool pass = spectralPass && peaksPass;
+    std::printf("\n  %s, %s\n", spectralPass ? "PASS within 0.5 dB" : "FAIL outside 0.5 dB",
+                peaksPass ? "the two channel peaks agree with peak"
+                          : "the channel peaks DISAGREE with the contract");
     reportPeaks(last, 3);
     NAE_Close(h);
     return pass ? 0 : 1;

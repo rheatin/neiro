@@ -51,12 +51,18 @@ decoding on a realtime thread is the fault this design exists to avoid.
 
 ## Where each platform's device knowledge lives
 
-| Layer | Windows | macOS | iOS | Android |
-|---|---|---|---|---|
-| caps: rates, formats, DoP | `nae.cpp` (WASAPI exclusive probe) | `backend_coreaudio.cpp` (HAL) | not written | not written |
-| open / format negotiation | `nae.cpp` `openExclusiveImpl` | `backend_coreaudio.cpp` | not written | not written |
-| stream primitive | `WasapiStream` | `output_stream_coreaudio.cpp` | not written | `backend_aaudio.cpp` (skeleton) |
-| dither, resample, routing, position | shared | shared | shared | shared |
+| Layer | Windows (WASAPI) | Windows (ASIO) | macOS | iOS | Android |
+|---|---|---|---|---|---|
+| caps: rates, formats, DoP | `nae.cpp` (WASAPI exclusive probe) | `backend_asio.cpp` (driver) | `backend_coreaudio.cpp` (HAL) | not written | not written |
+| open / format negotiation | `nae.cpp` `openExclusiveImpl` | `nae.cpp` `openExclusiveImpl` + `backend_asio.cpp` | `backend_coreaudio.cpp` | not written | not written |
+| stream primitive | `WasapiStream` | `AsioStream` + the ring in `backend_asio.cpp` | `output_stream_coreaudio.cpp` | not written | `backend_aaudio.cpp` (skeleton) |
+| dither, resample, routing, position | shared | shared | shared | shared | shared |
+
+The ASIO column exists because Windows has two device families, and they are told
+apart by the device id alone: `asio:{CLSID}` is the ASIO driver registered under
+`HKLM\SOFTWARE\ASIO`, and every other id is a WASAPI endpoint. Neither backend
+knows about the other, and the render loop cannot tell which one it is driving --
+which is what keeps the DSP and the position accounting a single copy.
 
 ## The C ABI is three copies of one list
 

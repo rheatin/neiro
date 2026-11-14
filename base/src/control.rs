@@ -488,15 +488,29 @@ impl Control {
             Ok(devices) => {
                 self.devices = devices
                     .into_iter()
-                    .map(|d| DeviceInfo {
-                        id: d.id,
-                        name: d.name,
-                        sample_rate: d.sample_rate,
-                        bits_per_sample: d.bits_per_sample,
-                        valid_bits: d.valid_bits,
-                        channels: d.channels,
-                        exclusive: d.exclusive,
-                        shared: d.shared,
+                    .map(|d| {
+                        // One caps query per endpoint: the rates a device really
+                        // opens are the engine's measurement, not a guess from
+                        // its native rate. `query_device_caps` opens the
+                        // endpoint, which is why `list_devices` is only called
+                        // when nothing holds it.
+                        let rates = neiro_audio::engine::query_device_caps(
+                            Some(d.id.as_str()),
+                            neiro_audio::engine::SHARE_MODE_EXCLUSIVE,
+                        )
+                        .map(|caps| caps.rates)
+                        .unwrap_or_default();
+                        DeviceInfo {
+                            id: d.id,
+                            name: d.name,
+                            sample_rate: d.sample_rate,
+                            bits_per_sample: d.bits_per_sample,
+                            valid_bits: d.valid_bits,
+                            channels: d.channels,
+                            exclusive: d.exclusive,
+                            shared: d.shared,
+                            supported_sample_rates: rates,
+                        }
                     })
                     .collect();
                 let devices = self.devices.clone();
@@ -1290,6 +1304,8 @@ impl Control {
                 fft_size: spectrum.fft_size,
                 sample_rate: spectrum.sample_rate,
                 peak: spectrum.peak,
+                peak_l: spectrum.peak_l,
+                peak_r: spectrum.peak_r,
                 rms: spectrum.rms,
                 frames_fed: spectrum.frames_fed,
                 envelope: envelope.frames,
@@ -1696,7 +1712,8 @@ impl Control {
         };
 
         let (mode, quality, share) = to_engine(self.policy);
-        match Session::open(&path, device_id.as_deref(), mode, quality, share) {
+        let dither = dither_to_engine(self.policy.dither);
+        match Session::open_with_dither(&path, device_id.as_deref(), mode, quality, share, dither) {
             Ok(mut session) => {
                 if resume_at > 0.0 {
                     if let Err(e) = session.seek(resume_at) {
@@ -2023,6 +2040,17 @@ fn to_engine(policy: PlaybackPolicy) -> (OutputMode, Quality, ShareKind) {
         ShareMode::Shared => ShareKind::Shared,
     };
     (mode, quality, share)
+}
+
+/// The dither algorithm, as the engine names it (`NAE_DITHER_*`).
+fn dither_to_engine(mode: crate::protocol::DitherMode) -> i32 {
+    use crate::protocol::DitherMode;
+    match mode {
+        DitherMode::Auto => neiro_audio::engine::NAE_DITHER_AUTO,
+        DitherMode::Off => neiro_audio::engine::NAE_DITHER_OFF,
+        DitherMode::Tpdf => neiro_audio::engine::NAE_DITHER_TPDF,
+        DitherMode::NoiseShaped => neiro_audio::engine::NAE_DITHER_NOISE_SHAPED,
+    }
 }
 
 /// Where a position ends up after one entry is moved from `from` to `to`.

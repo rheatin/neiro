@@ -443,7 +443,10 @@ extern "C" {
 /// single compile error.
 ///
 /// `peak` and `rms` are separated by the `u32` block and two `f64`s follow, so the
-/// offsets are not a simple stride; they are stated rather than derived.
+/// offsets are not a simple stride; they are stated rather than derived. The
+/// per-channel peaks were appended after `frames_fed` -- not inserted before it --
+/// so a host built against the older, shorter struct keeps reading `frames_fed`
+/// at the offset it was compiled with.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NAE_SpectrumInfo {
@@ -467,6 +470,11 @@ pub struct NAE_SpectrumInfo {
     /// `frames_fed` has not moved is a leftover, not a live measurement, and this
     /// is the only field that can tell the two apart.
     pub frames_fed: u64,
+    /// Peak per channel in the same window as `peak`, 0..1. `peak` is their
+    /// maximum, so a mono meter and a stereo one cannot disagree. A mono stream
+    /// has nothing in its right channel, so `peak_r` reads 0 there.
+    pub peak_l: f64,
+    pub peak_r: f64,
 }
 
 const _: () = {
@@ -489,7 +497,11 @@ const _: () = {
     assert!(offset_of!(NAE_SpectrumInfo, peak) + G == offset_of!(NAE_SpectrumInfo, rms));
     assert!(offset_of!(NAE_SpectrumInfo, rms) + G == offset_of!(NAE_SpectrumInfo, frames_fed));
     assert!(
-        offset_of!(NAE_SpectrumInfo, frames_fed) + N == std::mem::size_of::<NAE_SpectrumInfo>()
+        offset_of!(NAE_SpectrumInfo, frames_fed) + N == offset_of!(NAE_SpectrumInfo, peak_l)
+    );
+    assert!(offset_of!(NAE_SpectrumInfo, peak_l) + G == offset_of!(NAE_SpectrumInfo, peak_r));
+    assert!(
+        offset_of!(NAE_SpectrumInfo, peak_r) + G == std::mem::size_of::<NAE_SpectrumInfo>()
     );
 };
 
@@ -931,7 +943,10 @@ pub struct NAE_Tags {
     pub album: [c_char; 128],
     pub artist: [c_char; 128],
     pub bitrate_kbps: u32,
-    pub reserved: u32,
+    /// 1 when `bitrate_kbps` came from a tag, 0 when it was computed from the
+    /// file's size and duration. `reserved` in the older header; same four
+    /// bytes, so the struct's size and every offset above it are unchanged.
+    pub bitrate_from_tag: i32,
 }
 
 impl Default for NAE_Tags {
@@ -971,8 +986,8 @@ const _: () = {
     assert!(offset_of!(NAE_Tags, genre) + 64 * C == offset_of!(NAE_Tags, album));
     assert!(offset_of!(NAE_Tags, album) + 128 * C == offset_of!(NAE_Tags, artist));
     assert!(offset_of!(NAE_Tags, artist) + 128 * C == offset_of!(NAE_Tags, bitrate_kbps));
-    assert!(offset_of!(NAE_Tags, bitrate_kbps) + U == offset_of!(NAE_Tags, reserved));
-    assert!(offset_of!(NAE_Tags, reserved) + U == std::mem::size_of::<NAE_Tags>());
+    assert!(offset_of!(NAE_Tags, bitrate_kbps) + U == offset_of!(NAE_Tags, bitrate_from_tag));
+    assert!(offset_of!(NAE_Tags, bitrate_from_tag) + U == std::mem::size_of::<NAE_Tags>());
 };
 
 extern "C" {
@@ -1012,6 +1027,180 @@ extern "C" {
 
 // The rates the current device will open in exclusive mode, ascending.
 //
+/// One format an endpoint accepted, as `NAE_QueryDeviceCaps` reports it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NAE_DeviceFormat {
+    pub format: i32,
+    pub valid_bits: u32,
+    pub container_bits: u32,
+}
+
+pub const NAE_MAX_DEVICE_RATES: usize = 32;
+pub const NAE_MAX_DEVICE_FORMATS: usize = 16;
+pub const NAE_MAX_CHANNEL_LAYOUTS: usize = 16;
+pub const NAE_MAX_DOP_CARRIERS: usize = 8;
+pub const NAE_MAX_NATIVE_DSD_RATES: usize = 8;
+pub const NAE_MAX_DEVICE_ID: usize = 512;
+pub const NAE_MAX_DEVICE_NAME: usize = 256;
+
+/// What one endpoint can actually do, as the engine measured it.
+///
+/// Only the fields this host reads are relied on; the struct is mirrored whole
+/// because the engine validates `structSize` against its own and copies only
+/// `min(in, its own size)` bytes — a shorter struct would be a silent refusal.
+/// `rateCount == 0` means "not probed", never "nothing works".
+#[repr(C)]
+pub struct NAE_DeviceCaps {
+    pub struct_size: u32,
+    pub version: u32,
+    pub caps_generation: u32,
+    pub id: [u8; NAE_MAX_DEVICE_ID],
+    pub name: [u8; NAE_MAX_DEVICE_NAME],
+    pub backend: i32,
+    pub share_mode: i32,
+    pub is_default: i32,
+    pub hotplug: i32,
+    pub probed: u32,
+    pub native_format: i32,
+    pub native_valid_bits: u32,
+    pub native_container_bits: u32,
+    pub native_rate: u32,
+    pub native_channels: u32,
+    pub native_channel_mask: u32,
+    pub max_channels: u32,
+    pub rate_count: u32,
+    pub rates: [u32; NAE_MAX_DEVICE_RATES],
+    pub format_count: u32,
+    pub formats: [NAE_DeviceFormat; NAE_MAX_DEVICE_FORMATS],
+    pub layout_count: u32,
+    pub layouts: [u32; NAE_MAX_CHANNEL_LAYOUTS],
+    pub min_buffer_frames: u32,
+    pub max_buffer_frames: u32,
+    pub default_buffer_frames: u32,
+    pub min_period_frames: u32,
+    pub max_period_frames: u32,
+    pub event_driven: i32,
+    pub reported_latency_ms: f64,
+    pub dop_supported: i32,
+    pub dop_carrier_count: u32,
+    pub dop_carriers: [u32; NAE_MAX_DOP_CARRIERS],
+    pub native_dsd_supported: i32,
+    pub native_dsd_rate_count: u32,
+    pub native_dsd_rates: [u32; NAE_MAX_NATIVE_DSD_RATES],
+    pub supported_share_modes: u32,
+    pub exclusive_supported: i32,
+    pub shared_supported: i32,
+    pub hog_supported: i32,
+}
+
+impl Default for NAE_DeviceCaps {
+    fn default() -> Self {
+        // SAFETY: every field is plain data with no invalid bit patterns, which
+        // is what `zeroed` requires.
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+extern "C" {
+    /// What one endpoint can carry, measured by really opening it.
+    ///
+    /// `shareMode` is `NAE_SHARE_MODE_*`; `out.structSize` must be this
+    /// struct's size. `rates` is the openable rates, ascending, and
+    /// `dopCarriers` the rates that can carry DoP — both only when
+    /// `probed` says the group was measured.
+    pub fn NAE_QueryDeviceCaps(
+        device_id: *const std::os::raw::c_char,
+        share_mode: i32,
+        out: *mut NAE_DeviceCaps,
+    ) -> i32;
+}
+
+pub const NAE_MAX_CHANNELS: usize = 32;
+/// `NAE_AUTO`: "let the engine choose" for every policy enum.
+pub const NAE_AUTO: i32 = -1;
+
+/// The output policy, mirrored field for field.
+///
+/// Only `ditherMode` is set by this host; every other field is what
+/// `NAE_OutputPolicyDefaults` filled in, because a policy field the host does
+/// not understand must stay at the engine's default rather than at a zero
+/// that means something else. The layout is mirrored whole because the engine
+/// validates `structSize` against its own.
+#[repr(C)]
+pub struct NAE_OutputPolicy {
+    pub struct_size: u32,
+    pub version: u32,
+    pub rate_policy: i32,
+    pub fixed_rate: u32,
+    pub resample_algorithm: i32,
+    pub resample_quality: i32,
+    pub dither_mode: i32,
+    pub dsd_mode: i32,
+    pub dsd_transport: i32,
+    pub dsd_rate_policy: i32,
+    pub target_dsd_rate: u32,
+    pub allow_pcm_fallback: u32,
+    pub allow_downrate: u32,
+    pub allow_extract_rate: u32,
+    pub buffer_mode: i32,
+    pub buffer_ms: u32,
+    pub period_frames: u32,
+    pub routing_mode: i32,
+    pub target_channel_mask: u32,
+    pub upmix_preset: i32,
+    pub downmix_preset: i32,
+    pub matrix_id: u32,
+    pub bass_management: i32,
+    pub lfe_mode: i32,
+    pub lfe_crossover_hz: f64,
+    pub lfe_gain_db: f64,
+    pub center_gain_db: f64,
+    pub surround_gain_db: f64,
+    pub channel_mode: i32,
+    pub balance: f64,
+    pub polarity_mask: u32,
+    pub delay_frames: [u32; NAE_MAX_CHANNELS],
+    pub trim_db: [f64; NAE_MAX_CHANNELS],
+    pub clip_guard_mode: i32,
+    pub clip_ceiling_db_tp: f64,
+    pub clip_lookahead_ms: f64,
+    pub clip_release_ms: f64,
+}
+
+impl Default for NAE_OutputPolicy {
+    fn default() -> Self {
+        // SAFETY: plain data with no invalid bit patterns.
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+extern "C" {
+    /// Fills `out` with the engine's own defaults, `structSize` included.
+    pub fn NAE_OutputPolicyDefaults(out: *mut NAE_OutputPolicy) -> i32;
+    /// Opens a session with an explicit policy.
+    pub fn NAE_SessionOpenWithPolicy(
+        config: *const NAE_SessionConfig,
+        policy: *const NAE_OutputPolicy,
+        out: *mut *mut NAE_Session,
+    ) -> i32;
+}
+
+/// `NAE_DITHER_*`: the dither algorithm a live handle applies.
+pub const NAE_DITHER_AUTO: i32 = -1;
+pub const NAE_DITHER_OFF: i32 = 0;
+pub const NAE_DITHER_TPDF: i32 = 1;
+pub const NAE_DITHER_RECTANGULAR: i32 = 2;
+pub const NAE_DITHER_NOISE_SHAPED: i32 = 3;
+
+extern "C" {
+    /// Sets the dither algorithm on a live stream. The engine reports the
+    /// result: a dither that becomes active clears `bitPerfect` and sets the
+    /// `Dithered` reason, which the interface reads back rather than assuming.
+    pub fn NAE_SetDitherMode(handle: *mut NAE_Handle, mode: i32) -> i32;
+    pub fn NAE_GetDitherMode(handle: *mut NAE_Handle) -> i32;
+}
+
 // Measured by the engine rather than assumed, because WASAPI has no enumeration
 // API and a list invented here would be a list of hopes. A count of zero means
 // "not probed" and is not a claim that nothing works.

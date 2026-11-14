@@ -376,6 +376,14 @@ static void readTags(const AVDictionary* dict, neiro::StreamInfo* info, uint64_t
     // 所以：取下划线**之后**的那一段（FLAC 的音频比特率，而不是容器总码率），除以
     // 1000，并且只在结果落在一个合理区间内才采纳。超出区间说明单位不是我们以为的
     // 那个，这时宁可不显示，也不显示一个差 1000 倍的数字。
+    //
+    // 下面这个是「这个数是不是**这一次**从标签读到的」。
+    //
+    // `readTags` 对容器的 metadata 和流的 metadata 各调用一次，第二次看到的
+    // `bitrate_kbps` 可能已经是第一次**算出来**的数。再拿它去和实测值比，它当然
+    // 相等，于是「来自标签」被它自己证实了一次——这就是「用第二个来源重新推导一个
+    // 值」的那种错误，只不过推导的是**来源**。
+    bool tagGaveBitrate = false;
     if (info->bitrate_kbps == 0) {
         for (const char* key : {"BITRATE", "bitrate"}) {
             const char* v = get(key);
@@ -397,6 +405,7 @@ static void readTags(const AVDictionary* dict, neiro::StreamInfo* info, uint64_t
             // 能挡掉明显离谱的值，而交叉验证能挡掉「恰好落在区间内的错值」。
             if (kbps < 32.0 || kbps > 20000.0) continue;
             info->bitrate_kbps = static_cast<uint32_t>(std::lround(kbps));
+            tagGaveBitrate = true;
             break;
         }
     }
@@ -445,33 +454,51 @@ static void readTags(const AVDictionary* dict, neiro::StreamInfo* info, uint64_t
         }
     }
 
-    // 交叉验证标签里的码率：文件大小 ÷ 时长。
+    // 标签里的码率，和没有标签时的实测码率：文件大小 ÷ 时长。
     //
     // 这是唯一能独立算出码率的东西，所以它是唯一的裁判。标签可以错、可以缺、可以被
     // 别的工具写成别的东西；文件大小和时长不会。
     //
-    // 只在**两者都有**的时候比，因为一个标签都没有时 `bitrate_kbps` 已经是 0，而 0
-    // 与「标签说 0」无法区分——而那正是「不知道」应有的表示。
-    if (info->bitrate_kbps > 0 && info->duration_ms > 100.0 && file_bytes > 0) {
+    // 两件事，按标签在不在分开：
+    //
+    //   * **没有标签**（`bitrate_kbps == 0`）：实测值就是答案。之前这里只在两个数
+    //     都有的时候才动手，于是没有 `BITRATE` 键的文件一直报 0——而 0 的含义是
+    //     「不知道」，可文件大小和时长都在手上，那个数是知道的。实测：ALAC 的
+    //     `.m4a` 报 `bitrate=0 kbps (from tag: true)`，245.3 秒、96.3 MB，算出来
+    //     3139 kbps。
+    //   * **有标签**：实测值当裁判，超出 10% 容差时丢弃标签值。见下。
+    //
+    // `bitrate_from_tag` 的可信度跟着来源走：只有标签给出的数才为 true，算出来的
+    // 一律为 false，界面据此可以说「这个数字是算出来的」。
+    if (info->duration_ms > 100.0 && file_bytes > 0) {
         const double measuredKbps =
             (static_cast<double>(file_bytes) * 8.0) / (info->duration_ms / 1000.0) / 1000.0;
-        // 10% 的容差。
-        //
-        // 标签给的是**音频流**的码率，而文件大小包含标签、封面和容器开销，所以两者
-        // 本来就不相等——实测差 1% 到 5%，取决于文件多大。10% 足够容纳那些开销，
-        // 又窄到能挡住 `BITRATE=96000` 那种差了几百倍的错值。
-        //
-        // 超出容差时**丢弃标签值而不是两个都报**。理由是标签值可能装的是别的东西，
-        // 而实测值虽然包含容器开销，但它的方向是确定的：它至少是这个文件的比特量
-        // 除以时长。一个「大致对」的数字比一个「可能完全错」的更可信，而且可验证。
         if (measuredKbps > 0.0) {
-            const double rel = std::fabs(info->bitrate_kbps - measuredKbps) / measuredKbps;
-            if (rel > 0.10) {
+            if (info->bitrate_kbps == 0) {
                 info->bitrate_kbps = static_cast<uint32_t>(std::lround(measuredKbps));
                 info->bitrate_from_tag = false;
-            } else {
-                info->bitrate_from_tag = true;
+            } else if (tagGaveBitrate) {
+                // 10% 的容差。
+                //
+                // 标签给的是**音频流**的码率，而文件大小包含标签、封面和容器开销，
+                // 所以两者本来就不相等——实测差 1% 到 5%，取决于文件多大。10% 足够
+                // 容纳那些开销，又窄到能挡住 `BITRATE=96000` 那种差了几百倍的错值。
+                //
+                // 超出容差时**丢弃标签值而不是两个都报**。理由是标签值可能装的是别的
+                // 东西，而实测值虽然包含容器开销，但它的方向是确定的：它至少是这个
+                // 文件的比特量除以时长。一个「大致对」的数字比一个「可能完全错」的
+                // 更可信，而且可验证。
+                const double rel =
+                    std::fabs(info->bitrate_kbps - measuredKbps) / measuredKbps;
+                if (rel > 0.10) {
+                    info->bitrate_kbps = static_cast<uint32_t>(std::lround(measuredKbps));
+                    info->bitrate_from_tag = false;
+                } else {
+                    info->bitrate_from_tag = true;
+                }
             }
+            // 既非空、也不是这一次读到的标签：上一次调用已经判过了（`readTags` 被
+            // 调用两次，见 `tagGaveBitrate`）。这里不需要再做什么。
         }
     }
 }

@@ -57,7 +57,16 @@ pub struct VisualFrame {
     pub fft_size: u32,
     /// The device rate the window was captured at.
     pub sample_rate: u32,
+    /// The loudest sample in the window across both channels. Always
+    /// `max(peak_l, peak_r)`: one value, one owner, so a mono bar and a stereo
+    /// pair cannot disagree about the same instant.
     pub peak: f64,
+    /// Peak per channel in the same window, 0..1. This is what an L/R meter
+    /// draws. `peak_r` is 0 on a mono stream, which has no right channel.
+    pub peak_l: f64,
+    pub peak_r: f64,
+    /// Broadband RMS of the same window, before windowing. Channel 0, like the
+    /// bins; there is deliberately no per-channel RMS.
     pub rms: f64,
     /// Total frames the tap has been fed. A UI compares this with the previous
     /// frame to know whether it is looking at new audio.
@@ -163,6 +172,16 @@ pub struct DeviceInfo {
     pub channels: u32,
     pub exclusive: bool,
     pub shared: bool,
+    /// The sample rates this endpoint actually opens, ascending, as the
+    /// engine measured by opening it.
+    ///
+    /// Empty means "not probed", never "this endpoint supports nothing": a
+    /// host that reads an empty list as a refusal refuses to play on a machine
+    /// where playback works. Probing opens the endpoint, so it is only done
+    /// while nothing holds the device — `list_devices` is the caller's choice of
+    /// when, and this field carries what that choice produced.
+    #[serde(default)]
+    pub supported_sample_rates: Vec<u32>,
 }
 
 /// How the engine should choose the output rate.
@@ -216,6 +235,27 @@ pub struct PlaybackPolicy {
     pub rate: OutputRatePolicy,
     pub quality: ResamplerQuality,
     pub share: ShareMode,
+    /// The dither algorithm the engine applies. `Auto` lets it decide from the
+    /// output container's width — the depth itself is negotiated with the
+    /// endpoint (the widest container it takes), never chosen by the user.
+    #[serde(default)]
+    pub dither: DitherMode,
+}
+
+/// The dither algorithms the engine can apply.
+///
+/// `Auto` is the engine's own rule: dither when the container is narrower than
+/// the valid bits, leave the samples alone otherwise. The three explicit modes
+/// force one behaviour; none of them is a bit depth, because the depth belongs
+/// to the endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DitherMode {
+    #[default]
+    Auto,
+    Off,
+    Tpdf,
+    NoiseShaped,
 }
 
 impl PlaybackPolicy {

@@ -591,10 +591,13 @@ int32_t NAE_QuerySignalPath(NAE_Handle* handle, NAE_SignalPath* out) NAE_NOEXCEP
  * leaks a full-scale tone across the whole spectrum by up to 13 dB, which on a
  * dB-scaled display is a floor that is not there.
  *
- * The window is taken on channel 0 only. That is a choice, not an oversight: the
- * Web Audio route reads `getChannelData(0)` as well, so both routes describe the
- * same channel and the two pictures are comparable. A stereo image's difference
- * between the channels is not shown.
+ * The transform, the bins and `rms` are taken on channel 0 only. That is a
+ * choice, not an oversight: the Web Audio route reads `getChannelData(0)` as
+ * well, so both routes describe the same channel and the two pictures are
+ * comparable. The one figure that is per channel is the peak: `peakL` and
+ * `peakR` are the largest absolute sample each channel carried in the same
+ * window, so a host can draw a real L/R meter from one tap, and `peak` stays the
+ * maximum of the two so a mono display cannot disagree with a stereo one.
  *
  * # Staleness
  *
@@ -630,13 +633,24 @@ typedef struct NAE_SpectrumInfo {
      *  rather than left implicit so that the C and Rust declarations state the
      *  same layout instead of one of them happening to be right. */
     uint32_t reserved;
-    /** Peak magnitude in the window, 0..1. */
+    /** Peak magnitude in the window across both channels, 0..1.
+     *  Always `max(peakL, peakR)`; the two below are the measurement and this is
+     *  their maximum, not a third independent figure. */
     double peak;
-    /** Broadband RMS of the window before windowing, 0..1. */
+    /** Broadband RMS of the window before windowing, 0..1. Channel 0, like the
+     *  bins. There is deliberately no per-channel RMS. */
     double rms;
     /** Total device frames the tap has seen. Changes between calls while audio
      *  is flowing; stops changing if the stream is not. */
     uint64_t framesFed;
+    /** Peak magnitude per channel in the same window as `peak`, 0..1.
+     *  `peak` stays the maximum across channels: one value, one owner.
+     *
+     *  A mono stream has no second channel to measure, so `peakR` is 0 there; a
+     *  host drawing an R bar then shows what is actually in the right channel,
+     *  which is nothing. */
+    double peakL;
+    double peakR;
 } NAE_SpectrumInfo;
 
 /**
@@ -1129,8 +1143,16 @@ typedef struct NAE_Tags {
     char artist[128];
     /** 码率，**kbps**，已经换算过。0 表示没有这个标签。 */
     uint32_t bitrateKbps;
-    /** 显式填充：`bitrateKbps` 是 u32，后面若加 8 字节字段需要它。 */
-    uint32_t reserved;
+    /** 1 = `bitrateKbps` 来自标签，0 = 来自文件大小 ÷ 时长。
+     *
+     *  这里是原来的显式填充 `reserved`。用掉它而不是在结构体末尾追加字段：
+     *  两者都是 4 字节，所以 `NAE_Tags` 的大小和前面每一项的偏移都没变——老宿主
+     *  读到的只是它本来就不读的那四个字节。
+     *
+     *  为什么需要它：没有 `BITRATE` 标签的文件现在也会报一个算出来的码率，而
+     *  「这个数是标签说的」和「这个数是算出来的」在界面上是两句话。没有这个标志，
+     *  宿主只能替引擎猜，而猜出来的那个值在标签缺失时必然是错的。 */
+    int32_t bitrateFromTag;
 } NAE_Tags;
 
 /** 读标签。空句柄或没有解码器时返回 NAE_OK 和清零结构。 */

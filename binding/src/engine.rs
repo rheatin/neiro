@@ -14,7 +14,7 @@
 //! have different heaps, so `free()` on an engine-allocated pointer would be
 //! undefined behaviour even though it usually appears to work.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
@@ -1071,7 +1071,13 @@ pub struct Spectrum {
     pub fft_size: u32,
     pub sample_rate: u32,
     pub valid_bits: u32,
+    /// The loudest sample in the window across both channels. Always
+    /// `max(peak_l, peak_r)`, so a mono meter and a stereo one cannot disagree.
     pub peak: f64,
+    /// Peak per channel in the same window, 0..1. `peak_r` is 0 on a mono stream:
+    /// there is no right channel to measure, and 0 is what it carries.
+    pub peak_l: f64,
+    pub peak_r: f64,
     pub rms: f64,
     pub frames_fed: u64,
     /// False when the engine wrote a shorter struct than this binding knows about,
@@ -1135,6 +1141,8 @@ pub(crate) fn query_spectrum(handle: *mut ffi::NAE_Handle) -> Spectrum {
         sample_rate: info.sample_rate,
         valid_bits: info.valid_bits,
         peak: info.peak,
+        peak_l: info.peak_l,
+        peak_r: info.peak_r,
         rms: info.rms,
         frames_fed: info.frames_fed,
         complete: wrote_all,
@@ -1706,6 +1714,73 @@ impl LiveSignalPath {
     }
 }
 
+/// `NAE_SHARE_MODE_EXCLUSIVE`, for `query_device_caps`.
+pub const NAE_DITHER_AUTO: i32 = -1;
+pub const NAE_DITHER_OFF: i32 = 0;
+pub const NAE_DITHER_TPDF: i32 = 1;
+pub const NAE_DITHER_NOISE_SHAPED: i32 = 3;
+
+pub const SHARE_MODE_EXCLUSIVE: i32 = 1;
+/// `NAE_SHARE_MODE_SHARED`.
+pub const SHARE_MODE_SHARED: i32 = 2;
+
+/// What one endpoint can carry, as the engine measured it.
+///
+/// One device, one question: the engine opens each endpoint in turn to answer,
+/// so the caller decides when it is safe to ask (at start, on a device change,
+/// or while stopped — never during a live stream, whose exclusive device the
+/// probe would take).
+#[derive(Debug, Clone, Default)]
+pub struct DeviceCaps {
+    /// The openable rates, ascending. Empty means "not measured".
+    pub rates: Vec<u32>,
+    /// The native rate the endpoint reports for its own format.
+    pub native_rate: u32,
+    pub dop_supported: bool,
+    pub dop_carriers: Vec<u32>,
+    pub native_dsd_supported: bool,
+    pub exclusive_supported: bool,
+    pub shared_supported: bool,
+}
+
+/// Asks the engine about `device_id` (null/empty: the default endpoint) in
+/// `share_mode` (`NAE_SHARE_MODE_*`).
+pub fn query_device_caps(device_id: Option<&str>, share_mode: i32) -> Result<DeviceCaps> {
+    let id = match device_id {
+        Some(value) if !value.is_empty() => Some(CString::new(value).map_err(|_| {
+            EngineError::BadPayload("device id contains an interior NUL".into())
+        })?),
+        _ => None,
+    };
+    let mut raw = ffi::NAE_DeviceCaps {
+        struct_size: std::mem::size_of::<ffi::NAE_DeviceCaps>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `raw` is a live, correctly-sized, zeroed struct, and `id` (when
+    // present) outlives the call.
+    let rc = unsafe {
+        ffi::NAE_QueryDeviceCaps(
+            id.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+            share_mode,
+            &mut raw,
+        )
+    };
+    if rc != ffi::NAE_OK {
+        return Err(EngineError::from_code(rc));
+    }
+    let count = (raw.rate_count as usize).min(ffi::NAE_MAX_DEVICE_RATES);
+    let carriers = (raw.dop_carrier_count as usize).min(ffi::NAE_MAX_DOP_CARRIERS);
+    Ok(DeviceCaps {
+        rates: raw.rates[..count].to_vec(),
+        native_rate: raw.native_rate,
+        dop_supported: raw.dop_supported != 0,
+        dop_carriers: raw.dop_carriers[..carriers].to_vec(),
+        native_dsd_supported: raw.native_dsd_supported != 0,
+        exclusive_supported: raw.exclusive_supported != 0,
+        shared_supported: raw.shared_supported != 0,
+    })
+}
+
 /// The rates the engine measured this device will open in exclusive mode.
 ///
 /// Empty means "not probed", which is a different statement from "this device
@@ -1747,10 +1822,10 @@ pub(crate) fn query_tags(handle: *mut ffi::NAE_Handle) -> Tags {
         album: raw.field(&raw.album).to_string(),
         artist: raw.field(&raw.artist).to_string(),
         bitrate_kbps: raw.bitrate_kbps,
-        // 引擎侧算出来的，绑定看不到。默认 true——而这个默认是**诚实的**，因为
-        // `bitrate_kbps == 0` 表示没有码率，此时「来自标签」和「来自实测」都不
-        // 适用，调用方按 0 处理而不问来源。
-        bitrate_from_tag: true,
+        // 引擎算出来的，和 `bitrate_kbps` 同一次读取：1 = 标签给的，0 = 文件大小
+        // ÷ 时长。原来这里写死 `true`，于是没有 `BITRATE` 标签的文件也自称
+        // 「来自标签」——而标签里根本没有这个数。
+        bitrate_from_tag: raw.bitrate_from_tag != 0,
     }
 }
 

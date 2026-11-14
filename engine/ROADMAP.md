@@ -148,8 +148,14 @@ behaviour everywhere.
      stream path compiled in.
    - DSD `EXTRACT` runs through the PCM path and is reported as extracted;
      `DOWNRATE` decimates the bitstream (1/2/4/8) and is carried over DoP.
-     Still open: an ASIO/USB/vendor native backend, native DSD on
-     macOS/Android, and DoP verification on an endpoint that accepts a carrier.
+     The ASIO backend has since landed as a second Windows device family
+     (`backend_asio.cpp`; device ids `asio:{CLSID}`, enumerated from
+     `HKLM\SOFTWARE\ASIO`, 24-in-32 integer words, exclusive only), but it
+     carries PCM: DoP and native DSD over ASIO are not implemented, and it has
+     not been played on hardware -- the Realtek driver on the development machine
+     refuses `ASIOInit` because its device is not present. Still open: a
+     USB/vendor native backend, native DSD on macOS/Android and over ASIO, and
+     DoP verification on an endpoint that accepts a carrier.
 4. **IIR all-pass Hilbert**
    - FIR 255 is the working LtRt filter; add the frequency-warped IIR for
      lower latency/flat magnitude, selectable, with a diagnostic.

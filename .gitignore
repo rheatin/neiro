@@ -45,3 +45,6 @@ desktop.ini
 # The LGPL FFmpeg fetched by scripts/build-lgpl.ps1 and
 # scripts/build-ffmpeg-lgpl-macos.sh. Large, and reproducible from a URL.
 vendor/
+
+# Runtime libraries staged beside Base for the Windows host.
+base/*.dll
