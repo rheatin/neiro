@@ -9,7 +9,7 @@ import { AlbumPage, ArtistPage } from "../pages/detail";
 import { ArtistsPage } from "../pages/artists";
 import { HomePage } from "../pages/home";
 import { RemoteAlbumPage, RemoteArtistPage, RemotePage, RemotePlaylistPage } from "../pages/remote";
-import { LikedPage, PlaylistPage } from "../pages/user-collections";
+import { LikedPage, PlaylistPage, PlaylistsPage } from "../pages/user-collections";
 import { EqPage } from "../pages/eq";
 import { SearchPage } from "../pages/search";
 import { TracksPage } from "../pages/tracks";
@@ -32,6 +32,8 @@ function page(route: Route) {
       return <RemotePage />;
     case "liked":
       return <LikedPage />;
+    case "playlists":
+      return <PlaylistsPage />;
     case "eq":
       return <EqPage />;
     case "playlist":

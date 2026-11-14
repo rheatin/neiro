@@ -16,6 +16,7 @@ export type Route =
   | { name: "artists" }
   | { name: "tracks" }
   | { name: "liked" }
+  | { name: "playlists" }
   | { name: "eq" }
   | { name: "remote" }
   | { name: "album"; album: string; albumArtist: string }
@@ -34,8 +35,9 @@ export const ARTISTS: Route = { name: "artists" };
 export const TRACKS: Route = { name: "tracks" };
 export const REMOTE: Route = { name: "remote" };
 export const LIKED: Route = { name: "liked" };
+export const PLAYLISTS: Route = { name: "playlists" };
 
-export const ROOT_ROUTES = [HOME, SEARCH, ALBUMS, ARTISTS, TRACKS, REMOTE, LIKED];
+export const ROOT_ROUTES = [HOME, SEARCH, ALBUMS, ARTISTS, TRACKS, REMOTE, LIKED, PLAYLISTS];
 
 /** How many times a root was opened (spotish 最新动效的 `reenter`：同一页
  * 被重新选中，列表也重新进场一次；back 回到它不算）。 */
@@ -140,7 +142,7 @@ export function currentRoot(): Route {
  * stack is gone back to (Back's motion, its page as it was); the next one
  * ahead is gone forward to; any other is pushed (Forward's motion). */
 export function open(route: Route): void {
-  const rootNames: Route["name"][] = ["home", "search", "albums", "artists", "tracks", "remote", "liked"];
+  const rootNames: Route["name"][] = ["home", "search", "albums", "artists", "tracks", "remote", "liked", "playlists"];
   if (rootNames.includes(route.name)) {
     openRoot(route);
     return;

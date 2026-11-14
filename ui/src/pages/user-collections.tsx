@@ -30,6 +30,9 @@ import { signal } from "nsh";
 import { PlayButton, focusRing } from "../components/ui/controls";
 import { createListWave, enter } from "../components/ui/motion";
 import { currentRoute, open } from "../nav";
+import { playlists as playlistList } from "../state/user-catalog";
+import { setNewPlaylistOpen } from "../components/library/playlist-dialogs";
+import { ActionButton } from "../components/ui/controls";
 
 /** 收藏页：paths → 每一次 index 的行 — 喜欢里按收藏时间（合入顺序）排
  * 列。曲库索引未到时骨架。 */
@@ -39,6 +42,43 @@ export function LikedPage() {
 
 export function PlaylistPage(props: { id: number; playlist: string }) {
   return <CollectionPage title={props.playlist} kind={{ type: "playlist", id: props.id }} />;
+}
+
+/** 曲单 index: the sidebar's 曲单 row opens this, the way 专辑 and 歌手 open
+ * theirs. One row per playlist, the same shape the library's rows use. */
+export function PlaylistsPage() {
+  const lists = () => playlistList();
+  return (
+    <AppPage title="曲单" testID="page-playlists">
+      <View class={`flex-1 gap-3 px-6 pt-2 ${pageEnd()}`}>
+        <View class="flex-row items-center gap-3">
+          <Text role="header" class="text-3xl font-extrabold text-foreground">
+            曲单
+          </Text>
+          <View class="flex-1" />
+          <ActionButton label="新建曲单" onPress={() => setNewPlaylistOpen(true)} />
+        </View>
+        <If
+          when={lists().length > 0}
+          else={<EmptyState title="还没有曲单" detail="新建一张，从这里放想听的曲目。" />}
+        >
+          <Each of={lists()} key={(list) => list.id}>
+            {(list) => (
+              <Button
+                accessibilityLabel={`曲单 ${list().name}`}
+                onPress={() => open({ name: "playlist", id: list().id, playlist: list().name })}
+                class={`flex-row items-center gap-3 rounded-(--radius) px-3 py-2.5 hover:bg-row-hover active:scale-[0.99] ${focusRing}`}
+              >
+                <Icon name="music" size={18} color="muted-foreground" />
+                <Text class="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">{list().name || "—"}</Text>
+                <Text class="shrink-0 text-xs tabular-nums text-muted-foreground">{list().trackCount}</Text>
+              </Button>
+            )}
+          </Each>
+        </If>
+      </View>
+    </AppPage>
+  );
 }
 
 type CollectionKind = { type: "liked" } | { type: "playlist"; id: number };

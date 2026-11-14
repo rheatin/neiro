@@ -9,7 +9,7 @@
 import { createMotion, effect, reduceMotion, token, untracked, View } from "nsh";
 import { Button } from "nsh/base";
 import { Text } from "nsh";
-import { ALBUMS, ARTISTS, LIKED, REMOTE, TRACKS, currentRoot, switchTo, type Route } from "../../nav";
+import { ALBUMS, ARTISTS, LIKED, PLAYLISTS, REMOTE, TRACKS, currentRoot, switchTo, type Route } from "../../nav";
 import { favourites, playlists as playlistList } from "../../state/user-catalog";
 import { setNewPlaylistOpen } from "./playlist-dialogs";
 import { addRoot, removeRoot, roots, rootsLoaded, rescanAll, scan } from "../../state/catalog";
@@ -112,7 +112,9 @@ function NavPanel(props: { compact: boolean }) {
 function LibraryPanel(props: { compact: boolean }) {
   const index = () => {
     const root = currentRoot().name;
-    return root === "liked" ? 0 : root === "albums" ? 1 : root === "artists" ? 2 : root === "tracks" ? 3 : -1;
+    return (
+      root === "liked" ? 0 : root === "albums" ? 1 : root === "artists" ? 2 : root === "tracks" ? 3 : root === "playlists" ? 4 : -1
+    );
   };
   const favCount = favourites().length;
   const likedRow = () => (
@@ -130,6 +132,7 @@ function LibraryPanel(props: { compact: boolean }) {
       <NavRow icon="disc" label="专辑" route={ALBUMS} compact={props.compact} />
       <NavRow icon="user" label="歌手" route={ARTISTS} compact={props.compact} />
       <NavRow icon="music" label="全部曲目" route={TRACKS} compact={props.compact} />
+      <NavRow icon="queue" label="曲单" route={PLAYLISTS} compact={props.compact} />
     </View>
   );
 }
@@ -267,46 +270,6 @@ function SourcesPanel() {
   );
 }
 
-/** 曲单段：新建按钮 + 一行一个曲单（名字 + trackCount）；点开 push 页。
- * 放在本地曲库面板之下，spotish 里 Playlist 的位置。 */
-function PlaylistsPanel() {
-  // 每次都从 store 读（tracked）：新建/删除后事件更新 signals，这一层就
-  // 跟着重画。挂载时快照一次会让列表永远停在空的那一帧（曾经的 bug）。
-  const lists = () => playlistList();
-  return (
-    <View class="gap-1 rounded-(--radius-panel) border border-border bg-card p-2" accessibilityLabel="曲单">
-      <Text class="px-2 pb-1 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">曲单</Text>
-      <Button
-        accessibilityLabel="新建曲单"
-        onPress={() => setNewPlaylistOpen(true)}
-        class={`group flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out hover:bg-row-hover active:scale-[0.98] ${focusRing}`}
-      >
-        <Icon name="folderPlus" size={16} color="muted-foreground" />
-        <Text class="text-xs font-semibold text-foreground">新建曲单</Text>
-      </Button>
-      <If when={lists().length > 0}>
-        <View class="gap-0.5">
-          <Each of={lists()}>
-            {(list) => (
-              <Button
-                onPress={() => switchTo({ name: "playlist", id: list().id, playlist: list().name })}
-                class={`group flex-row items-center gap-2 rounded-(--radius) px-2 py-1.5 transition duration-150 ease-out hover:bg-row-hover active:bg-muted ${focusRing}`}
-              >
-                <Icon name="music" size={16} color="muted-foreground" />
-                <Text class="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">{list().name || "—"}</Text>
-                <Text class="shrink-0 text-[11px] tabular-nums text-muted-foreground">{list().trackCount}</Text>
-              </Button>
-            )}
-          </Each>
-        </View>
-      </If>
-      <If when={lists().length === 0}>
-        <Text class="px-2 pb-1 text-[11px] text-muted-foreground">还没有曲单。新建一张，从这里放想听的曲目。</Text>
-      </If>
-    </View>
-  );
-}
-
 /** The whole sidebar; `compact` is the desktop's icon rail. */
 export function Sidebar(props: { compact?: boolean }) {
   const compact = props.compact ?? false;
@@ -316,7 +279,6 @@ export function Sidebar(props: { compact?: boolean }) {
       <LibraryPanel compact={compact} />
       <If when={!compact}>
         <SourcesPanel />
-        <PlaylistsPanel />
       </If>
     </View>
   );
