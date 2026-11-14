@@ -193,9 +193,7 @@ export function setHomeRoot(root: string | null): void {
 export const homeTracks: Accessor<Track[]> = computed(() => {
   const root = homeRoot();
   if (root === null) return visibleTracks();
-  const list = allTracks();
-  if (!rootsLoaded()) return list;
-  return list.filter((t) => underGivenRoot(t.path, root));
+  return allTracks().filter((t) => underGivenRoot(t.path, root));
 });
 
 export const tracksTotal = signal(0);
