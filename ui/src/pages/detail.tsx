@@ -99,7 +99,15 @@ function DetailPage(props: { title: string; kind: "专辑" | "歌手"; coverPath
         )}
         class="flex-1"
       >
-        {(track, index) => <TrackRow track={track()} number={index()} showAlbum={showAlbum} wave={wave} />}
+        {(track, index) => (
+          <TrackRow
+            track={track()}
+            number={index()}
+            showAlbum={showAlbum}
+            wave={wave}
+            onPlay={() => playQueue(props.rows(), index())}
+          />
+        )}
       </List>
       <If when={selectionActive()}>
         <SelectionBar

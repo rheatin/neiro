@@ -51,12 +51,19 @@ export { fetchingId as isFetchingRemote };
 // ---- 会话：凭据只进 Storage，重启后自动 setRemoteXxx 重连 -------------------
 
 function applyRemote(cfg: RemoteConfig): void {
+  // A password is a credential this app can renew; a stored token is one that
+  // may have expired, or belong to another user on the same server. When both
+  // are known the password wins, and the token is only what an API key is.
+  if (cfg.kind === "jellyfin" && (cfg.user ?? "") !== "" && (cfg.password ?? "") !== "") {
+    engine.setRemoteJellyfinPassword(cfg.baseUrl, cfg.user ?? "", cfg.password ?? "");
+    return;
+  }
   if (cfg.kind === "jellyfin" && cfg.token) {
     engine.setRemoteJellyfinToken(cfg.baseUrl, cfg.token);
     return;
   }
   if (cfg.kind === "jellyfin") {
-    engine.setRemoteJellyfinPassword(cfg.baseUrl, cfg.user, cfg.password ?? "");
+    engine.setRemoteJellyfinPassword(cfg.baseUrl, cfg.user ?? "", cfg.password ?? "");
     return;
   }
   engine.setRemoteNavidrome(cfg.baseUrl, cfg.user, cfg.password ?? "");

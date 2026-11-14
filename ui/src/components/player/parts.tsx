@@ -35,7 +35,14 @@ import type { IconName } from "../ui/icons";
 /** Shuffle, previous, play / pause, next. Shuffle 是 UI 开关（决定
  * playQueue 的排列，不是引擎状态）；远程来源点了给一句 toast（队列只装
  * 本地路径）。 */
-export function TransportControls(props: { large?: boolean; minimal?: boolean; quiet?: boolean }) {
+export function TransportControls(props: {
+  large?: boolean;
+  minimal?: boolean;
+  quiet?: boolean;
+  /** Drawn after the last control: Now Playing and the bar put the heart
+   * there, so the two screens read the same. */
+  trail?: JSX.Element;
+}) {
   const icon = () => (props.large ? 22 : 18);
   const usable = () => controlsEnabled();
   return (
@@ -57,6 +64,7 @@ export function TransportControls(props: { large?: boolean; minimal?: boolean; q
       <IconButton name="skipBack" label="上一曲" size={icon()} disabled onPress={() => {}} />
       <PlayButton quiet={props.quiet} playing={isPlaying()} size={props.large ? 56 : 36} disabled={!ready() || !hasTrack()} onPress={toggle} />
       <IconButton name="skipForward" label="下一曲" size={icon()} disabled={!usable() || !canNext()} onPress={next} />
+      {props.trail}
     </View>
   );
 }

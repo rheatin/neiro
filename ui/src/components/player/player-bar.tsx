@@ -92,10 +92,11 @@ export function PlayerBar() {
                   its edge on every side (72 = 44 + 2 × 14). The heart rides
                   beside it. */}
               <NowPlayingSummary openable round cover={44} />
-              <PlaybarHeart />
             </View>
             <View class="max-w-180 flex-1 items-center gap-1">
-              <TransportControls />
+              {/* The heart rides with the transport, as it does on Now
+                  Playing: the two screens read the same. */}
+              <TransportControls trail={<PlaybarHeart />} />
               <SeekBar inline />
             </View>
             <View class="w-1/4 flex-row items-center justify-end gap-1 pr-2">

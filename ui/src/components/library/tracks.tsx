@@ -17,6 +17,9 @@ export function TrackRow(props: {
   onRemove?: () => void;
   /** 紧凑行（收藏/曲单的"紧凑"视图）：隐藏序号与封面、行高 32。 */
   compact?: boolean;
+  /** 点这一行要播什么。给了它，行就不再只播自己：一张列表里点一首是
+   * "从这里开始"，后面那些本来就是接下来的歌。 */
+  onPlay?: () => void;
 }) {
   // The row slides in from the right and its cover flips open, once per
   // track per entry, made here and bound as plain values: the Button
@@ -50,7 +53,8 @@ export function TrackRow(props: {
             toggleSelected(track.path);
             return;
           }
-          playTrack(track);
+          if (props.onPlay) props.onPlay();
+          else playTrack(track);
         }}
         class={`group min-w-0 flex-1 ${props.compact ? "h-8" : "h-12"} flex-row items-center gap-3 rounded-(--radius) px-3 transition duration-150 ease-out hover:bg-row-hover active:bg-muted selected:bg-row-hover disabled:opacity-50 motion-reduce:transition-none ${focusRing}`}
         style={entrance}
