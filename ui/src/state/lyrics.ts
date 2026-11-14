@@ -342,6 +342,46 @@ export async function loadAdoptedLyrics(): Promise<void> {
   }
 }
 
+// ---- 手动对轴 --------------------------------------------------------------
+
+/** How far ahead (positive) or behind the words this track's timing sits, in
+ * milliseconds. Providers stamp a version, a listener hears another: the fix
+ * is a shift, and it belongs to the track, not to the file. */
+const OFFSET_KEY = "lyrics:offset";
+
+const offsets = signal<Map<string, number>>(new Map());
+
+export const lyricOffset = (): number => offsets().get(player().path ?? "") ?? 0;
+
+export function setLyricOffset(ms: number): void {
+  const path = player().path ?? "";
+  if (path === "") return;
+  const clamped = Math.max(-10_000, Math.min(10_000, Math.round(ms / 100) * 100));
+  const next = new Map(offsets());
+  if (clamped === 0) next.delete(path);
+  else next.set(path, clamped);
+  offsets.set(next);
+  void Storage.setItem(OFFSET_KEY, JSON.stringify(Object.fromEntries(next))).catch((error) =>
+    console.warn("neiro: 歌词偏移没有记住:", String(error)),
+  );
+}
+
+/** Shifts the words by one step and says how far they now sit. */
+export function nudgeLyricOffset(stepMs: number): void {
+  setLyricOffset(lyricOffset() + stepMs);
+}
+
+export async function loadLyricOffsets(): Promise<void> {
+  try {
+    const raw = await Storage.getItem(OFFSET_KEY);
+    if (!raw) return;
+    const stored = JSON.parse(raw) as Record<string, number>;
+    offsets.set(new Map(Object.entries(stored)));
+  } catch (error) {
+    console.warn("neiro: 歌词偏移没有读出来:", String(error));
+  }
+}
+
 /** The line that is playing at `positionMs`, or -1 when the file is not
  * timestamped (or before the first line). */
 export function activeLine(lines: LyricLine[], positionMs: number): number {

@@ -43,7 +43,7 @@
       "chart-3": "#c98a2e",
       "chart-4": "#a1703a",
       "chart-5": "#e2a53f",
-      "font-sans": "Microsoft YaHei UI",
+      "font-sans": "Noto Sans SC Medium",
       "font-mono": "Consolas"
     },
     "dark": {
@@ -82,7 +82,7 @@
       "chart-3": "#f4c98a",
       "chart-4": "#9a6214",
       "chart-5": "#6e4510",
-      "font-sans": "Microsoft YaHei UI",
+      "font-sans": "Noto Sans SC Medium",
       "font-mono": "Consolas"
     }
   }

@@ -12,9 +12,12 @@ import { player } from "../../state/player";
 import {
   activeLine,
   ensureLyrics,
+  lyricOffset,
+  nudgeLyricOffset,
   setLyricsSearchOpen,
   trackLyrics,
 } from "../../state/lyrics";
+import { seek } from "../../state/player";
 import { Button } from "nsh/base";
 import { focusRing } from "../ui/controls";
 
@@ -41,7 +44,7 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
     untracked(() => ensureLyrics(path));
   });
   const lyrics = () => trackLyrics();
-  const active = () => activeLine(lyrics().lines, player().positionMs);
+  const active = () => activeLine(lyrics().lines, player().positionMs + lyricOffset());
   // Each new active line moves the window by one row; the layout animation is
   // what makes that read as the words sliding rather than jumping.
   animateLayoutOn(() => `${active()}|${lyrics().synced}|${lyrics().path}`);
@@ -127,20 +130,60 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
               {(row) => {
                 const distance = () => row().index - active();
                 const tone = () => lineTone(Math.abs(distance()));
+                const at = () => row().line.at;
+                const seekHere = () => {
+                  const seconds = at();
+                  if (seconds === null) return;
+                  seek(Math.max(0, seconds * 1000 - lyricOffset()));
+                };
+                const common = `text-center transition duration-500 ease-out ${
+                  props.large ? "leading-[1.45]" : "leading-snug"
+                } ${distance() === 0 ? (props.large ? "text-3xl font-bold" : "text-base font-bold") : props.large ? "text-2xl" : "text-sm"}`;
                 return (
-                  <Text
-                    class={`text-center transition duration-500 ease-out ${
-                      props.large ? "leading-[1.45]" : "leading-snug"
-                    } ${distance() === 0 ? (props.large ? "text-3xl font-bold" : "text-base font-bold") : props.large ? "text-2xl" : "text-sm"}`}
-                    style={{ opacity: tone().opacity, color: tone().color }}
+                  <If
+                    when={at() !== null}
+                    else={
+                      <Text class={common} style={{ opacity: tone().opacity, color: tone().color }}>
+                        {row().line.text}
+                      </Text>
+                    }
                   >
-                    {row().line.text}
-                  </Text>
+                    <Button
+                      accessibilityLabel={`跳到 ${row().line.text}`}
+                      onPress={seekHere}
+                      class={`rounded-(--radius-inset) px-1 ${focusRing}`}
+                    >
+                      <Text class={`${common} hover:text-foreground`} style={{ opacity: tone().opacity, color: tone().color }}>
+                        {row().line.text}
+                      </Text>
+                    </Button>
+                  </If>
                 );
               }}
             </Each>
           </View>
         </If>
+      </If>
+      <If when={lyrics().synced && lyrics().present}>
+        <View class="flex-row items-center justify-center gap-2 pt-1">
+          <Button
+            accessibilityLabel="歌词提前半秒"
+            onPress={() => nudgeLyricOffset(-500)}
+            class={`h-6 rounded-full px-2 hover:bg-row-hover ${focusRing}`}
+          >
+            <Text class="font-mono text-[10px] text-muted-foreground">-0.5s</Text>
+          </Button>
+          <Text class="font-mono text-[10px] tabular-nums text-muted-foreground">
+            {lyricOffset() === 0 ? "同步" : `${lyricOffset() > 0 ? "+" : ""}${(lyricOffset() / 1000).toFixed(1)}s`}
+          </Text>
+          <Button
+            accessibilityLabel="歌词延后半秒"
+            onPress={() => nudgeLyricOffset(500)}
+            class={`h-6 rounded-full px-2 hover:bg-row-hover ${focusRing}`}
+          >
+            <Text class="font-mono text-[10px] text-muted-foreground">+0.5s</Text>
+          </Button>
+        </View>
       </If>
     </View>
   );

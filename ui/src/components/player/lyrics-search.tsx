@@ -138,6 +138,7 @@ export function LyricsSearchSheet() {
                 return (
                   <View class="gap-1">
                     <Button
+                      accessibilityLabel={`候选 ${candidate().track || "未命名"}`}
                       onPress={() => chosen.set(selected() ? null : candidate())}
                       selected={selected()}
                       class={`w-full flex-col items-start gap-1 rounded-(--radius-inset) px-3 py-2 text-left transition duration-150 ease-out hover:bg-row-hover ${focusRing} ${

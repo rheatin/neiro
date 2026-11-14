@@ -308,7 +308,12 @@ export function SourceStage(props: {
     if (container !== "—") {
       const [ext] = container.split(" · ");
       rows.push({ label: ext, tone: "solid" });
-      if (codec !== "") rows.push({ label: codecDisplayName(codec), tone: "solid" });
+      // The codec plate only says something the container plate does not: an
+      // mp3 in an mp3 is two ways of writing the same fact.
+      const named = codec === "" ? "" : codecDisplayName(codec);
+      if (named !== "" && named.toUpperCase() !== ext.toUpperCase()) {
+        rows.push({ label: named, tone: "solid" });
+      }
     }
     rows.push({ label: depthLabel(), tone: "quiet" });
     rows.push({ label: channelLabel(), tone: "quiet" });
