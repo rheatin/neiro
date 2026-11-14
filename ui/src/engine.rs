@@ -84,7 +84,13 @@ fn dll_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
     if let Some(dir) = exe_dir {
         paths.push(dir.join(DLL));
     }
-    paths.push(PathBuf::from("../Neiro/base/target/release").join(DLL));
+    // Two layouts, because this UI lives in two places: beside the engine's
+    // own checkout (`../Neiro/base`) in its own repository, and one directory
+    // under the monorepo root (`../base` or `../../base`) when it ships inside
+    // the engine's tree.
+    for root in ["../Neiro/base", "../base", "../../base"] {
+        paths.push(PathBuf::from(root).join("target/release").join(DLL));
+    }
     paths
 }
 
