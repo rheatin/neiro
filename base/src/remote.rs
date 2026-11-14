@@ -299,8 +299,8 @@ pub fn list_audio(
             };
             let user_id = jellyfin_user_id(base_url, token)?;
             let url = format!(
-                "{}/Items?IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,Path\
-                 &SortBy=SortName&EnableImages=false&StartIndex={start}&Limit={limit}&userId={user_id}",
+                "{}/Users/{user_id}/Items?IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,Path\
+                 &SortBy=SortName&EnableImages=false&StartIndex={start}&Limit={limit}",
                 base_url.trim_end_matches('/')
             );
             let mut response = jellyfin_request(token, &url).call().map_err(transport)?;
@@ -1068,7 +1068,7 @@ pub fn list_playlists(server: &Server) -> Result<Vec<RemotePlaylist>, RemoteErro
             let token = token_of(auth)?;
             let user_id = jellyfin_user_id(base_url, token)?;
             let url = format!(
-                "{}/Items?IncludeItemTypes=Playlist&Recursive=true&Fields=ChildCount&EnableImages=false&userId={user_id}",
+                "{}/Users/{user_id}/Items?IncludeItemTypes=Playlist&Recursive=true&Fields=ChildCount&EnableImages=false",
                 base_url.trim_end_matches('/')
             );
             let mut response = jellyfin_request(token, &url).call().map_err(transport)?;
@@ -1135,8 +1135,8 @@ pub fn playlist_tracks(
             // endpoint answers the same shape as a listing.
             let user_id = jellyfin_user_id(base_url, token)?;
             let url = format!(
-                "{}/Items?ParentId={}&IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources\
-                 &StartIndex={start}&Limit={limit}&EnableImages=false&userId={user_id}",
+                "{}/Users/{user_id}/Items?ParentId={}&IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources\
+                 &StartIndex={start}&Limit={limit}&EnableImages=false",
                 base_url.trim_end_matches('/'),
                 urlencode(id)
             );

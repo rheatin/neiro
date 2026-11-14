@@ -16,7 +16,7 @@ import {
 } from "../state/catalog";
 import { AppPage } from "../components/page";
 import { TrackHeader, TrackRow } from "../components/library/tracks";
-import { playQueue } from "../state/player";
+import { playFromRows } from "../state/player";
 import { EmptyState, ErrorState, RowsSkeleton } from "../components/ui/feedback";
 import { ActionButton } from "../components/ui/controls";
 import { createListWave, enter } from "../components/ui/motion";
@@ -83,7 +83,7 @@ export function TracksPage() {
             number={index()}
             showAlbum={showAlbum}
             wave={wave}
-            onPlay={() => playQueue(list, index())}
+            onPlay={() => playFromRows(list, index())}
           />
         )}
       </List>

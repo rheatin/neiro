@@ -5,7 +5,7 @@
 import { computed, effect, signal, Storage, untracked } from "nsh";
 import { engine, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
-import { playTrack } from "./player";
+import { playTrack, QUEUE_AHEAD } from "./player";
 import { activeSourceId, registerRemoteActivator, removeServer, servers, type RemoteServer } from "./sources";
 
 const CONFIG_KEY = "remote:config";
@@ -486,6 +486,25 @@ export function playRemote(track: RemoteTrack): void {
     reportEngineFailure(error, "取流失败");
     unfetchId(track.id);
   }
+}
+
+/** 点远程列表的第 `index` 首:取流播放,并把后面 `QUEUE_AHEAD` 首依次取流
+ * 后排队。远程曲目在缓存里才有本地路径,所以排队就是下载——一次只有一首在
+ * 下,拿到路径就入队,顺序不会乱。 */
+export function queueRemoteFrom(rows: RemoteTrack[], index: number): void {
+  const at = Math.min(Math.max(index, 0), Math.max(rows.length - 1, 0));
+  const pick = rows.slice(at, at + QUEUE_AHEAD + 1);
+  if (pick.length === 0) return;
+  playRemote(pick[0]);
+  const rest = pick.slice(1);
+  const step = (i: number) => {
+    if (i >= rest.length) return;
+    withRemotePath(rest[i], (path) => {
+      engine.enqueue([path]);
+      step(i + 1);
+    });
+  };
+  step(0);
 }
 
 function unfetchId(id: string): void {

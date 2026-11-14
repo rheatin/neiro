@@ -31,6 +31,7 @@ import { CardRow } from "../components/library/cards";
 import { RemoteCardsRow, type RemoteCardItem } from "../components/library/remote-cards";
 import { RemoteTrackRow } from "./remote";
 import { TrackHeader, TrackRow } from "../components/library/tracks";
+import { playFromRows } from "../state/player";
 import { EmptyState, Spinner } from "../components/ui/feedback";
 import { SectionTitle } from "../components/ui/controls";
 
@@ -177,7 +178,14 @@ export function SearchPage() {
                   <SectionTitle class="px-6">曲目</SectionTitle>
                   <TrackHeader showAlbum={wideTracks()} />
                   <Each of={songs()}>
-                    {(track, i) => <TrackRow track={track()} number={i()} showAlbum={wideTracks()} />}
+                    {(track, i) => (
+                        <TrackRow
+                          track={track()}
+                          number={i()}
+                          showAlbum={wideTracks()}
+                          onPlay={() => playFromRows(songs(), i())}
+                        />
+                      )}
                   </Each>
                 </View>
               </If>

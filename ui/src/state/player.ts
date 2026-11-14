@@ -242,6 +242,21 @@ export function playTrack(track: Track): void {
   );
 }
 
+/** 点一首歌时,后面跟着进队列的曲目数。
+ *
+ * 十首:一张列表里点歌的人要的是"接着放",不是"把四千首放进来"——队列面
+ * 板要能一眼看完,而且引擎的队列是可编辑的,长队只会让编辑变难。 */
+export const QUEUE_AHEAD = 10;
+
+/** 从列表点第 `index` 首:它开始播,后面 `QUEUE_AHEAD` 首按列表顺序进队
+ * 列。换列表就换一批——队列属于"我现在在听的这张列表"。 */
+export function playFromRows(rows: Track[], index: number): void {
+  if (rows.length === 0) return;
+  const at = Math.min(Math.max(index, 0), rows.length - 1);
+  const pick = rows.slice(at, at + QUEUE_AHEAD + 1);
+  playQueue(pick, 0);
+}
+
 /** 播放全部：play(点击那首/第一首) + enqueue(其余)。shuffle 开 → 其余
  * Fisher–Yates 洗牌（同一集合不重复）；关 → 原序。队列顺序只是这次
  * play+enqueue 的排列，不是引擎状态。远程来源不支持（队列只装本地路径，

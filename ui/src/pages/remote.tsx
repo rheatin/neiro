@@ -16,8 +16,10 @@ import {
   filteredRemoteTracks,
   isFetchingRemote,
   loadRemote,
+  remoteError,
   remoteIsFresh,
   playRemote,
+  queueRemoteFrom,
   remoteLoadingState,
   remoteQuery,
   remoteTracks,
@@ -46,7 +48,13 @@ const CONTAINER_LABEL = (container: string): string => (container ? container.to
 
 /** One remote track: its cover, name+artist+container 徽标, and its play
  * column that fetches (转圈) then plays the cached file. */
-export function RemoteTrackRow(props: { track: RemoteTrack; number: number; showAlbum?: boolean }) {
+export function RemoteTrackRow(props: {
+  track: RemoteTrack;
+  number: number;
+  showAlbum?: boolean;
+  /** 点了这一行要播什么(以及后面几首);不给就是只播它自己。 */
+  onPlay?: () => void;
+}) {
   const track = () => props.track;
   const fetching = () => isFetchingRemote(track().id);
   // 远程行没有本地路径：收藏/加入曲单要等引擎把文件取进缓存，拿到那条
@@ -87,7 +95,7 @@ export function RemoteTrackRow(props: { track: RemoteTrack; number: number; show
     <View class="mx-6 flex-row items-center" onContextMenu={(e) => onMenu(e.pagePosition)}>
     <Button
       accessibilityLabel={`${track().title}, ${track().artist || track().album || "远程"}`}
-      onPress={() => playRemote(track())}
+      onPress={() => (props.onPlay ? props.onPlay() : playRemote(track()))}
       class={`group h-12 flex-1 flex-row items-center gap-3 rounded-(--radius) px-3 transition duration-150 ease-out hover:bg-row-hover active:bg-muted ${focusRing}`}
     >
       <Text class="w-6 text-right text-xs tabular-nums text-muted-foreground">{props.number + 1}</Text>
@@ -187,7 +195,10 @@ export function RemotePage() {
           when={state === "error" && rows.length === 0}
           else={<RemoteList rows={rows} />}
         >
-          <ErrorState message="远程库没有读出来。" onRetry={retryRemote} />
+          <ErrorState
+            message={remoteError() ? `远程库没有读出来：${remoteError()}` : "远程库没有读出来。"}
+            onRetry={retryRemote}
+          />
         </If>
       </Scroll>
     </AppPage>
@@ -214,7 +225,12 @@ function RemoteList(props: { rows: RemoteTrack[] }) {
         </If>
         <Each of={props.rows}>
           {(track, i) => (
-            <RemoteTrackRow track={track()} number={i()} showAlbum={wideTracks()} />
+            <RemoteTrackRow
+              track={track()}
+              number={i()}
+              showAlbum={wideTracks()}
+              onPlay={() => queueRemoteFrom(props.rows, i())}
+            />
           )}
         </Each>
         <If when={remoteLoadingState() === "loading" && remoteTracks().length > 0}>

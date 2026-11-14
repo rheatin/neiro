@@ -13,7 +13,7 @@ import {
   tracksOfArtist,
   tracksState,
 } from "../state/catalog";
-import { isCurrentTrack, isPlaying, playQueue, playTrack, toggle } from "../state/player";
+import { isCurrentTrack, isPlaying, playFromRows, playQueue, playTrack, toggle } from "../state/player";
 import { AppPage } from "../components/page";
 import { barSize, pageEnd, wideTracks } from "../components/layout";
 import { SelectionBar } from "../components/library/selection-bar";
@@ -105,7 +105,7 @@ function DetailPage(props: { title: string; kind: "专辑" | "歌手"; coverPath
             number={index()}
             showAlbum={showAlbum}
             wave={wave}
-            onPlay={() => playQueue(props.rows(), index())}
+            onPlay={() => playFromRows(props.rows(), index())}
           />
         )}
       </List>
