@@ -95,9 +95,11 @@ export function removeRoot(path: string): void {
     console.warn("neiro: 根目录没有记住:", String(error)),
   );
   try {
-    engine.unwatchFolder(path);
+    // Unwatching stops the watcher; the rows are what the lists read, so a
+    // removed folder has to take them with it.
+    engine.forgetFolder(path);
   } catch (error) {
-    reportEngineFailure(error, "无法停止监视");
+    reportEngineFailure(error, "无法移除文件夹");
   }
   rescanAll();
 }
