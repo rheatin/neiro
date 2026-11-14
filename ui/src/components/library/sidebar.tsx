@@ -4,7 +4,7 @@
 // labels, so nothing is ever cut in half. Every row shares one geometry:
 // 44 high, its glyph in the same 30pt column, so the icons line up.
 
-import { createMotion, effect, reduceMotion, token, untracked, View } from "nsh";
+import { createMotion, effect, reduceMotion, signal, token, untracked, View } from "nsh";
 import { Button } from "nsh/base";
 import { Text } from "nsh";
 import { ALBUMS, ARTISTS, LIKED, PLAYLISTS, REMOTE, TRACKS, currentRoot, switchTo, type Route } from "../../nav";
@@ -71,8 +71,8 @@ function NavRow(props: { icon: IconName; label: string; route: Route; compact: b
         selected={selected()}
         onPress={() => switchTo(props.route)}
         tooltip={props.compact ? <Hint label={props.label} /> : undefined}
-        class={`group h-11 flex-row items-center gap-3 rounded-(--radius-inset) transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none ${focusRing} ${
-          props.compact ? "justify-center" : "px-2"
+        class={`group h-11 flex-row items-center rounded-(--radius-inset) transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none ${focusRing} ${
+          props.compact ? "justify-center" : "gap-3 px-2"
         }`}
       >
         {/* As wide as a row's glyph column, so icons and labels line up. */}
@@ -315,12 +315,20 @@ function SourcesPanel(props: { compact?: boolean }) {
 
 /** The whole sidebar; `compact` is the desktop's icon rail. */
 export function Sidebar(props: { compact?: boolean }) {
-  const compact = props.compact ?? false;
+  /** What this column actually got, which is the only width that matters:
+   * a flex parent or a display scale can leave less than the shell asked for,
+   * and a 130pt column cannot hold a label however wide the window is. */
+  const narrow = signal(false);
+  const compact = () => (props.compact ?? false) || narrow();
   return (
-    <View class="min-h-0 flex-1 gap-2" role="navigation">
-      <NavPanel compact={compact} />
-      <LibraryPanel compact={compact} />
-      <SourcesPanel compact={compact} />
+    <View
+      class="min-h-0 flex-1 gap-2"
+      role="navigation"
+      onLayout={(e) => narrow.set(e.bounds.size.width < 200)}
+    >
+      <NavPanel compact={compact()} />
+      <LibraryPanel compact={compact()} />
+      <SourcesPanel compact={compact()} />
     </View>
   );
 }
