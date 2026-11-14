@@ -153,8 +153,42 @@ export function setLyricsSearchOpen(open: boolean): void {
   if (open) startLyricsSearch();
 }
 
+/** What a search asks for. The fields start as the file reports them and the
+ * listener may correct them: a provider indexes the words by title and artist,
+ * and a tag that says "track 07" finds nothing. */
+export interface LyricsQuery {
+  title: string;
+  artist: string;
+  album: string;
+  durationS: number | null;
+}
+
+/** The song's own name: a title carrying 「〜公生とかをりの演奏 Ver.〜」 asks the
+ * provider for a version it does not index, and 「feat.」 after a dash belongs
+ * to the artist line. Bracketed parts and trailing dash clauses go. */
+export function cleanTitle(title: string): string {
+  const trimmed = title
+    .replace(/[〜~][^〜~]*[〜~]/g, " ")
+    .replace(/[\(（\[【][^\)）\]】]*[\)）\]】]/g, " ")
+    .replace(/\s+-\s+.*$/, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return trimmed === "" ? title.trim() : trimmed;
+}
+
+/** The fields a search starts with, from the track that is playing. */
+export function lyricsQueryForCurrent(): LyricsQuery {
+  const tags = player();
+  return {
+    title: cleanTitle(tags.title || fileTitle(tags.path ?? "")),
+    artist: tags.artist ?? "",
+    album: tags.album ?? "",
+    durationS: tags.durationMs ? Math.round(tags.durationMs / 1000) : null,
+  };
+}
+
 /** Asks the provider for the current track's words. */
-export function startLyricsSearch(): void {
+export function startLyricsSearch(query?: LyricsQuery): void {
   const path = player().path ?? "";
   if (path === "") return;
   if (searchStop === null) {
@@ -163,17 +197,83 @@ export function startLyricsSearch(): void {
     });
   }
   lyricsSearch.set({ status: "searching" });
-  const tags = player();
-  const title = tags.title || fileTitle(path);
-  const artist = tags.artist ?? "";
-  const album = tags.album ?? "";
-  const durationS = player().durationMs ? Math.round(player().durationMs / 1000) : null;
+  const asked = query ?? lyricsQueryForCurrent();
   try {
-    engine.searchLyrics(artist, title, album, durationS);
+    engine.searchLyrics(asked.artist, asked.title, asked.album, asked.durationS);
   } catch (error) {
     console.warn("neiro: 歌词搜索没有发出去:", String(error));
     lyricsSearch.set({ status: "done", candidates: [] });
   }
+}
+
+// ---- 匹配度 ----------------------------------------------------------------
+
+/** Letters, digits and CJK only: a provider writes 「キラメキ」 and 「キラメキ - EP
+ * Version」 as different strings, and punctuation is what differs. */
+function normalize(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[\(（\[【].*?[\)）\]】]/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+/** Sørensen–Dice over character bigrams.
+ *
+ * Bigrams rather than words because the titles here are Japanese and Chinese:
+ * one has no spaces to split on, and a wrong character in a two-character word
+ * still leaves the rest matching. `1` is the same string, `0` shares nothing. */
+export function similarity(left: string, right: string): number {
+  const a = normalize(left);
+  const b = normalize(right);
+  if (a === "" || b === "") return 0;
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  const grams = new Map<string, number>();
+  for (let i = 0; i < a.length - 1; i += 1) {
+    const gram = a.slice(i, i + 2);
+    grams.set(gram, (grams.get(gram) ?? 0) + 1);
+  }
+  let hits = 0;
+  for (let i = 0; i < b.length - 1; i += 1) {
+    const gram = b.slice(i, i + 2);
+    const left = grams.get(gram) ?? 0;
+    if (left > 0) {
+      grams.set(gram, left - 1);
+      hits += 1;
+    }
+  }
+  return (2 * hits) / (a.length - 1 + (b.length - 1));
+}
+
+/** How well a candidate answers the query, `0`..`1`.
+ *
+ * The three facts weigh in the order a listener notices a wrong answer: the
+ * words of another song (title), the words of another singer, then a version
+ * whose timing differs. Length is the loosest — a live take is the same song —
+ * so it can only move a result, never decide it. */
+export function matchScore(candidate: LyricsCandidate, query: LyricsQuery): number {
+  const title = similarity(candidate.track, query.title);
+  const artist =
+    query.artist.trim() === "" ? 0.55 : similarity(candidate.artist, query.artist);
+  const album =
+    query.album.trim() === "" || candidate.album.trim() === ""
+      ? 0.5
+      : similarity(candidate.album, query.album);
+  let length = 0.5;
+  if (query.durationS && candidate.durationS > 0) {
+    length = Math.max(0, 1 - Math.abs(candidate.durationS - query.durationS) / 45);
+  }
+  return Math.min(1, title * 0.5 + artist * 0.3 + album * 0.1 + length * 0.1);
+}
+
+/** The candidates of the last search, best first. A tie keeps the provider's
+ * order, which is its own relevance ranking. */
+export function rankedCandidates(query: LyricsQuery): { candidate: LyricsCandidate; score: number }[] {
+  const state = lyricsSearch();
+  if (state.status !== "done") return [];
+  return state.candidates
+    .map((candidate) => ({ candidate, score: matchScore(candidate, query) }))
+    .sort((left, right) => right.score - left.score);
 }
 
 /** The file's own name, without directory or extension: the fallback title

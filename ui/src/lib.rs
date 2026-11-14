@@ -1118,6 +1118,34 @@ fn now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Where a finished lyrics search leaves its answer: the search runs on a
+/// thread of its own, the listeners live on the core's, and this is the only
+/// thing the two share.
+static LYRICS_RESULTS: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::sync::mpsc::Sender<Vec<LyricsCandidate>>>>,
+> = std::sync::OnceLock::new();
+
+/// Drains a completed lyrics search into the listeners, waking every 30 ms —
+/// the same shape as the engine's own channel, for the same reason.
+async fn lyrics_pump(
+    receiver: std::sync::mpsc::Receiver<Vec<LyricsCandidate>>,
+    inner: Arc<Mutex<Inner>>,
+) {
+    loop {
+        match receiver.try_recv() {
+            Ok(candidates) => {
+                if let Ok(mut guard) = inner.lock() {
+                    guard.on_lyrics_found.post(&candidates);
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                timer(std::time::Duration::from_millis(30)).await
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
 /// Drains the engine's event channel into the listeners. Runs as a task of
 /// the core, waking every 30 ms: the events are low-rate (state changes, one
 /// position event per track tick), so a poll costs nothing next to a
@@ -1185,6 +1213,14 @@ impl Base {
         let pump_engine = engine.clone();
         let pump_inner = inner.clone();
         cx.start(async move {
+            let (lyrics_send, lyrics_receive) = std::sync::mpsc::channel();
+            if let Ok(mut slot) = LYRICS_RESULTS
+                .get_or_init(|| std::sync::Mutex::new(None))
+                .lock()
+            {
+                *slot = Some(lyrics_send);
+            }
+            spawn(lyrics_pump(lyrics_receive, pump_inner.clone()));
             pump(pump_engine, receiver, pump_inner).await;
         });
         Ok(Base { engine, inner })
@@ -1938,13 +1974,21 @@ impl Base {
         if title.trim().is_empty() {
             return Err("E_LYRICS: 这首歌没有标题，无法搜索。".into());
         }
-        // Runs on the engine thread: the request is blocking, and the answer
-        // is posted from the same thread Base's own events arrive on. A task
-        // spawned here would land on a thread with no reactive runtime.
-        let candidates = fetch_lyrics(artist, title, album, duration_s);
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.on_lyrics_found.post(&candidates);
-        }
+        // The request blocks for as long as the provider takes, and it must
+        // not run on a thread the interface waits for: a search that is slow
+        // froze the whole window. The answer comes back through the channel
+        // `lyrics_pump` drains.
+        let sender = LYRICS_RESULTS
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        std::thread::spawn(move || {
+            let candidates = fetch_lyrics(artist, title, album, duration_s);
+            if let Some(sender) = sender {
+                let _ = sender.send(candidates);
+            }
+        });
         Ok(())
     }
 
