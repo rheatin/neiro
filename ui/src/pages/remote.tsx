@@ -39,12 +39,14 @@ import { notify } from "../state/feedback";
 import { AppPage } from "../components/page";
 import { enter } from "../components/ui/motion";
 import { Icon } from "../components/ui/icons";
+import { TrackHeader } from "../components/library/tracks";
+import { wideTracks } from "../components/layout";
 
 const CONTAINER_LABEL = (container: string): string => (container ? container.toUpperCase() : "").slice(0, 5);
 
 /** One remote track: its cover, name+artist+container 徽标, and its play
  * column that fetches (转圈) then plays the cached file. */
-export function RemoteTrackRow(props: { track: RemoteTrack; number: number }) {
+export function RemoteTrackRow(props: { track: RemoteTrack; number: number; showAlbum?: boolean }) {
   const track = () => props.track;
   const fetching = () => isFetchingRemote(track().id);
   // 远程行没有本地路径：收藏/加入曲单要等引擎把文件取进缓存，拿到那条
@@ -94,6 +96,9 @@ export function RemoteTrackRow(props: { track: RemoteTrack; number: number }) {
         <Text class="line-clamp-1 text-sm font-medium text-foreground">{track().title || "—"}</Text>
         <Text class="line-clamp-1 flex-1 text-xs text-muted-foreground">{track().artist || track().album || "—"}</Text>
       </View>
+      <If when={props.showAlbum === true}>
+        <Text class="line-clamp-1 min-w-0 flex-1 text-xs text-muted-foreground">{track().album || "—"}</Text>
+      </If>
       <If when={track().container}>
         <Text
           accessibilityLabel={`容器 ${track().container}`}
@@ -196,17 +201,20 @@ function RemoteList(props: { rows: RemoteTrack[] }) {
       when={props.rows.length > 0 || total > 0}
       else={
         <If when={remoteLoadingState() === "loading"} else={<EmptyState title="服务器上没有曲目" detail="服务器连通了，但里的曲目是空的。" />}>
-          <RowsSkeleton rows={8} />
+          <RowsSkeleton rows={8} header />
         </If>
       }
     >
       <View class="px-3">
+        {/* The same header the local lists draw: a remote row is a track row
+            with a different origin, not another kind of list. */}
+        <TrackHeader showAlbum={wideTracks()} />
         <If when={remoteQuery().trim()}>
           <Text class="px-3 pb-2 text-xs text-muted-foreground">{props.rows.length} / {total} 首曲目中匹配</Text>
         </If>
         <Each of={props.rows}>
           {(track, i) => (
-            <RemoteTrackRow track={track()} number={i()} />
+            <RemoteTrackRow track={track()} number={i()} showAlbum={wideTracks()} />
           )}
         </Each>
         <If when={remoteLoadingState() === "loading" && remoteTracks().length > 0}>
