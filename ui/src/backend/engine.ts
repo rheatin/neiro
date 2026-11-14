@@ -1,0 +1,811 @@
+// `engine.ts`: the one file that talks to the engine. It owns the process's
+// single `Base` (a `globalThis` slot keeps a hot update from making a
+// second one, spotish's rule), mirrors what Base reports into signals, and
+// fans the pure events (artwork, scan, error) out to the stores that
+// subscribe.
+//
+// Without `neiro_base.dll` the construction throws `E_ENGINE…`: this keeps
+// it, sets `health` to `"failed"` and adds no listeners, so every page
+// renders the honest "引擎未连接" paint instead of plausible data. `retry()`
+// closes what is there and builds again.
+
+import { signal, Storage, type Accessor } from "nsh";
+import type { TagFields } from "./types";
+import {
+  Base,
+  type Album as NativeAlbum,
+  type ArtworkBytes as NativeArtworkBytes,
+  type ArtworkList as NativeArtworkList,
+  type Artist as NativeArtist,
+  type DeviceInfo as NativeDevice,
+  type PlayerState as NativePlayer,
+  type QueueInfo as NativeQueue,
+  type RemoteArtwork as NativeRemoteArtwork,
+  type RemoteFetched as NativeRemoteFetched,
+  type RemoteItemsPage as NativeRemoteItemsPage,
+  type RemotePlaylist as NativeRemotePlaylist,
+  type RemoteStatus as NativeRemoteStatus,
+  type RemoteTrack as NativeRemoteTrack,
+  type RenderPathInfo as NativeRenderPath,
+  type ScanEvent as NativeScanEvent,
+  type SearchPage as NativeSearch,
+  type SettingsInfo as NativeSettings,
+  type Track as NativeTrack,
+  type TracksPage as NativeTracksPage,
+  type Favourites as NativeFavourites,
+  type Playlist as NativePlaylist,
+  type PlaylistEntriesPage as NativePlaylistEntriesPage,
+  type MostPlayed as NativeMostPlayed,
+} from "neiro/native";
+import { notify } from "../state/feedback";
+import {
+  type VisualFrame,
+  albumKey,
+  EMPTY_PLAYER,
+  errorOf,
+  type Album,
+  type Artist,
+  type ArtworkList,
+  type Backend,
+  type Device,
+  type EqBand,
+  type Favourites,
+  type Health,
+  type MostPlayed,
+  type Player,
+  type Playlist,
+  type PlaylistEntriesPage,
+  type Queue,
+  type RemoteArtwork,
+  type RemoteFetched,
+  type RemoteItemsPage,
+  type RemoteKind,
+  type RemotePlaylist,
+  type RemoteStatus,
+  type RemoteTrack,
+  type RenderPath,
+  type ScanEvent,
+  type SearchResults,
+  type Settings,
+  type Track,
+  type TracksPage,
+} from "./types";
+
+const SLOT_KEY = "__neiroEngine";
+
+/** A raw failure Base reported (`error` events, an `op` names what it was
+ * doing). */
+export interface EngineOpError {
+  op: string;
+  message: string;
+}
+
+type Fanout<T> = (value: T) => void;
+
+/** The num of one track page the engine answers with; UI pages are this big.
+ * The contract caps a page at 500. */
+export const TRACK_PAGE = 500;
+
+// The mirrored state. One signal per piece (one owner), made once at module
+// scope so a hot update reuses them.
+const healthSig = signal<Health>({ status: "starting", error: null });
+const playerSig = signal<Player>({ ...EMPTY_PLAYER, at: Date.now() });
+const renderPathSig = signal<RenderPath | null>(null);
+const devicesSig = signal<Device[]>([]);
+const DEVICES_KEY = "audio:devices";
+
+// The last enumeration, read back at start: enumeration opens every endpoint,
+// which cannot be done while a stream holds one, and an empty list would read
+// as "this machine has none".
+Storage.getItem(DEVICES_KEY)
+  .then((saved) => {
+    if (!saved) return;
+    const parsed: unknown = JSON.parse(saved);
+    if (!Array.isArray(parsed)) return;
+    const rows = (parsed as Device[]).filter(
+      (row) => row && typeof row.id === "string" && typeof row.name === "string",
+    );
+    if (rows.length > 0) devicesSig.set(rows);
+  })
+  .catch((error) => console.warn("neiro: 端点列表没有读回来:", String(error)));
+const queueSig = signal<Queue>({ queue: [], index: null });
+const settingsSig = signal<Settings | null>(null);
+const albumsSig = signal<Album[]>([]);
+const artistsSig = signal<Artist[]>([]);
+const searchSig = signal<SearchResults | null>(null);
+const tracksSig = signal<TracksPage | null>(null);
+const favouritesSig = signal<Favourites>({ paths: [] });
+const playlistsSig = signal<Playlist[]>([]);
+const playlistEntriesSig = signal<PlaylistEntriesPage | null>(null);
+const mostPlayedSig = signal<MostPlayed[]>([]);
+const remoteStatusSig = signal<RemoteStatus>({ configured: false, kind: null, baseUrl: "" });
+const remoteTracksSig = signal<RemoteTrack[]>([]);
+const remotePlaylistsSig = signal<RemotePlaylist[]>([]);
+const remoteItemsSig = signal<RemoteItemsPage | null>(null);
+const remoteFetchedSig = signal<RemoteFetched | null>(null);
+
+function num(value: number | undefined | null): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function text(value: string | null | undefined): string {
+  return typeof value === "string" ? value : "";
+}
+
+/** Not a plausible default: Base reports `null` where it measured nothing
+ * and the UI draws what it got. */
+function gain(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function playerOf(n: NativePlayer | null | undefined): Player {
+  if (!n) return { ...EMPTY_PLAYER, at: Date.now() };
+  return {
+    state: (text(n.state) || "stopped") as Player["state"],
+    path: n.path ?? null,
+    title: text(n.title),
+    artist: text(n.artist),
+    album: text(n.album),
+    positionMs: num(n.positionMs),
+    durationMs: num(n.durationMs),
+    at: num(n.at) || Date.now(),
+    volume: gain(n.volume),
+    bitrateKbps: gain(n.bitrateKbps),
+    codec: text(n.codec),
+    trackSerial: num(n.trackSerial),
+    resolvedJson: n.resolvedJson ?? null,
+  };
+}
+
+function trackOf(n: NativeTrack): Track {
+  return {
+    path: text(n.path),
+    title: text(n.title),
+    artist: text(n.artist),
+    album: text(n.album),
+    albumArtist: text(n.albumArtist),
+    discNo: num(n.discNo),
+    trackNo: num(n.trackNo),
+    year: num(n.year),
+    genre: text(n.genre),
+    durationMs: num(n.durationMs),
+    sampleRate: num(n.sampleRate),
+    bits: num(n.bits),
+    channels: num(n.channels),
+  };
+}
+
+function tracksPageOf(n: NativeTracksPage): TracksPage {
+  return {
+    tracks: (n.tracks ?? []).map(trackOf),
+    total: num(n.total),
+    offset: num(n.offset),
+  };
+}
+
+// Album rows keep the identity the library pages group by.
+function albumOf(n: NativeAlbum): Album {
+  return {
+    album: text(n.album),
+    albumArtist: text(n.albumArtist),
+    year: num(n.year),
+    trackCount: num(n.trackCount),
+  };
+}
+
+function artistOf(n: NativeArtist): { artist: string; trackCount: number; albumCount: number } {
+  return { artist: text(n.artist), trackCount: num(n.trackCount), albumCount: num(n.albumCount) };
+}
+
+function renderPathOf(n: NativeRenderPath | null | undefined): RenderPath | null {
+  if (!n) return null;
+  return {
+    sourceRate: num(n.sourceRate),
+    sampleRate: num(n.sampleRate),
+    channels: num(n.channels),
+    bitsPerSample: num(n.bitsPerSample),
+    validBits: num(n.validBits),
+    isFloat: n.isFloat ?? false,
+    resampling: n.resampling ?? false,
+    dithered: n.dithered ?? false,
+    bitPerfect: n.bitPerfect ?? false,
+    reason: num(n.reason),
+    latencyMs: num(n.latencyMs),
+    volume: num(n.volume),
+    eqEnabled: n.eqEnabled ?? false,
+    crossfeedEnabled: n.crossfeedEnabled ?? false,
+    replayGainEnabled: n.replayGainEnabled ?? false,
+    convolverEnabled: n.convolverEnabled ?? false,
+    crossfadeEnabled: n.crossfadeEnabled ?? false,
+  };
+}
+
+function deviceOf(n: NativeDevice): Device {
+  return {
+    id: text(n.id),
+    name: text(n.name),
+    sampleRate: num(n.sampleRate),
+    bitsPerSample: num(n.bitsPerSample),
+    validBits: num(n.validBits),
+    channels: num(n.channels),
+    exclusive: n.exclusive ?? false,
+    shared: n.shared ?? false,
+    supportedSampleRates: (n.supportedSampleRates ?? []).map(num).filter((rate) => rate > 0),
+  };
+}
+
+function queueOf(n: NativeQueue | null | undefined): Queue {
+  return { queue: (n?.queue ?? []).map(text), index: typeof n?.index === "number" ? n.index : null };
+}
+
+function settingsOf(n: NativeSettings | null | undefined): Settings | null {
+  if (!n) return null;
+  return {
+    volume: num(n.volume),
+    eqEnabled: n.eqEnabled ?? false,
+    eqPreampDb: num(n.eqPreampDb),
+    eqBands: (n.eqBands ?? []).map((b) => ({
+      kind: num(b.kind),
+      freqHz: num(b.freqHz),
+      gainDb: num(b.gainDb),
+      q: num(b.q),
+      enabled: b.enabled ?? false,
+      channelMask: num(b.channelMask),
+    })),
+    crossfeedEnabled: n.crossfeedEnabled ?? false,
+    crossfeedAmount: num(n.crossfeedAmount),
+    crossfeedDelayMs: num(n.crossfeedDelayMs),
+    crossfeedCutoffHz: num(n.crossfeedCutoffHz),
+    replayGainMode: num(n.replayGainMode),
+    replayGainPreampDb: num(n.replayGainPreampDb),
+    replayGainPreventClipping: n.replayGainPreventClipping ?? false,
+    replayGainFallbackDb: num(n.replayGainFallbackDb),
+    convolverEnabled: n.convolverEnabled ?? false,
+    convolverIrPath: text(n.convolverIrPath),
+    convolverWet: num(n.convolverWet),
+    convolverDry: num(n.convolverDry),
+    convolverGainDb: num(n.convolverGainDb),
+    convolverNormalize: n.convolverNormalize ?? false,
+    crossfadeEnabled: n.crossfadeEnabled ?? false,
+    crossfadeDurationMs: num(n.crossfadeDurationMs),
+    crossfadeCurve: num(n.crossfadeCurve),
+  };
+}
+
+function scanOf(n: NativeScanEvent): ScanEvent {
+  return {
+    kind: (text(n.kind) || "started") as ScanEvent["kind"],
+    root: text(n.root),
+    added: n.added ?? [],
+    modified: n.modified ?? [],
+    removed: n.removed ?? [],
+    roots: n.roots ?? [],
+    rescan: n.rescan ?? false,
+  };
+}
+
+function artworkListOf(n: NativeArtworkList): ArtworkList {
+  return {
+    path: text(n.path),
+    pictures: (n.pictures ?? []).map((p) => ({ role: text(p.role), mime: p.mime ?? null, size: num(p.size) })),
+  };
+}
+
+// ---- 远程库（v2） -----------------------------------------------------------
+
+function remoteStatusOf(n: NativeRemoteStatus | undefined | null): RemoteStatus {
+  const kind = text(n?.kind);
+  return {
+    configured: n?.configured ?? false,
+    kind: kind === "jellyfin" || kind === "navidrome" ? (kind as RemoteKind) : null,
+    baseUrl: text(n?.baseUrl),
+  };
+}
+
+function remoteTrackOf(n: NativeRemoteTrack): RemoteTrack {
+  return {
+    id: text(n.id),
+    title: text(n.title),
+    artist: text(n.artist),
+    album: text(n.album),
+    container: text(n.container),
+    durationMs: num(n.durationMs),
+    size: typeof n.size === "number" ? n.size : null,
+    coverArt: typeof n.coverArt === "string" ? n.coverArt : null,
+  };
+}
+
+function remotePlaylistOf(n: NativeRemotePlaylist): RemotePlaylist {
+  return { id: text(n.id), name: text(n.name), trackCount: num(n.trackCount), durationMs: num(n.durationMs) };
+}
+
+function remoteItemsOf(n: NativeRemoteItemsPage | undefined | null): RemoteItemsPage | null {
+  if (!n) return null;
+  return { id: text(n.id), tracks: (n.tracks ?? []).map(remoteTrackOf) };
+}
+
+function remoteFetchedOf(n: NativeRemoteFetched | undefined | null): RemoteFetched | null {
+  if (!n || !n.track) return null;
+  return { track: remoteTrackOf(n.track), path: text(n.path) };
+}
+
+function remoteArtworkOf(n: NativeRemoteArtwork | undefined | null): RemoteArtwork | null {
+  if (!n) return null;
+  return { id: text(n.id), mime: n.mime ?? null, data: n.data ?? null };
+}
+
+// ---- 曲库的用户层（v3） --------------------------------------------------------
+
+function favouritesOf(n: NativeFavourites | undefined | null): Favourites {
+  return { paths: (n?.paths ?? []).filter((p) => typeof p === "string") };
+}
+
+function playlistOf(n: NativePlaylist): Playlist {
+  return { id: num(n.id), name: text(n.name), trackCount: num(n.trackCount) };
+}
+
+function playlistEntriesOf(n: NativePlaylistEntriesPage | undefined | null): PlaylistEntriesPage | null {
+  if (!n) return null;
+  return {
+    id: num(n.id),
+    entries: (n.entries ?? []).map((entry) => ({ path: text(entry.path), position: num(entry.position) })),
+  };
+}
+
+function mostPlayedOf(n: NativeMostPlayed): MostPlayed {
+  return { path: text(n.path), playCount: num(n.playCount) };
+}
+
+/** The engine store: the one Base, the signals it feeds, and the requests. */
+export class Engine implements Backend {
+  readonly health: Accessor<Health> = () => healthSig();
+  readonly player: Accessor<Player> = () => playerSig();
+  readonly renderPath: Accessor<RenderPath | null> = () => renderPathSig();
+  readonly devices: Accessor<Device[]> = () => devicesSig();
+  /** One page of the track index as the engine last answered it: the
+   * catalog store stitches pages together. */
+  readonly tracksPage: Accessor<TracksPage | null> = () => tracksSig();
+  readonly albums: Accessor<Album[]> = () => albumsSig();
+  readonly artists: Accessor<Artist[]> = () => artistsSig();
+  readonly search: Accessor<SearchResults | null> = () => searchSig();
+  readonly queue: Accessor<Queue> = () => queueSig();
+  readonly settings: Accessor<Settings | null> = () => settingsSig();
+  readonly remoteStatus: Accessor<RemoteStatus> = () => remoteStatusSig();
+  readonly remoteTracks: Accessor<RemoteTrack[]> = () => remoteTracksSig();
+  readonly remotePlaylists: Accessor<RemotePlaylist[]> = () => remotePlaylistsSig();
+  readonly remoteItems: Accessor<RemoteItemsPage | null> = () => remoteItemsSig();
+  readonly remoteFetched: Accessor<RemoteFetched | null> = () => remoteFetchedSig();
+  readonly favourites: Accessor<Favourites> = () => favouritesSig();
+  readonly playlists: Accessor<Playlist[]> = () => playlistsSig();
+  readonly playlistEntries: Accessor<PlaylistEntriesPage | null> = () => playlistEntriesSig();
+  readonly mostPlayed: Accessor<MostPlayed[]> = () => mostPlayedSig();
+
+  #base: Base | null = null;
+  #stops: (() => void)[] = [];
+  #resolvedSubs = new Set<Fanout<string>>();
+  #tagSubs = new Set<Fanout<TagFields>>();
+  #visualSubs = new Set<Fanout<VisualFrame>>();
+  #artListSubs = new Set<Fanout<ArtworkList>>();
+  #artDataSubs = new Set<Fanout<NativeArtworkBytes>>();
+  #scanSubs = new Set<Fanout<ScanEvent>>();
+  #errorSubs = new Set<Fanout<EngineOpError>>();
+  #remoteFetchedSubs = new Set<Fanout<RemoteFetched>>();
+  #remoteArtworkSubs = new Set<Fanout<RemoteArtwork | null>>();
+
+  /** Builds the Base, absorbs its snapshot through the first listener calls
+   * and reports `failed` with the engine's own words when there is none. */
+  connect(): void {
+    this.dispose();
+    try {
+      this.#base = new Base();
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      healthSig.set({ status: "failed", error: text });
+      return;
+    }
+    const base = this.#base;
+    this.#stops.push(
+      base.onPlayer((p) => playerSig.set(playerOf(p))),
+      base.onRenderPath((r) => renderPathSig.set(renderPathOf(r))),
+      base.onDevices((d) => {
+        const rows = (d ?? []).map(deviceOf);
+        devicesSig.set(rows);
+        if (rows.length > 0) {
+          void Storage.setItem(DEVICES_KEY, JSON.stringify(rows)).catch((error) =>
+            console.warn("neiro: 端点列表没有记住:", String(error)),
+          );
+        }
+      }),
+      base.onQueue((q) => queueSig.set(queueOf(q))),
+      base.onSettings((s) => settingsSig.set(settingsOf(s))),
+      base.onTracks((page) => tracksSig.set(page ? tracksPageOf(page) : null)),
+      base.onAlbums((a) => albumsSig.set((a ?? []).map(albumOf))),
+      base.onArtists((a) => artistsSig.set((a ?? []).map(artistOf))),
+      base.onSearch((s) =>
+        searchSig.set({ query: text(s?.query), tracks: (s?.tracks ?? []).map(trackOf) }),
+      ),
+      base.onArtworkList((list) => this.#fan(this.#artListSubs, artworkListOf(list))),
+      base.onArtworkData((data) => this.#fan(this.#artDataSubs, data)),
+      base.onScan((event) => this.#fan(this.#scanSubs, scanOf(event))),
+      base.onError((e) => this.#fan(this.#errorSubs, { op: text(e?.op), message: text(e?.message) })),
+      base.onRemote((s) => remoteStatusSig.set(remoteStatusOf(s))),
+      base.onRemoteTracks((t) => remoteTracksSig.set((t ?? []).map(remoteTrackOf))),
+      base.onRemotePlaylists((p) => remotePlaylistsSig.set((p ?? []).map(remotePlaylistOf))),
+      base.onRemoteItems((page) => remoteItemsSig.set(remoteItemsOf(page))),
+      base.onRemoteFetched((f) => {
+        const mapped = remoteFetchedOf(f);
+        remoteFetchedSig.set(mapped);
+        if (mapped) this.#fan(this.#remoteFetchedSubs, mapped);
+      }),
+      base.onRemoteArtwork((a) => this.#fan(this.#remoteArtworkSubs, remoteArtworkOf(a))),
+      base.onFavourites((f) => favouritesSig.set(favouritesOf(f))),
+      base.onPlaylists((p) => playlistsSig.set((p ?? []).map(playlistOf))),
+      base.onPlaylistEntries((page) => playlistEntriesSig.set(playlistEntriesOf(page))),
+      base.onMostPlayed((m) => mostPlayedSig.set((m ?? []).map(mostPlayedOf))),
+      base.onResolved((text) => this.#fan(this.#resolvedSubs, typeof text === "string" ? text : "")),
+      base.onTags((page) =>
+        this.#fan(this.#tagSubs, {
+          path: text(page?.path),
+          fields: (page?.fields ?? []).map((field) => ({
+            family: text(field?.family),
+            key: text(field?.key),
+            name: text(field?.name),
+            value: text(field?.value),
+          })),
+        }),
+      ),
+      base.onVisualFrame((frame) => {
+        if (!frame) return;
+        this.#fan(
+          this.#visualSubs,
+          {
+            bins: (frame.bins ?? []).map((b) => num(b)),
+            fftSize: num(frame.fftSize),
+            sampleRate: num(frame.sampleRate),
+            peak: num(frame.peak),
+            peakL: frame.peakL === null || frame.peakL === undefined ? null : num(frame.peakL),
+            peakR: frame.peakR === null || frame.peakR === undefined ? null : num(frame.peakR),
+            rms: num(frame.rms),
+            framesFed: num(frame.framesFed),
+            envelope: (frame.envelope ?? []).map((e) => num(e)),
+            envelopeHopMs: num(frame.envelopeHopMs),
+          } as VisualFrame,
+        );
+      }),
+    );
+    healthSig.set({ status: "ready", error: null });
+  }
+
+  /** Stops listening and frees the one Base (never on a hot update's
+   * behalf: the slot below keeps the store alive). */
+  dispose(): void {
+    for (const stop of this.#stops.splice(0)) stop();
+    if (this.#base) {
+      this.#base.shutdown();
+      this.#base.dispose();
+      this.#base = null;
+    }
+  }
+
+  /** Tries the engine again: a fresh Base, its snapshot, the same signals. */
+  retry(): void {
+    this.connect();
+  }
+
+  #fan<T>(subs: Set<Fanout<T>>, value: T): void {
+    for (const sub of subs) sub(value);
+  }
+
+  /** The engine's own page of pure events: Base answers every artwork ask
+   * on one channel keyed by path, and reports the scan and its errors as
+   * they happen. The stores subscribe; the store is responsible for
+   * unsubscribing when it goes. */
+  subscribeArtworkList(sub: Fanout<ArtworkList>): () => void {
+    this.#artListSubs.add(sub);
+    return () => this.#artListSubs.delete(sub);
+  }
+
+  subscribeArtworkData(sub: Fanout<NativeArtworkBytes>): () => void {
+    this.#artDataSubs.add(sub);
+    return () => this.#artDataSubs.delete(sub);
+  }
+
+  subscribeScan(sub: Fanout<ScanEvent>): () => void {
+    this.#scanSubs.add(sub);
+    return () => this.#scanSubs.delete(sub);
+  }
+
+  subscribeEngineError(sub: Fanout<EngineOpError>): () => void {
+    this.#errorSubs.add(sub);
+    return () => this.#errorSubs.delete(sub);
+  }
+
+  /** One remote track just landed in the cache (path included): the
+   * player plays it from here. */
+  subscribeRemoteFetched(sub: Fanout<RemoteFetched>): () => void {
+    this.#remoteFetchedSubs.add(sub);
+    return () => this.#remoteFetchedSubs.delete(sub);
+  }
+
+  /** One remote cover answered (data === null: the server has no
+   * picture). */
+  subscribeRemoteArtwork(sub: Fanout<RemoteArtwork | null>): () => void {
+    this.#remoteArtworkSubs.add(sub);
+    return () => this.#remoteArtworkSubs.delete(sub);
+  }
+
+  /** One re-resolve: the whole diagnostics JSON for the current stream, as
+   * a string (它与 `player().resolvedJson` 同一内容，事件线给它"为什么"
+   * 的最新值——播放中的每一次重新解析都到）。 */
+  /** A file's tag fields, answered once per `readTags`. */
+  subscribeTags(sub: Fanout<TagFields>): () => void {
+    this.#tagSubs.add(sub);
+    return () => this.#tagSubs.delete(sub);
+  }
+
+  subscribeResolved(sub: Fanout<string>): () => void {
+    this.#resolvedSubs.add(sub);
+    return () => this.#resolvedSubs.delete(sub);
+  }
+
+  /** 可视化帧：无缓存、无首呼（一个过期帧没有价值）；只在播放与已订阅
+   * 时到达。订阅者自己也负责 life time（视觉状态机挂在 Now Playing 的
+   * open/playing 上）。 */
+  subscribeVisualFrame(sub: Fanout<VisualFrame>): () => void {
+    this.#visualSubs.add(sub);
+    return () => this.#visualSubs.delete(sub);
+  }
+
+  // ---- Requests ------------------------------------------------------------
+
+  /** Sends a command; the engine reports the change as an event. When there
+   * is no engine (`failed`, or before `connect`), a refusal that says so. */
+  #command(run: (base: Base) => void): void {
+    const base = this.#base;
+    if (!base) throw new Error("E_ENGINE: 引擎未连接。先构建 ../Neiro/base，然后重试。");
+    run(base);
+  }
+
+  play(path: string): void {
+    this.#command((base) => base.play(path));
+  }
+
+  enqueue(paths: string[]): void {
+    this.#command((base) => base.enqueue(paths));
+  }
+
+  removeFromQueue(index: number): void {
+    this.#command((base) => base.removeFromQueue(index));
+  }
+
+  moveInQueue(from: number, to: number): void {
+    this.#command((base) => base.moveInQueue(from, to));
+  }
+
+  clearQueue(): void {
+    this.#command((base) => base.clearQueue());
+  }
+
+  pause(): void {
+    this.#command((base) => base.pause());
+  }
+
+  resume(): void {
+    this.#command((base) => base.resume());
+  }
+
+  stop(): void {
+    this.#command((base) => base.stop());
+  }
+
+  next(): void {
+    this.#command((base) => base.next());
+  }
+
+  seek(seconds: number): void {
+    this.#command((base) => base.seek(seconds));
+  }
+
+  setVolume(gainValue: number): void {
+    this.#command((base) => base.setVolume(gainValue));
+  }
+
+  listDevices(): void {
+    this.#command((base) => base.listDevices());
+  }
+
+  /** Asks for one file's tag fields; answered on `subscribeTags`. */
+  readTags(path: string): void {
+    this.#command((base) => base.readTags(path));
+  }
+
+  setDevice(deviceId: string | null): void {
+    this.#command((base) => base.setDevice(deviceId));
+  }
+
+  /** Changes the output policy (rate 模式 native/device/fixed、质量、共
+   * 享)。`policyjson` 由界面按引擎的字段名组合；引擎做下一次在当前进度
+   * 重开流。 */
+  setPolicy(policyJson: string): void {
+    this.#command((base) => base.setPolicy(policyJson));
+  }
+
+  setEq(enabled: boolean, preampDb: number, bands: EqBand[]): void {
+    this.#command((base) => base.setEq(enabled, preampDb, bands));
+  }
+
+  setCrossfeed(enabled: boolean, amount: number, delayMs: number, cutoffHz: number): void {
+    this.#command((base) => base.setCrossfeed(enabled, amount, delayMs, cutoffHz));
+  }
+
+  /** `mode`: `0` off、`1` track、`2` album。 */
+  setReplayGain(mode: number, preampDb: number, preventClipping: boolean, fallbackDb: number): void {
+    this.#command((base) => base.setReplayGain(mode, preampDb, preventClipping, fallbackDb));
+  }
+
+  setConvolver(enabled: boolean, irPath: string, wet: number, dry: number, gainDb: number, normalize: boolean): void {
+    this.#command((base) => base.setConvolver(enabled, irPath, wet, dry, gainDb, normalize));
+  }
+
+  /** `curve`: `0` linear、`1` equal power。 */
+  setCrossfade(enabled: boolean, durationMs: number, curve: number): void {
+    this.#command((base) => base.setCrossfade(enabled, durationMs, curve));
+  }
+
+  /** `null` 停；16 = 60 Hz。只在订阅的 UI 可见时开（Now Playing 且播放）。 */
+  setVisualiser(intervalMs: number | null): void {
+    this.#command((base) => base.setVisualiser(intervalMs));
+  }
+
+  scanFolder(root: string): void {
+    this.#command((base) => base.scanFolder(root));
+  }
+
+  watchFolder(root: string): void {
+    this.#command((base) => base.watchFolder(root));
+  }
+
+  unwatchFolder(root: string): void {
+    this.#command((base) => base.unwatchFolder(root));
+  }
+
+  setReconcileInterval(seconds: number): void {
+    this.#command((base) => base.setReconcileInterval(seconds));
+  }
+
+  /** The system's file dialog for a convolver IR; `null` on cancel. */
+  async pickIrFile(): Promise<string | null> {
+    const base = this.#base;
+    if (!base) throw new Error("E_ENGINE: 引擎未连接");
+    return base.pickIrFile();
+  }
+
+  /** The system's folder dialog; `null` when the user cancelled. */
+  async pickFolder(): Promise<string | null> {
+    const base = this.#base;
+    if (!base) throw new Error("E_ENGINE: 引擎未连接");
+    return base.pickFolder();
+  }
+
+  listTracks(offset: number, limit: number): void {
+    this.#command((base) => base.listTracks(offset, limit));
+  }
+
+  listAlbums(): void {
+    this.#command((base) => base.listAlbums());
+  }
+
+  listArtists(): void {
+    this.#command((base) => base.listArtists());
+  }
+
+  searchLibrary(query: string, limit: number): void {
+    this.#command((base) => base.search(query, limit));
+  }
+
+  readArtworkList(path: string): void {
+    this.#command((base) => base.readArtworkList(path));
+  }
+
+  readArtworkBytes(path: string, index: number): void {
+    this.#command((base) => base.readArtworkBytes(path, index));
+  }
+
+  // ---- 远程库（v2，契约：缓存目录由 Rust 固定，不传参） --------------------------
+
+  setRemoteJellyfinPassword(baseUrl: string, user: string, password: string): void {
+    this.#command((base) => base.setRemoteJellyfinPassword(baseUrl, user, password));
+  }
+
+  setRemoteJellyfinToken(baseUrl: string, token: string): void {
+    this.#command((base) => base.setRemoteJellyfinToken(baseUrl, token));
+  }
+
+  setRemoteNavidrome(baseUrl: string, user: string, password: string): void {
+    this.#command((base) => base.setRemoteNavidrome(baseUrl, user, password));
+  }
+
+  /** 断开：丢弃内存层，磁盘缓存保留 —— 引擎自己清。 */
+  clearRemote(): void {
+    this.#command((base) => base.clearRemote());
+  }
+
+  /** One page of the remote index (default 200; a short page ends it). */
+  listRemote(start: number, limit: number): void {
+    this.#command((base) => base.listRemote(start, limit));
+  }
+
+  fetchRemote(id: string): void {
+    this.#command((base) => base.fetchRemote(id));
+  }
+
+  fetchRemoteArtwork(id: string): void {
+    this.#command((base) => base.fetchRemoteArtwork(id));
+  }
+
+  listRemotePlaylists(): void {
+    this.#command((base) => base.listRemotePlaylists());
+  }
+
+  listRemotePlaylistItems(id: string, start: number, limit: number): void {
+    this.#command((base) => base.listRemotePlaylistItems(id, start, limit));
+  }
+
+  // ---- 曲库的用户层（v3） ----------------------------------------------------
+
+  setFavourite(path: string, on: boolean): void {
+    this.#command((base) => base.setFavourite(path, on));
+  }
+
+  listFavourites(): void {
+    this.#command((base) => base.listFavourites());
+  }
+
+  listPlaylists(): void {
+    this.#command((base) => base.listPlaylists());
+  }
+
+  createPlaylist(name: string): void {
+    this.#command((base) => base.createPlaylist(name));
+  }
+
+  renamePlaylist(id: number, name: string): void {
+    this.#command((base) => base.renamePlaylist(id, name));
+  }
+
+  deletePlaylist(id: number): void {
+    this.#command((base) => base.deletePlaylist(id));
+  }
+
+  addToPlaylist(id: number, path: string): void {
+    this.#command((base) => base.addToPlaylist(id, path));
+  }
+
+  removeFromPlaylist(id: number, path: string): void {
+    this.#command((base) => base.removeFromPlaylist(id, path));
+  }
+
+  listPlaylistEntries(id: number): void {
+    this.#command((base) => base.listPlaylistEntries(id));
+  }
+
+  listMostPlayed(limit: number): void {
+    this.#command((base) => base.listMostPlayed(limit));
+  }
+
+  recordPlay(path: string, atMs: number): void {
+    this.#command((base) => base.recordPlay(path, atMs));
+  }
+}
+
+/** The engine the stores share: made once (the slot keeps a hot update from
+ * making a second one), connected by the app root. */
+export const engine: Engine = ((globalThis as Record<string, unknown>)[SLOT_KEY] as Engine) ?? new Engine();
+(globalThis as Record<string, unknown>)[SLOT_KEY] = engine;
+
+/** Reports a refused command as a toast; the pages stay up. */
+export function reportEngineFailure(error: unknown, label = "操作失败"): void {
+  const { code, message } = errorOf(error);
+  console.warn(`neiro: ${code}: ${message}`);
+  notify(`${label}：${message || "引擎没有接受这次操作"}`);
+}

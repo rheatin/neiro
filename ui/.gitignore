@@ -1,0 +1,5 @@
+# NSH generates TypeScript settings and type declarations into .nsh/.
+.nsh/
+target/
+neiro_base.dll
+nae.dll

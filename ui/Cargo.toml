@@ -1,0 +1,32 @@
+[package]
+name = "neiro-ui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A UI host for the Neiro engine's Base layer, drawn by Native Shell in TSX.
+# The Rust crate opens Base through its C ABI at run time and speaks to the
+# TSX interface only through the exports in `src/lib.rs`.
+#
+# The `nsh-*` crates are taken from Native Shell's `main` at the commit this
+# repository's `nsh` CLI was built from (nightly `36b9168`; its own tag
+# `nightly` is the same commit), so the app and the generated hosts share one
+# `nsh-core`.
+[dependencies]
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "61a11d56cd9efee2bcc35672ec9243599288c996" }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "61a11d56cd9efee2bcc35672ec9243599288c996" }
+# Base is opened at run time, never linked: the DLL sits beside the binary and
+# the UI still builds where the engine was never built.
+libloading = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace]
+
+[lib]
+name = "neiro_ui"
+crate-type = ["lib"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
