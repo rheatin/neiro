@@ -10,7 +10,7 @@ import { Text } from "nsh";
 import { ALBUMS, ARTISTS, LIKED, PLAYLISTS, REMOTE, TRACKS, currentRoot, switchTo, type Route } from "../../nav";
 import { favourites } from "../../state/user-catalog";
 import { setNewPlaylistOpen } from "./playlist-dialogs";
-import { removeRoot, roots, setHomeRoot } from "../../state/catalog";
+import { removeRoot, roots, scopedRoot, setHomeRoot } from "../../state/catalog";
 import type { Playlist } from "../../backend/types";
 import { activeRemoteServer, isRemoteConfigured, removeServerById } from "../../state/remote";
 import { selectSource, servers } from "../../state/sources";
@@ -112,7 +112,12 @@ function LibraryPanel(props: { compact: boolean }) {
   const index = () => {
     const root = currentRoot().name;
     return (
-      root === "liked" ? 0 : root === "albums" ? 1 : root === "artists" ? 2 : root === "tracks" ? 3 : root === "playlists" ? 4 : -1
+      root === "liked" ? 0
+      : root === "albums" ? 1
+      : root === "artists" ? 2
+      : root === "tracks" ? (scopedRoot() === null ? 3 : -1)
+      : root === "playlists" ? 4
+      : -1
     );
   };
   const favCount = favourites().length;
@@ -173,6 +178,7 @@ function SourcesPanel(props: { compact?: boolean }) {
             icon="folder"
             label={leafOf(root())}
             detail={root()}
+            active={scopedRoot() === root()}
             testID="source-root"
             onRemove={() => removeRoot(root())}
             onPress={() => {
