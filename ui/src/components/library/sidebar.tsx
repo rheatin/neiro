@@ -13,7 +13,7 @@ import { setNewPlaylistOpen } from "./playlist-dialogs";
 import { removeRoot, roots, scopedRoot, setHomeRoot } from "../../state/catalog";
 import type { Playlist } from "../../backend/types";
 import { activeRemoteServer, isRemoteConfigured, removeServerById } from "../../state/remote";
-import { selectSource, servers } from "../../state/sources";
+import { allSources, LOCAL_ALL_ID, selectSource, servers } from "../../state/sources";
 import { openSourceDialog } from "../ui/server-dialog";
 import { Hint, focusRing, LAYER } from "../ui/controls";
 import { iconMotion, Icon, type IconName } from "../ui/icons";
@@ -62,7 +62,15 @@ function SlidingSelection(props: { index: () => number; top: number }) {
 }
 
 /** One of the nav or library rows. */
-function NavRow(props: { icon: IconName; label: string; route: Route; compact: boolean }) {
+function NavRow(props: {
+  icon: IconName;
+  label: string;
+  route: Route;
+  compact: boolean;
+  /** Runs before the page changes: a row that also means "the whole library"
+   * has to clear a scoped source, or the page stays where it was. */
+  action?: () => void;
+}) {
   const selected = () => currentRoot().name === props.route.name;
   const hover = iconMotion();
   return (
@@ -70,7 +78,10 @@ function NavRow(props: { icon: IconName; label: string; route: Route; compact: b
       <Button
         accessibilityLabel={props.label}
         selected={selected()}
-        onPress={() => switchTo(props.route)}
+        onPress={() => {
+          props.action?.();
+          switchTo(props.route);
+        }}
         tooltip={props.compact ? <Hint label={props.label} /> : undefined}
         class={`group h-11 flex-row items-center rounded-(--radius-inset) transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none ${focusRing} ${
           props.compact ? "justify-center" : "gap-3 px-2"
@@ -137,7 +148,13 @@ function LibraryPanel(props: { compact: boolean }) {
       {likedRow()}
       <NavRow icon="disc" label="专辑" route={ALBUMS} compact={props.compact} />
       <NavRow icon="user" label="歌手" route={ARTISTS} compact={props.compact} />
-      <NavRow icon="music" label="全部曲目" route={TRACKS} compact={props.compact} />
+      <NavRow
+        icon="music"
+        label="全部曲目"
+        route={TRACKS}
+        compact={props.compact}
+        action={() => selectSource(LOCAL_ALL_ID)}
+      />
       <NavRow icon="queue" label="曲单" route={PLAYLISTS} compact={props.compact} />
     </View>
   );
@@ -182,8 +199,11 @@ function SourcesPanel(props: { compact?: boolean }) {
             testID="source-root"
             onRemove={() => removeRoot(root())}
             onPress={() => {
-              // A folder row means that folder, not the whole library.
-              setHomeRoot(root());
+              // One source state, chosen the same way the page's source tabs
+              // choose it: by the id `allSources()` gives that root.
+              const source = allSources().find((entry) => entry.root === root());
+              if (source) selectSource(source.id);
+              else setHomeRoot(root());
               switchTo(TRACKS);
             }}
           />
