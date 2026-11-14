@@ -6,6 +6,15 @@
  * row itself plus `Menu.popup` is the path the docs give, and it works in a
  * cell. A Button nested in the row's Button never receives a press, which
  * is why the "⋯" sits beside the row rather than in it. */
+/** The container a local file is in, from its extension: `flac`, `m4a`, `ape`.
+ * Empty when the path has none. */
+function containerOf(path: string | undefined): string {
+  const name = (path ?? "").split(/[\\/]/).pop() ?? "";
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return "";
+  return name.slice(dot + 1).toLowerCase().slice(0, 5);
+}
+
 export function TrackRow(props: {
   track: Track | undefined;
   number: number;
@@ -119,6 +128,17 @@ export function TrackRow(props: {
           >
             <Icon name="close" size={14} color="muted-foreground" />
           </Button>
+        </If>
+        {/* The container, the way a remote row names it: the file's own
+            extension is the answer for a file on this disk. */}
+        <If when={containerOf(props.track?.path) !== ""}>
+          <Text
+            accessibilityLabel={`容器 ${containerOf(props.track?.path)}`}
+            class="rounded-sm bg-muted-foreground px-1.5 py-0.5 text-center text-[9px] font-mono font-bold lowercase text-background"
+            style={{ minWidth: 42 }}
+          >
+            {containerOf(props.track?.path)}
+          </Text>
         </If>
         <Digits class="w-12 text-right text-xs text-muted-foreground">{clock(props.track?.durationMs ?? 0, true)}</Digits>
       </Button>
