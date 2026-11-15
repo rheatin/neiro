@@ -96,7 +96,7 @@ if ($needDownload) {
             --pattern "$pkgName.zip" `
             --pattern "$pkgName.zip.sha256" `
             --dir $versionCache `
-            --clobber 1>&2
+            --clobber | Out-Null
         if ($LASTEXITCODE -eq 0) {
             $downloaded = $true
             break
