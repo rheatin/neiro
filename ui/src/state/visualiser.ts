@@ -12,15 +12,15 @@
 import { computed, effect, signal, untracked, createAnimatedValue, type AnimatedValue } from "nsh";
 import { engine } from "../backend/engine";
 import { engineHealth } from "../state/engine";
-import { nowPlayingOpen, outputOpen } from "./overlays";
+import { nowPlayingOpen } from "./overlays";
 import { isPlaying } from "./player";
 
-/** Whether a surface that draws the frames is up: Now Playing, or the output
- * console's PPM meter. The engine only sends frames while this holds — they
- * are not free, and a frame nobody draws is a frame wasted. */
-export const visualiserWanted = computed(() => (nowPlayingOpen() || outputOpen()) && isPlaying());
+/** Whether a surface that draws the frames is up: the floating PlayerBar is
+ * always mounted on the desktop shell while playing, alongside Now Playing
+ * and the output console's PPM meter. */
+export const visualiserWanted = computed(() => isPlaying());
 
-/** Now Playing 打开且播放中（光的 live 状态；shader paused 从这里读）。 */
+/** Now Playing 打开且播放中（Now Playing 背景光的 live 状态）。 */
 export const isPlayingSpectrum = computed(() => nowPlayingOpen() && isPlaying());
 
 /** liveValues(count)：spotish 的同款分槽 set（相同值不重发）。 */
@@ -85,6 +85,7 @@ let lastPulse = 0;
 /** 全部 uniforms 的 animated values（toolbar-fx 的 lightUniforms 直接引
  * 用它们的槽位）。 */
 export const live = liveValues(SLOTS);
+live.set(SINCE, 2);
 
 /** 一次接线：订阅与暂停的清零都挂 Now Playing 的 open/playing。 */
 effect(() => {

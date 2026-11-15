@@ -10,6 +10,7 @@ import { barSize } from "../layout";
 import { NowPlayingSummary, SeekBar, TransportControls, VolumeControl } from "./parts";
 import { setOutputOpen, setQueueOpen } from "../../state/overlays";
 import { lightEffect } from "../../state/visual";
+import { LightMenu } from "./light-menu";
 import { PlayerGlass } from "../ui/toolbar-fx";
 import { hasTrack, player } from "../../state/player";
 import { isFavourite, toggleFavourite } from "../../state/user-catalog";
@@ -49,7 +50,7 @@ export function PlayerBar() {
     <View style={enter("fadeInUp", 120)}>
       <View class={stacked() ? "relative rounded-[36px] shadow-xl" : "relative rounded-full shadow-xl"}>
         {/* PlayerGlass: pill 的表面 + 一层低强度的同一光（PlayerGlass 的
-            strength 0.45；surface token player 不透明）——照 spotish。 */}
+            strength 0.6；surface token player 不透明）——照 spotish。 */}
         <PlayerGlass
           effect={lightEffect()}
           playing={player().state === "playing"}
@@ -68,27 +69,36 @@ export function PlayerBar() {
                 when={stacked()}
                 else={
                   // Compact: one row — what plays takes the room on the
-                  // left, the transport on the right. No position or volume
-                  // (Now Playing has both).
+                  // left, the transport and the light's menu on the right.
+                  // No position or volume (Now Playing has both).
                   <View class="min-w-0 flex-1 flex-row items-center justify-between gap-2">
                     <NowPlayingSummary openable round cover={44} />
-                    <TransportControls />
+                    <View class="flex-row items-center gap-1">
+                      <TransportControls />
+                      <LightMenu placement="top" />
+                    </View>
                   </View>
                 }
               >
                 {/* Stacked: two rows — what plays, centred, over the
-                    transport, centred. */}
+                    transport, centred, with the light's menu at the end. */}
                 <View class="h-11 flex-row items-center">
                   <NowPlayingSummary openable center round cover={44} />
                 </View>
-                <View class="h-10 flex-row items-center justify-center">
-                  <TransportControls />
+                <View class="h-10 flex-row items-center">
+                  <View class="w-9" />
+                  <View class="min-w-0 flex-1 items-center">
+                    <TransportControls />
+                  </View>
+                  <View class="w-9 items-end">
+                    <LightMenu placement="top" />
+                  </View>
                 </View>
               </If>
             }
           >
             {/* Full: what plays at the left quarter, the transport over an
-                inline position in the middle, the volume at the right. */}
+                inline position in the middle, the volume and menus at the right. */}
             <View class="min-w-0 w-1/4 flex-row items-center gap-1">
               {/* A smaller round cover, concentric with the pill: 14pt from
                   its edge on every side (72 = 44 + 2 × 14). The heart rides
@@ -105,6 +115,7 @@ export function PlayerBar() {
               <VolumeControl collapsible />
               <IconButton name="queue" label="待播" hint size={18} onPress={() => setQueueOpen(true)} />
               <IconButton name="info" label="输出信息" hint size={18} onPress={() => setOutputOpen(true)} />
+              <LightMenu placement="top" />
             </View>
           </If>
         </PlayerGlass>

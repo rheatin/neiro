@@ -6,6 +6,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
+if ! command -v cargo >/dev/null 2>&1 && [[ -d "$HOME/Library/Caches/puccinialin/cargo" ]]; then
+  export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/Library/Caches/puccinialin/rustup}"
+  export CARGO_HOME="${CARGO_HOME:-$HOME/Library/Caches/puccinialin/cargo}"
+  export PATH="$RUSTUP_HOME/toolchains/stable-aarch64-apple-darwin/bin:$CARGO_HOME/bin:$PATH"
+fi
 export CARGO_PROFILE_RELEASE_STRIP=none
 chmod +x "$ROOT/scripts/fetch-core.sh" "$ROOT/scripts/bundle-macos-app.sh"
 

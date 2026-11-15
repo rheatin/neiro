@@ -1,6 +1,5 @@
 // Which music light plays (播放条与 Now Playing 的同一光)，remembered
-// between runs。可加效果后续在 toolbar-fx 的 LIGHTS 里增；Neiro 本版实现
-// spectrum / dots / bars 三个。选择 Storage 持久化，默认 spectrum。
+// between runs。共 14 种效果（toolbar-fx 的 LIGHTS）加 Random，Storage 持久化。
 
 import { effect, signal, Storage, untracked } from "nsh";
 import { EFFECT_NAMES, TOOLBAR_EFFECTS, type ToolbarEffect } from "../components/ui/toolbar-fx";
