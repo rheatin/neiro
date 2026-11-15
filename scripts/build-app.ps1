@@ -16,15 +16,32 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-$extraPaths = @(
-    "$env:USERPROFILE\.cargo\bin",
-    "$env:USERPROFILE\.local\bin",
-    "$env:USERPROFILE\scoop\shims",
-    "$env:USERPROFILE\scoop\persist\rustup\.cargo\bin",
-    "$env:USERPROFILE\scoop\apps\mingw\current\bin"
-) | Where-Object { $_ -and (Test-Path $_) }
-$env:PATH = (($extraPaths + @($userPath, $machinePath, $env:PATH)) -join ";")
+
+$scoopPersistRustup = "$env:USERPROFILE\scoop\persist\rustup"
+if (Test-Path "$scoopPersistRustup\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin") {
+    $env:CARGO_HOME = "$scoopPersistRustup\.cargo"
+    $env:RUSTUP_HOME = "$scoopPersistRustup\.rustup"
+}
 if (-not $env:RUSTUP_TOOLCHAIN) { $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu" }
+
+$mingwCandidates = Get-ChildItem -Path "$env:USERPROFILE\scoop\apps\mingw" -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -ne "current" } |
+    Sort-Object Name -Descending
+$mingwBin = if ($mingwCandidates) { Join-Path $mingwCandidates[0].FullName "bin" } else { "" }
+if ($mingwBin -and (Test-Path "$mingwBin\cc.exe")) {
+    $env:CC = "$mingwBin\cc.exe"
+    $env:CXX = "$mingwBin\c++.exe"
+    $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = "$mingwBin\cc.exe"
+}
+
+$extraPaths = @(
+    "$scoopPersistRustup\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin",
+    "$env:USERPROFILE\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin",
+    $mingwBin,
+    "$env:LOCALAPPDATA\nsh\bin",
+    "$env:USERPROFILE\.local\bin"
+) | Where-Object { $_ -and (Test-Path $_) }
+$env:PATH = (($extraPaths + @($userPath, $machinePath)) -join ";")
 
 $fetchArgs = @("-Arch", $Arch, "-CoreRepo", $CoreRepo)
 if ($Version) { $fetchArgs += @("-Version", $Version) }
@@ -49,7 +66,10 @@ try {
     Pop-Location
 }
 
-$appOut = Join-Path $repoRoot "ui\.nsh\out\Neiro.app"
+$appOut = Join-Path $repoRoot "ui\.nsh\out\Neiro"
+if (-not (Test-Path $appOut)) {
+    $appOut = Join-Path $repoRoot "ui\.nsh\out\Neiro.app"
+}
 if (-not (Test-Path $appOut)) {
     throw "missing packaged app directory at $appOut"
 }
