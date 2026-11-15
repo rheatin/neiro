@@ -14,6 +14,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+$extraPaths = @(
+    "$env:USERPROFILE\.cargo\bin",
+    "$env:USERPROFILE\.local\bin",
+    "$env:USERPROFILE\scoop\shims",
+    "$env:USERPROFILE\scoop\persist\rustup\.cargo\bin",
+    "$env:USERPROFILE\scoop\apps\mingw\current\bin"
+) | Where-Object { $_ -and (Test-Path $_) }
+$env:PATH = (($extraPaths + @($userPath, $machinePath, $env:PATH)) -join ";")
 if (-not $env:RUSTUP_TOOLCHAIN) { $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu" }
 
 $fetchArgs = @("-Arch", $Arch, "-CoreRepo", $CoreRepo)
