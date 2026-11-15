@@ -78,15 +78,35 @@ New-Item -ItemType Directory -Path $versionCache -Force | Out-Null
 $zipPath = Join-Path $versionCache "$pkgName.zip"
 $shaPath = "$zipPath.sha256"
 
-Write-Host "downloading $pkgName from $CoreRepo ($Version)..." -ForegroundColor Cyan
-& gh release download $Version `
-    --repo $CoreRepo `
-    --pattern "$pkgName.zip" `
-    --pattern "$pkgName.zip.sha256" `
-    --dir $versionCache `
-    --clobber | Out-Host
-if ($LASTEXITCODE -ne 0) {
-    throw "gh release download failed for $CoreRepo $Version"
+$needDownload = $true
+if ((Test-Path $zipPath) -and (Test-Path $shaPath)) {
+    $expectedHash = ((Get-Content -Path $shaPath -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+    $actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($expectedHash -eq $actualHash) {
+        $needDownload = $false
+    }
+}
+
+if ($needDownload) {
+    [Console]::Error.WriteLine("downloading $pkgName from $CoreRepo ($Version)...")
+    $downloaded = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        & gh release download $Version `
+            --repo $CoreRepo `
+            --pattern "$pkgName.zip" `
+            --pattern "$pkgName.zip.sha256" `
+            --dir $versionCache `
+            --clobber 1>&2
+        if ($LASTEXITCODE -eq 0) {
+            $downloaded = $true
+            break
+        }
+        [Console]::Error.WriteLine("attempt $attempt failed, retrying in 2s...")
+        Start-Sleep -Seconds 2
+    }
+    if (-not $downloaded) {
+        throw "gh release download failed for $CoreRepo $Version"
+    }
 }
 
 $expectedHash = ((Get-Content -Path $shaPath -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
