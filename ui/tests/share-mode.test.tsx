@@ -6,7 +6,7 @@ test("切 Exclusive 后引擎回报 exclusive，且灯亮", async () => {
     width: 1440,
     height: 1000,
     storage: { "library:roots": "[]" },
-    host: { params: { debugPlay: "C:\\Users\\Char\\AppData\\Local\\Temp\\ado01.m4a" } },
+    host: { params: { debugPlay: "../analysis_tone.wav" } },
   });
   await app.waitFor("label:暂停", { timeout: 25_000 });
   await app.press("label:输出信息");
@@ -15,6 +15,8 @@ test("切 Exclusive 后引擎回报 exclusive，且灯亮", async () => {
   await app.press("label:独占直通");
   await app.wait(1500);
   const texts = app.texts();
+  expect(texts.includes("EXCL")).toBe(true);
+  expect(texts.some((t) => /(COREAUDIO|WASAPI) EXCL/.test(t))).toBe(true);
   console.log("share audit:", texts.filter((t) => /SHARED MODE|EXCL STREAM|NOT VERIFIED|VERIFIED/.test(t)));
   // 审计里不应再出现 SHARED MODE（除非端点拒绝独占）
   console.log("protocol:", texts.filter((t) => /WASAPI/.test(t)));

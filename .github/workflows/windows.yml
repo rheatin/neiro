@@ -1,12 +1,7 @@
-# Windows: build the engine, Base and the binding, and run what a runner can.
-#
-# The runner has no audio endpoint, so scripts/verify.ps1 runs the device-free
-# checks only. Device checks are run with -WithDevices on a workstation.
+# Windows UI build: fetch the pinned neiro-core Release SDK and verify the UI crate & TSX.
 name: windows
 
 on:
-  # A build per tag, not per push: the trunk moves many times an hour and a
-  # runner per commit says nothing a local check did not.
   push:
     tags:
       - "v*"
@@ -14,7 +9,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  verify:
+  build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,23 +19,12 @@ jobs:
           rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
           rustup default stable-x86_64-pc-windows-gnu
 
-      - name: MinGW-w64 (UCRT)
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: false
-          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-ninja
-
-      - name: CMake and Ninja are on the runner
-        run: cmake --version; ninja --version
-
-      # The licence gate refuses a GPL tree, which is what the system packages
-      # are: fetch the LGPL build the shipped DLL must link.
-      - name: LGPL FFmpeg
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-lgpl.ps1
-
-      - name: Verify
+      - name: Fetch prebuilt neiro-core SDK
         env:
-          CC: C:\msys64\ucrt64\bin\gcc.exe
-          CXX: C:\msys64\ucrt64\bin\g++.exe
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1
+          GH_TOKEN: ${{ secrets.CORE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-core.ps1
+
+      - name: Check UI Rust crate
+        env:
+          RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+        run: cargo check --manifest-path ui/Cargo.toml

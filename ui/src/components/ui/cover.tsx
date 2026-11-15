@@ -4,6 +4,7 @@
 
 import { Image, View } from "nsh";
 import { coverOf, remoteCoverOf } from "../../state/artwork";
+import { remoteTrackForCachePath } from "../../state/remote";
 import { Icon, type IconColor, type IconName } from "./icons";
 
 export interface CoverProps {
@@ -21,7 +22,17 @@ export interface CoverProps {
 }
 
 export function Cover(props: CoverProps) {
-  const src = () => coverOf(props.path);
+  const src = () => {
+    if (!props.path) return "";
+    const rt = remoteTrackForCachePath(props.path);
+    if (rt) {
+      const u = remoteCoverOf(rt.id, rt.coverArt);
+      if (u) return u;
+      if (rt.coverArt || props.path.startsWith("remote://")) return "";
+    }
+    if (props.path.startsWith("remote://")) return "";
+    return coverOf(props.path);
+  };
   const glyph = () => (props.size ? Math.max(16, props.size * 0.42) : 72);
   return (
     <View
@@ -40,12 +51,14 @@ export function Cover(props: CoverProps) {
 
 /** A remote row's cover: keyed by the server's cover art, with `data =
  * null` legitimately leaving the glyph (服务器没图不是错误)。 */
-export function RemoteCover(props: { id: string; coverArt: string | null; size?: number; class?: string }) {
+export function RemoteCover(props: { id: string; coverArt: string | null; size?: number; round?: boolean; class?: string }) {
   const src = () => remoteCoverOf(props.id, props.coverArt);
   const glyph = () => Math.max(16, (props.size ?? 36) * 0.42);
   return (
     <View
-      class={`shrink-0 items-center justify-center overflow-hidden rounded-md bg-secondary ${props.class ?? ""}`}
+      class={`shrink-0 items-center justify-center overflow-hidden bg-secondary ${
+        props.round ? "rounded-full" : "rounded-md"
+      } ${props.class ?? ""}`}
       style={props.size ? { width: props.size, height: props.size } : {}}
     >
       <Icon name="music" size={glyph()} color="muted-foreground" />

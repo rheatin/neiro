@@ -17,6 +17,15 @@ import {
 import { notify } from "./feedback";
 import { activeSource } from "./sources";
 import { shuffle, shuffleSupported, shuffled } from "./shuffle";
+import { trackForPath } from "./catalog";
+
+let remoteHooks: {
+  playRemoteByPath: (path: string) => boolean;
+  withRemotePathByPath: (path: string, then: (fetched: string) => void) => boolean;
+} | null = null;
+export function registerRemotePlayer(hooks: NonNullable<typeof remoteHooks>): void {
+  remoteHooks = hooks;
+}
 
 // ---- The player as shown ----------------------------------------------------
 
@@ -163,7 +172,18 @@ export const controlsEnabled = (): boolean => loadedContent() && player().state 
 
 /** Whether `path` is the track loaded (tracked). */
 export function isCurrentTrack(path: string): boolean {
-  return path !== "" && loadedPath() === path;
+  if (!path) return false;
+  const current = loadedPath();
+  if (!current) return false;
+  if (current === path) return true;
+  if (path.startsWith("remote://") || current.startsWith("remote://")) {
+    const nameOf = (p: string) => {
+      if (p.startsWith("remote://")) return p.slice("remote://".length);
+      return p.replace(/\\/g, "/").split("/").pop() ?? "";
+    };
+    return nameOf(path) !== "" && nameOf(path) === nameOf(current);
+  }
+  return false;
 }
 
 /** Whether the loaded track is playing (tracked). */
@@ -175,6 +195,20 @@ export const canNext = (): boolean => {
   const q = queue();
   return q.index !== null && q.index + 1 < q.queue.length;
 };
+
+export const canPrev = (): boolean => loadedContent();
+
+export const gaplessEnabled = (): boolean => !engine.settings()?.crossfadeEnabled;
+
+export function setGaplessEnabled(enabled: boolean): void {
+  const before = engine.settings();
+  if (!before) return;
+  try {
+    engine.setCrossfade(!enabled, before.crossfadeDurationMs, before.crossfadeCurve);
+  } catch (error) {
+    reportEngineFailure(error, enabled ? "启用 Gapless 失败" : "停用 Gapless 失败");
+  }
+}
 
 // ---- The intents ---------------------------------------------------------------
 
@@ -237,7 +271,14 @@ export function playTrack(track: Track): void {
       durationMs: track.durationMs,
       at,
     },
-    () => engine.play(track.path),
+    () => {
+      if (track.path.startsWith("remote://")) {
+        if (remoteHooks?.playRemoteByPath(track.path)) {
+          return;
+        }
+      }
+      engine.play(track.path);
+    },
     "播放失败",
   );
 }
@@ -257,30 +298,92 @@ export function playFromRows(rows: Track[], index: number): void {
   playQueue(pick, 0);
 }
 
+function enqueueMixed(tracks: Track[]): void {
+  if (tracks.length === 0) return;
+  const [head, ...tail] = tracks;
+  if (head.path.startsWith("remote://")) {
+    if (
+      remoteHooks?.withRemotePathByPath(head.path, (cachedPath) => {
+        try {
+          engine.enqueue([cachedPath]);
+        } catch (e) {
+          reportEngineFailure(e, "入队失败");
+        }
+        enqueueMixed(tail);
+      })
+    ) {
+      return;
+    }
+  }
+  try {
+    engine.enqueue([head.path]);
+  } catch (e) {
+    reportEngineFailure(e, "入队失败");
+  }
+  enqueueMixed(tail);
+}
+
 /** 播放全部：play(点击那首/第一首) + enqueue(其余)。shuffle 开 → 其余
- * Fisher–Yates 洗牌（同一集合不重复）；关 → 原序。队列顺序只是这次
- * play+enqueue 的排列，不是引擎状态。远程来源不支持（队列只装本地路径，
- * 远程曲目要先取流）：给一句 toast 并忽略。 */
+ * Fisher–Yates 洗牌（同一集合不重复）；关 → 原序。支持本地、远程与混合队列。 */
 export function playQueue(rows: Track[], firstIndex = 0): void {
-  if (!shuffleSupported() && shuffle()) {
-    // shuffle 开着误点到远程来源的播放盘：提醒一句，行为退回单曲播。
-  }
-  if (activeSource().kind === "remote") {
-    notify("远程曲目需先取流，暂不支持随机播放");
-    return;
-  }
   if (rows.length === 0) return;
   const idx = Math.min(Math.max(firstIndex, 0), rows.length - 1);
   const first = rows[idx];
   const rest = rows.filter((_, i) => i !== idx);
   const queue = shuffle() ? shuffled(rest) : rest;
-  playTrack(first);
-  if (queue.length > 0) {
-    try {
-      engine.enqueue(queue.map((t) => t.path));
-    } catch (error) {
-      reportEngineFailure(error, "入队失败");
+  const ahead = queue.slice(0, QUEUE_AHEAD);
+
+  if (first.path.startsWith("remote://")) {
+    if (
+      remoteHooks?.withRemotePathByPath(first.path, (firstPath) => {
+        playTrack({ ...first, path: firstPath });
+        enqueueMixed(ahead);
+      })
+    ) {
+      return;
     }
+  }
+  playTrack(first);
+  enqueueMixed(ahead);
+}
+
+export function playQueueAt(index: number): void {
+  const q = queue();
+  if (index < 0 || index >= q.queue.length) return;
+  const target = q.queue[index];
+  const after = q.queue.slice(index + 1);
+  const tr = trackForPath(target);
+  if (tr) {
+    playTrack(tr);
+  } else {
+    send(
+      {
+        path: target,
+        state: "playing",
+        positionMs: 0,
+        at: Date.now(),
+      },
+      () => engine.play(target),
+      "播放失败",
+    );
+  }
+  if (after.length > 0) {
+    try {
+      engine.enqueue(after);
+    } catch (e) {
+      reportEngineFailure(e, "入队失败");
+    }
+  }
+}
+
+export function prev(): void {
+  if (!canPrev()) return;
+  const pos = position();
+  const curIdx = queue().index ?? 0;
+  if (pos > 3000 || curIdx <= 0) {
+    seek(0);
+  } else {
+    playQueueAt(curIdx - 1);
   }
 }
 

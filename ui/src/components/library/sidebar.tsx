@@ -7,7 +7,7 @@
 import { createMotion, effect, reduceMotion, signal, token, untracked, View } from "nsh";
 import { Button } from "nsh/base";
 import { Text } from "nsh";
-import { ALBUMS, ARTISTS, LIKED, PLAYLISTS, REMOTE, TRACKS, currentRoot, switchTo, type Route } from "../../nav";
+import { ALBUMS, ARTISTS, LIKED, PLAYLISTS, REMOTE, SETTINGS, TRACKS, currentRoot, switchTo, type Route } from "../../nav";
 import { favourites } from "../../state/user-catalog";
 import { setNewPlaylistOpen } from "./playlist-dialogs";
 import { removeRoot, roots, scopedRoot, setHomeRoot } from "../../state/catalog";
@@ -107,13 +107,17 @@ function NavRow(props: {
   );
 }
 
-/** The panel that switches pages: 首页. */
+/** The panel that switches pages: 首页、设置. */
 function NavPanel(props: { compact: boolean }) {
-  const index = () => (currentRoot().name === "home" ? 0 : -1);
+  const index = () => {
+    const root = currentRoot().name;
+    return root === "home" ? 0 : root === "settings" ? 1 : -1;
+  };
   return (
     <View class="relative gap-1 rounded-(--radius-panel) border border-border bg-card p-2" accessibilityLabel="页面">
       <SlidingSelection index={index} top={8} />
       <NavRow icon="home" label="首页" route={{ name: "home" }} compact={props.compact} />
+      <NavRow icon="settings" label="设置" route={SETTINGS} compact={props.compact} />
     </View>
   );
 }
@@ -166,7 +170,7 @@ function SourcesPanel(props: { compact?: boolean }) {
   const compact = () => props.compact === true;
   const list = () => servers();
   const activeId = () => activeRemoteServer()?.id;
-  const active = (id: string) => () => isRemoteConfigured() && activeId() === id;
+  const active = (id: string) => () => currentRoot().name === "remote" && isRemoteConfigured() && activeId() === id;
   return (
     <View class="gap-1 rounded-(--radius-panel) border border-border bg-card p-2" accessibilityLabel="来源" role="navigation">
       {/* Servers above the 加号, folders below it, the 加号 between them. With
@@ -195,7 +199,7 @@ function SourcesPanel(props: { compact?: boolean }) {
             icon="folder"
             label={leafOf(root())}
             detail={root()}
-            active={scopedRoot() === root()}
+            active={currentRoot().name === "tracks" && scopedRoot() === root()}
             testID="source-root"
             onRemove={() => removeRoot(root())}
             onPress={() => {

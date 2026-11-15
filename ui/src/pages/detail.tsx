@@ -9,9 +9,12 @@ import {
   albumCoverTrack,
   artistCoverTrack,
   ensureTracks,
+  roots,
+  rootsLoaded,
   tracksOfAlbum,
   tracksOfArtist,
   tracksState,
+  visibleTracks,
 } from "../state/catalog";
 import { isCurrentTrack, isPlaying, playFromRows, playQueue, playTrack, toggle } from "../state/player";
 import { AppPage } from "../components/page";
@@ -61,7 +64,7 @@ function DetailPage(props: { title: string; kind: "专辑" | "歌手"; coverPath
       return route.name === "album" || route.name === "artist";
     },
   });
-  const complete = () => tracksState() === "complete";
+  const complete = () => tracksState() === "complete" || visibleTracks().length > 0 || (rootsLoaded() && roots().length === 0);
   const count = () => props.rows().length;
   const first = () => props.rows()[0];
   const playingHere = () => isCurrentTrack(first()?.path ?? "") && isPlaying();

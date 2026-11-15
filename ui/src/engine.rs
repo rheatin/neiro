@@ -84,11 +84,19 @@ fn dll_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
     if let Some(dir) = exe_dir {
         paths.push(dir.join(DLL));
     }
-    // Two layouts, because this UI lives in two places: beside the engine's
-    // own checkout (`../Neiro/base`) in its own repository, and one directory
-    // under the monorepo root (`../base` or `../../base`) when it ships inside
-    // the engine's tree.
-    for root in ["../Neiro/base", "../base", "../../base"] {
+    for sdk in ["../.cache/neiro-core/current", ".cache/neiro-core/current"] {
+        #[cfg(windows)]
+        paths.push(PathBuf::from(sdk).join("bin").join(DLL));
+        #[cfg(not(windows))]
+        paths.push(PathBuf::from(sdk).join("lib").join(DLL));
+    }
+    for root in [
+        "../neiro-core/base",
+        "../../neiro-core/base",
+        "../Neiro/base",
+        "../base",
+        "../../base",
+    ] {
         paths.push(PathBuf::from(root).join("target/release").join(DLL));
     }
     paths
@@ -263,11 +271,6 @@ impl Prepared {
 impl Exports {
     /// Resolves the exports in one place so a missing symbol names itself.
     fn resolve(library: &Library) -> Result<Exports, String> {
-        let read = |name: &[u8], printed: &str| -> Result<String, String> {
-            let _ = (name, printed);
-            Ok(String::new())
-        };
-        let _ = read;
         Ok(Exports {
             start_with_library: symbol::<StartWithLibraryFn>(
                 library,

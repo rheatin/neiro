@@ -14,7 +14,7 @@
 import { Text, token, View } from "nsh";
 import { HARDWARE } from "./hardware";
 import { engine } from "../../backend/engine";
-import { resolvedPath } from "../../state/resolved";
+import { resolvedPath, sourceBits } from "../../state/resolved";
 
 /** What the source's numbers are worth, as a listener reads it. */
 export type Grade = "HI-RES+" | "HI-RES" | "CD" | "DSD" | "PCM";
@@ -28,7 +28,7 @@ export type Grade = "HI-RES+" | "HI-RES" | "CD" | "DSD" | "PCM";
  * flattery a listener cannot hear. */
 export function gradeOf(rateHz: number, bits: number, dsd: boolean): Grade {
   if (dsd) return "DSD";
-  if (rateHz >= 352_800 || bits >= 32) return "HI-RES+";
+  if (rateHz >= 352_800 || (rateHz >= 176_400 && bits >= 24) || (rateHz >= 88_200 && bits >= 32)) return "HI-RES+";
   if (bits >= 24 && rateHz >= 88_200) return "HI-RES";
   if (rateHz >= 44_100 && bits >= 16) return "CD";
   return "PCM";
@@ -208,7 +208,7 @@ a   * line to spend turns it off, so two plates never stack. */
     const dsdHz = p.dsdRate > 0 ? p.dsdRate : p.sourceRate >= 2_822_400 ? p.sourceRate : 0;
     if (dsdHz > 0) return "DSD" as Grade;
     if (!lossless()) return null;
-    return gradeOf(p.sourceRate, p.validBits || p.containerBits, false);
+    return gradeOf(p.sourceRate, sourceBits() || 16, false);
   };
   const bitPerfect = () => engine.renderPath()?.bitPerfect === true;
   return (
@@ -235,11 +235,6 @@ a   * line to spend turns it off, so two plates never stack. */
           container, so this is the one fact the middle column adds. */}
       <If when={props.resampled === true}>
         <Plate label={props.resampleLabel ?? "RESAMPLED"} tone="plain" />
-      </If>
-      {/* FFmpeg calls the object-audio variants of E-AC-3 and TrueHD by name;
-          no other field in the chain can tell them apart. */}
-      <If when={/atmos/i.test(engine.player().codecProfile)}>
-        <Plate label="ATMOS" tone="amber" />
       </If>
       <If when={bitPerfect()}>
         <Plate label="BIT-PERFECT" tone="amber" />

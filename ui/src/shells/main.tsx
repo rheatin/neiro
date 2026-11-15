@@ -13,6 +13,7 @@ import { LikedPage, PlaylistPage, PlaylistsPage } from "../pages/user-collection
 import { EqPage } from "../pages/eq";
 import { SearchPage } from "../pages/search";
 import { TracksPage } from "../pages/tracks";
+import { SettingsPage } from "../pages/settings";
 import { EngineDownPage } from "../pages/engine-down";
 import { health } from "../state/engine";
 
@@ -28,6 +29,8 @@ function page(route: Route) {
       return <ArtistsPage />;
     case "tracks":
       return <TracksPage />;
+    case "settings":
+      return <SettingsPage />;
     case "remote":
       return <RemotePage />;
     case "liked":

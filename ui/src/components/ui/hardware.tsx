@@ -239,7 +239,6 @@ export function FaderCap(props: { position: number; dragging?: boolean; detented
     <View
       class="items-center justify-center"
       style={{
-        position: "absolute",
         width: width(),
         height: 18,
         borderRadius: 3,
@@ -373,7 +372,7 @@ export function Silkscreen(props: { children: string; tone?: "dim" | "faint" | "
   };
   return (
     <Text
-      class={`text-[9px] font-bold uppercase tracking-[0.14em] ${props.class ?? ""}`}
+      class={`line-clamp-1 shrink-0 text-[9px] font-bold uppercase tracking-[0.14em] ${props.class ?? ""}`}
       style={{ color: colour() }}
     >
       {props.children}

@@ -5,7 +5,7 @@
 
 import { createMotion, signal, token, untracked, View } from "nsh";
 import { Input } from "nsh/base";
-import { open, back, canBack, canForward, currentRoute, forward, SEARCH } from "../nav";
+import { open, back, canBack, canForward, currentRoute, forward, SEARCH, SETTINGS, switchTo } from "../nav";
 import { searchQuery } from "../state/catalog";
 import { sidebarCollapsed, toggleSidebar } from "../state/overlays";
 import { Icon } from "./ui/icons";
@@ -95,7 +95,12 @@ export function NavControls() {
   );
 }
 
-/** The trailing controls: the search field. */
+/** The trailing controls: the search field and settings button. */
 export function TrailingControls() {
-  return <SearchField />;
+  return (
+    <View class="flex-row items-center gap-1">
+      <SearchField />
+      <IconButton name="settings" label="设置" hint onPress={() => switchTo(SETTINGS)} />
+    </View>
+  );
 }

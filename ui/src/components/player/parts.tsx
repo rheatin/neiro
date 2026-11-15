@@ -8,6 +8,7 @@ import { lazyMotion } from "../ui/motion";
 import { setNowPlayingOpen } from "../../state/overlays";
 import {
   canNext,
+  canPrev,
   controlsEnabled,
   dragSeek,
   dragVolume,
@@ -15,6 +16,7 @@ import {
   hasTrack,
   isPlaying,
   next,
+  prev,
   player,
   position,
   positionClock,
@@ -24,6 +26,7 @@ import {
   toggle,
   volumeLevel,
 } from "../../state/player";
+import { trackForPath } from "../../state/catalog";
 import { ready } from "../../state/engine";
 import { shuffle, shuffleSupported, toggleShuffle } from "../../state/shuffle";
 import { notify } from "../../state/feedback";
@@ -61,7 +64,7 @@ export function TransportControls(props: {
           toggleShuffle();
         }}
       />
-      <IconButton name="skipBack" label="上一曲" size={icon()} disabled onPress={() => {}} />
+      <IconButton name="skipBack" label="上一曲" size={icon()} disabled={!usable() || !canPrev()} onPress={prev} />
       <PlayButton quiet={props.quiet} playing={isPlaying()} size={props.large ? 56 : 36} disabled={!ready() || !hasTrack()} onPress={toggle} />
       <IconButton name="skipForward" label="下一曲" size={icon()} disabled={!usable() || !canNext()} onPress={next} />
       {props.trail}
@@ -222,15 +225,22 @@ export function NowPlayingSummary(props: { cover?: number; round?: boolean; open
     coverIn.stop();
     wordsIn.stop();
   });
+  const catalogTrack = () => trackForPath(player().path ?? "");
   const subtitle = () => {
     const p = player();
     if (p.artist) return p.artist;
     if (p.album) return p.album;
+    const cat = catalogTrack();
+    if (cat?.artist) return cat.artist;
+    if (cat?.album) return cat.album;
     return "—";
   };
   const title = () => {
     const p = player();
-    return p.title || fileNameOf(p.path ?? "") || "没有播放";
+    if (p.title) return p.title;
+    const cat = catalogTrack();
+    if (cat?.title) return cat.title;
+    return fileNameOf(p.path ?? "") || "没有播放";
   };
   const cover = () => (
     <View style={coverIn.style}>

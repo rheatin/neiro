@@ -4,10 +4,20 @@
 // answer). Data loads lazily: a page asks when it shows, so nothing loads
 // that was never opened.
 
-import { computed, effect, signal, Storage, untracked, type Accessor } from "nsh";
+import { cleanup, computed, effect, signal, Storage, untracked, type Accessor } from "nsh";
 import { engine, reportEngineFailure, TRACK_PAGE } from "../backend/engine";
 import { albumKey, type Album, type Artist, type Track } from "../backend/types";
 import { open } from "../nav";
+
+const remoteTracksAccessor = signal<{ get: () => Track[] }>({ get: () => [] });
+let remotePathResolver: ((path: string) => Track | undefined) | null = null;
+export function registerRemoteCatalog(
+  getTracks: () => Track[],
+  resolvePath: (path: string) => Track | undefined,
+): void {
+  remoteTracksAccessor.set({ get: getTracks });
+  remotePathResolver = resolvePath;
+}
 
 // ---- The watched folders ---------------------------------------------------
 
@@ -57,7 +67,10 @@ effect(() => {
       } catch (error) {
         console.warn("neiro: 对账周期没有设置上:", String(error));
       }
-      if (paths.length > 0) rescanAll();
+      if (paths.length > 0) {
+        ensureTracks();
+        rescanAll();
+      }
     } catch (error) {
       console.warn("neiro: 曲库根目录没有读回来:", String(error));
       rootsLoaded.set(true);
@@ -178,12 +191,10 @@ function underGivenRoot(path: string, root: string | null): boolean {
  * 明确标记，不是浏览视图（根被移除后它仍应显示，并且能播）。 */
 export const indexedTracks: Accessor<Track[]> = () => allTracks();
 
-/** 曲库视图的可见集（根过滤层）——所有页面/分组从这里取。 */
-export const visibleTracks: Accessor<Track[]> = computed(() => {
-  const list = allTracks();
-  if (!rootsLoaded()) return list;
-  return list.filter((t) => underRoots(t.path));
-});
+/** 曲库视图的可见集（根过滤层）——所有本地页面/分组从这里取。 */
+export const visibleTracks: Accessor<Track[]> = computed(() =>
+  rootsLoaded() ? allTracks().filter((t) => underRoots(t.path)) : allTracks(),
+);
 
 /** 首页来源 Tab 的本地根（由 sources.ts 注册；null = 全部本地）。 */
 const homeRoot = signal<string | null>(null);
@@ -365,7 +376,9 @@ effect(() => {
       searchRunning.set(false);
     }
   }, DEBOUNCE_MS);
-  return () => clearTimeout(debounceTimer as ReturnType<typeof setTimeout>);
+  cleanup(() => {
+    if (debounceTimer !== null) clearTimeout(debounceTimer);
+  });
 });
 
 function keepIfCurrent(result: unknown): void {
@@ -386,7 +399,7 @@ effect(() => {
   const timer = setTimeout(() => {
     if (searchRunning()) searchRunning.set(false);
   }, DEBOUNCE_MS + 3000);
-  return () => clearTimeout(timer);
+  cleanup(() => clearTimeout(timer));
 });
 
 /** The albums and artists the search page shows (the engine searches
@@ -422,10 +435,19 @@ const groups = computed(() => {
   const albumMap = new Map<string, Track[]>();
   const artistMap = new Map<string, Track[]>();
   for (const track of visibleTracks()) {
-    const album = albumKey(track);
-    const albumBucket = albumMap.get(album);
-    if (albumBucket) albumBucket.push(track);
-    else albumMap.set(album, [track]);
+    const normArtist = track.albumArtist || track.artist || "";
+    const normAlbumKey = albumKey({ album: track.album, albumArtist: normArtist });
+    const normBucket = albumMap.get(normAlbumKey);
+    if (normBucket) normBucket.push(track);
+    else albumMap.set(normAlbumKey, [track]);
+
+    const rawAlbumKey = albumKey(track);
+    if (rawAlbumKey !== normAlbumKey) {
+      const rawBucket = albumMap.get(rawAlbumKey);
+      if (rawBucket) rawBucket.push(track);
+      else albumMap.set(rawAlbumKey, [track]);
+    }
+
     const name = track.artist || track.albumArtist;
     const artistBucket = artistMap.get(name);
     if (artistBucket) artistBucket.push(track);
@@ -437,12 +459,29 @@ const groups = computed(() => {
 /** The tracks of one album, in index order ([] while the index is not
  * loaded or the album has none). */
 export function tracksOfAlbum(album: string, albumArtist: string): Track[] {
-  return groups().albumMap.get(albumKey({ album, albumArtist })) ?? [];
+  const map = groups().albumMap;
+  const exact = map.get(albumKey({ album, albumArtist }));
+  if (exact && exact.length > 0) return exact;
+  const emptyArtist = map.get(albumKey({ album, albumArtist: "" }));
+  if (emptyArtist && emptyArtist.length > 0) return emptyArtist;
+  const local = visibleTracks().filter(
+    (t) => t.album === album && (!albumArtist || t.albumArtist === albumArtist || t.artist === albumArtist),
+  );
+  if (local.length > 0) return local;
+  return remoteTracksAccessor()
+    .get()
+    .filter((t) => t.album === album && (!albumArtist || t.albumArtist === albumArtist || t.artist === albumArtist));
 }
 
 /** The tracks of one artist, across their albums. */
 export function tracksOfArtist(artist: string): Track[] {
-  return groups().artistMap.get(artist) ?? [];
+  const exact = groups().artistMap.get(artist);
+  if (exact && exact.length > 0) return exact;
+  const local = visibleTracks().filter((t) => t.artist === artist || t.albumArtist === artist);
+  if (local.length > 0) return local;
+  return remoteTracksAccessor()
+    .get()
+    .filter((t) => t.artist === artist || t.albumArtist === artist);
 }
 
 /** A representative track of an album (whose embedded picture the cover
@@ -458,23 +497,109 @@ export function artistCoverTrack(artist: string): string {
 /** The track a queue path names ([]-safe: the queue drawer reads its own
  * playing titles too). */
 export function trackForPath(path: string): Track | undefined {
-  return groups().pathMap.get(path);
+  if (!path) return undefined;
+  const fromGroup = groups().pathMap.get(path);
+  if (fromGroup) return fromGroup;
+  const fromAll = allTracks().find((t) => t.path === path);
+  if (fromAll) return fromAll;
+  if (remotePathResolver) {
+    const r = remotePathResolver(path);
+    if (r) return r;
+  }
+  if (untracked(tracksState) === "idle" && engine.health().status === "ready") {
+    untracked(() => ensureTracks());
+  }
+  return undefined;
+}
+
+function buildMergedAlbums(map: Map<string, Track[]>): Album[] {
+  const existing = engine.albums();
+  const out: Album[] = [];
+  const seen = new Set<string>();
+
+  for (const alb of existing) {
+    const key = albumKey(alb);
+    const bucket = map.get(key);
+    if (bucket) {
+      seen.add(key);
+      const resolvedArtist = alb.albumArtist || bucket[0]?.albumArtist || bucket[0]?.artist || "";
+      seen.add(albumKey({ album: alb.album, albumArtist: resolvedArtist }));
+      out.push({ ...alb, albumArtist: resolvedArtist, trackCount: bucket.length });
+    }
+  }
+
+  for (const [key, bucket] of map.entries()) {
+    if (seen.has(key)) continue;
+    const first = bucket[0];
+    if (!first || !first.album.trim()) continue;
+    const resolvedArtist = first.albumArtist || first.artist || "";
+    const normKey = albumKey({ album: first.album, albumArtist: resolvedArtist });
+    if (seen.has(normKey)) continue;
+    seen.add(key);
+    seen.add(normKey);
+    out.push({
+      album: first.album,
+      albumArtist: resolvedArtist,
+      year: first.year || 0,
+      trackCount: bucket.length,
+    });
+  }
+
+  return out;
+}
+
+function buildMergedArtists(map: Map<string, Track[]>): Artist[] {
+  const existing = engine.artists();
+  const out: Artist[] = [];
+  const seen = new Set<string>();
+
+  for (const art of existing) {
+    const bucket = map.get(art.artist);
+    if (bucket) {
+      seen.add(art.artist);
+      const albumSet = new Set(bucket.map((t) => t.album).filter((a) => a.trim() !== ""));
+      out.push({
+        ...art,
+        trackCount: bucket.length,
+        albumCount: Math.max(art.albumCount, albumSet.size),
+      });
+    }
+  }
+
+  for (const [name, bucket] of map.entries()) {
+    if (seen.has(name) || !name.trim()) continue;
+    const albumSet = new Set(bucket.map((t) => t.album).filter((a) => a.trim() !== ""));
+    out.push({
+      artist: name,
+      albumCount: albumSet.size,
+      trackCount: bucket.length,
+    });
+  }
+
+  return out;
 }
 
 /** 专辑/歌手过滤到当前根（曲 单页面/卡片的同一层）。 */
 export const visibleAlbums: Accessor<Album[]> = computed(() => {
-  const map = groups().albumMap;
-  return engine.albums().filter((album) => map.has(albumKey(album)));
+  return buildMergedAlbums(groups().albumMap);
 });
 
 /** 首页来源 Tab 的专辑（按 activeSource 的本地根过滤后的分组）。 */
 const homeAlbumMap: Accessor<Map<string, Track[]>> = computed(() => {
   const albumMap = new Map<string, Track[]>();
   for (const track of homeTracks()) {
-    const album = albumKey(track);
-    const bucket = albumMap.get(album);
-    if (bucket) bucket.push(track);
-    else albumMap.set(album, [track]);
+    const normArtist = track.albumArtist || track.artist || "";
+    const normAlbumKey = albumKey({ album: track.album, albumArtist: normArtist });
+    const normBucket = albumMap.get(normAlbumKey);
+    if (normBucket) normBucket.push(track);
+    else albumMap.set(normAlbumKey, [track]);
+
+    const rawAlbumKey = albumKey(track);
+    if (rawAlbumKey !== normAlbumKey) {
+      const rawBucket = albumMap.get(rawAlbumKey);
+      if (rawBucket) rawBucket.push(track);
+      else albumMap.set(rawAlbumKey, [track]);
+    }
   }
   return albumMap;
 });
@@ -491,19 +616,15 @@ const homeArtistMap: Accessor<Map<string, Track[]>> = computed(() => {
 });
 
 export const homeAlbums: Accessor<Album[]> = computed(() => {
-  const map = homeAlbumMap();
-  return engine.albums().filter((album) => map.has(albumKey(album)));
+  return buildMergedAlbums(homeAlbumMap());
 });
 
 export const homeArtists: Accessor<Artist[]> = computed(() => {
-  const map = homeArtistMap();
-  return engine.artists().filter((artist) => map.has(artist.artist));
+  return buildMergedArtists(homeArtistMap());
 });
 
 export const visibleArtists: Accessor<Artist[]> = computed(() => {
-  const map = groups().artistMap;
-  const list = engine.artists();
-  return list.filter((artist) => map.has(artist.artist));
+  return buildMergedArtists(groups().artistMap);
 });
 
 // ---- The items the cards render ------------------------------------------------

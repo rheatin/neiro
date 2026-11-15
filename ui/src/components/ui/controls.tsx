@@ -177,7 +177,7 @@ export function ActionButton(props: {
           primary() ? "bg-background" : "bg-foreground"
         }`}
       />
-      <Text class={`text-sm font-bold ${primary() ? "text-background" : "text-foreground"}`} style={labelMotion.style}>
+      <Text class={`text-center text-sm font-bold leading-none ${primary() ? "text-background" : "text-foreground"}`} style={labelMotion.style}>
         {props.label}
       </Text>
     </Button>

@@ -1,36 +1,49 @@
-#!/bin/bash
-# Put the engine beside the packaged app and make the whole bundle refer to
-# itself: every absolute path into the build tree becomes @loader_path/<name>.
+#!/usr/bin/env bash
+# Bundle the prebuilt neiro-core SDK dylibs into the packaged Neiro.app bundle.
 set -euo pipefail
 
-APP="$HOME/Repos/neiro/ui/.nsh/out/Neiro.app"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP="${APP:-$ROOT/ui/.nsh/out/Neiro.app}"
 MACOS="$APP/Contents/MacOS"
-VENDOR="$HOME/Repos/neiro/vendor/ffmpeg-lgpl/lib"
+FRAMEWORKS="$APP/Contents/Frameworks"
 
 if [ ! -d "$MACOS" ]; then
-  echo "no app at $APP" >&2
-  exit 1
+    echo "no app at $APP (run 'nsh package .' in ui/ first)" >&2
+    exit 1
 fi
 
-cp "$HOME/Repos/neiro/base/target/release/libneiro_base.dylib" "$MACOS/"
-cp "$HOME/Repos/neiro/engine/build-macos/libnae.dylib" "$MACOS/"
-for f in "$VENDOR"/*.dylib; do cp "$f" "$MACOS/"; done
+SDK_DIR="$("$ROOT/scripts/fetch-core.sh" "$@")"
+SDK_LIB="$SDK_DIR/lib"
 
-for lib in "$MACOS"/*.dylib; do
-  /usr/bin/otool -L "$lib" | tail -n +2 | awk '{print $1}' | grep "^$HOME/Repos/neiro" | while read -r ref; do
-    base=$(basename "$ref")
-    /usr/bin/install_name_tool -change "$ref" "@loader_path/$base" "$lib" 2>/dev/null || true
-  done
-  /usr/bin/install_name_tool -add_rpath "@loader_path" "$lib" 2>/dev/null || true
+if [ ! -d "$SDK_LIB" ]; then
+    echo "error: no lib/ directory in SDK '$SDK_DIR'" >&2
+    exit 1
+fi
+
+mkdir -p "$FRAMEWORKS"
+rm -f "$FRAMEWORKS"/lib*.dylib "$MACOS"/lib*.dylib
+
+for dylib in "$SDK_LIB"/*.dylib; do
+    [ -f "$dylib" ] || continue
+    base="$(basename "$dylib")"
+    cp "$dylib" "$FRAMEWORKS/$base"
+    cp "$dylib" "$MACOS/$base"
+    chmod u+w "$FRAMEWORKS/$base" "$MACOS/$base"
 done
 
-/usr/bin/codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+for bin in "$MACOS/neiro" "$MACOS/Neiro"; do
+    if [ -f "$bin" ]; then
+        otool -l "$bin" | grep -q "@executable_path/../Frameworks" || \
+            install_name_tool -add_rpath "@executable_path/../Frameworks" "$bin" 2>/dev/null || true
+    fi
+done
 
-echo "--- Contents/MacOS ---"
-ls "$MACOS"
-echo "--- libnae, non-system deps ---"
-/usr/bin/otool -L "$MACOS/libnae.dylib" | grep -v "^/usr/lib\|^/System"
+for lib in "$FRAMEWORKS"/*.dylib "$MACOS"/*.dylib; do
+    [ -f "$lib" ] || continue
+    codesign --force --sign - "$lib" >/dev/null 2>&1 || true
+done
 
-# Run after `nsh package --target macos` in ui/: it copies the two libraries and
-# the FFmpeg dylibs they need into Contents/MacOS, rewrites every reference into
-# the build tree to @loader_path/<name>, signs ad hoc, and prints the result.
+codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+
+echo "--- Bundled Core SDK from: $SDK_DIR ---"
+ls -1 "$MACOS"/*.dylib

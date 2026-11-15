@@ -18,7 +18,7 @@ import { LyricsWriteDialog } from "./src/components/player/lyrics-write-dialog";
 import { PlaylistDialogs } from "./src/components/library/playlist-dialogs";
 import { ContextMenuHost } from "./src/components/ui/context-menu";
 import { QueueSheet } from "./src/components/player/queue-sheet";
-import { bumpVolume, next, toggle as togglePlayback } from "./src/state/player";
+import { bumpVolume, next, seek, toggle as togglePlayback } from "./src/state/player";
 import { loadAdoptedLyrics, subscribeLyrics } from "./src/state/lyrics";
 import { outputOpen, setOutputOpen } from "./src/state/overlays";
 
@@ -44,6 +44,9 @@ function Shortcuts() {
   // sheets (they own it natively). The protocol has next in one direction
   // only, so there is no 上一曲 binding to give it.
   keymap.bind("space", () => togglePlayback(), { when: "notEditing" });
+  keymap.bind("f8", () => togglePlayback(), { when: "notEditing" });
+  keymap.bind("f9", () => next(), { when: "notEditing" });
+  keymap.bind("f7", () => seek(0), { when: "notEditing" });
   keymap.bind("mod+shift+right", () => next(), { when: "notEditing" });
   keymap.bind("mod+up", () => bumpVolume(0.1), { when: "notEditing" });
   keymap.bind("mod+down", () => bumpVolume(-0.1), { when: "notEditing" });

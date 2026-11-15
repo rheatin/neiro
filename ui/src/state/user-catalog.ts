@@ -7,7 +7,7 @@ import { effect, untracked } from "nsh";
 import { engine, reportEngineFailure } from "../backend/engine";
 import { hasTrack, player } from "./player";
 import { indexedTracks } from "./catalog";
-import { asLocalTrack, remoteTrackForCachePath } from "./remote";
+import { asLocalTrack, remoteTrackForCachePath, withRemotePath } from "./remote";
 import type { MostPlayed, Playlist, PlaylistEntry, RemoteTrack, Track } from "../backend/types";
 
 // 一次连接后：把曲单与收藏的**当前集合**取回来（事件只描述变化；不请求
@@ -31,12 +31,28 @@ export const favourites: () => string[] = () => engine.favourites().paths;
 
 /** Whether one path is in the set (tracked; 收藏= liked 色实心）。 */
 export function isFavourite(path: string | undefined): boolean {
-  return !!path && favourites().includes(path);
+  if (!path) return false;
+  const favs = favourites();
+  if (favs.includes(path)) return true;
+  if (path.startsWith("remote://")) {
+    const name = path.slice("remote://".length);
+    return favs.some((f) => f.endsWith("/" + name) || f.endsWith("\\" + name));
+  }
+  return false;
 }
 
 /** Toggles a path's heart; the engine's own answer drives the state. */
 export function toggleFavourite(path: string | undefined): void {
-  if (!path || !hasTrack()) return;
+  if (!path) return;
+  if (path.startsWith("remote://")) {
+    const rt = remoteTrackForCachePath(path);
+    if (rt) {
+      withRemotePath(rt, (cachedPath) => {
+        toggleFavourite(cachedPath);
+      });
+      return;
+    }
+  }
   const on = !isFavourite(path);
   try {
     engine.setFavourite(path, on);

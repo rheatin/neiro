@@ -12,6 +12,7 @@
 import { computed } from "nsh";
 import { engine } from "../backend/engine";
 import type { RenderPath } from "../backend/types";
+import { trackForPath } from "./catalog";
 
 /** The engine's DSD domain. */
 export type DsdMode = "pcm" | "dsd" | "pcm_to_dsd" | null;
@@ -28,6 +29,8 @@ export interface ResolvedPath {
   backend: AudioBackend;
   sourceRate: number;
   sourceChannels: number;
+  sourceValidBits: number;
+  sourceContainerBits: number;
   sampleRate: number;
   channels: number;
   validBits: number;
@@ -63,6 +66,7 @@ export interface ResolvedPath {
   crossfeedActive: boolean;
   convolverActive: boolean;
   crossfadeActive: boolean;
+  gapless: boolean;
 }
 
 // `NAE_DsdMode`: 0 PCM, 1 DSD, 2 PCM_TO_DSD (`-1` is AUTO). The list is
@@ -124,6 +128,8 @@ export const resolvedPath = computed<ResolvedPath | null>(() => {
     backend: enumOf(BACKENDS, raw.backend),
     sourceRate: num(raw.sourceRate),
     sourceChannels: num(raw.sourceChannels),
+    sourceValidBits: num(raw.sourceValidBits),
+    sourceContainerBits: num(raw.sourceContainerBits),
     sampleRate: num(raw.sampleRate),
     channels: num(raw.channels),
     validBits: num(raw.validBits),
@@ -149,6 +155,7 @@ export const resolvedPath = computed<ResolvedPath | null>(() => {
     crossfeedActive: bool(raw.crossfeedActive),
     convolverActive: bool(raw.convolverActive),
     crossfadeActive: bool(raw.crossfadeActive),
+    gapless: bool(raw.gapless),
   };
 });
 
@@ -281,6 +288,24 @@ export const isRemoteCachePath = (path: string): boolean => {
   return /^[0-9a-f]{16,}\.[a-z0-9]{2,5}$/i.test(name);
 };
 
+/** The source file's own bit depth (16/24/32 for PCM/lossless, 1 for DSD, 0 when lossy or unknown).
+ *
+ * Never falls back to `validBits` or `containerBits` — those belong to the output
+ * endpoint, not the file. */
+export function sourceBits(): number {
+  const path = resolvedPath();
+  if (!path) return 0;
+  if (isDsdFile()) return 1;
+  const playerPath = engine.player().path ?? "";
+  const codec = engine.player().codec;
+  if (codec && /^(aac|mp3|mp2|opus|vorbis|ac3|eac3|ec3|wmav?)/i.test(codec)) return 0;
+  if (!codec && /\.(mp3|aac|m4b|mp4|opus|ogg|wma|mp2|ac3|ec3|eac3|mka)$/i.test(playerPath)) return 0;
+  if (path.sourceValidBits > 0) return path.sourceValidBits;
+  const indexed = trackForPath(playerPath)?.bits ?? 0;
+  if (indexed > 0) return indexed;
+  return path.sourceContainerBits > 0 && path.sourceContainerBits <= 24 ? path.sourceContainerBits : 0;
+}
+
 /** The format the source is, as the panel's first line reads it. */
 export function sourceFormatLabel(): string {
   const path = resolvedPath();
@@ -301,6 +326,8 @@ export function codecLabel(): string {
     if (path.dsdPcmFallback || path.dsdExtracted) return "DSD → PCM 抽取";
     return path.dsdTransport === "dop" ? "DSD / DoP" : "DSD / Native";
   }
+  const srcBits = sourceBits();
+  if (srcBits > 0) return `PCM · ${srcBits}-BIT`;
   const depth = path.validBits || path.containerBits;
   return depth > 0 ? `${path.isFloat ? "FLOAT" : "PCM"} · ${depth}/${path.containerBits}-BIT` : "PCM";
 }

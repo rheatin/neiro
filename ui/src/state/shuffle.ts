@@ -40,5 +40,5 @@ export function shuffled<T>(list: T[]): T[] {
   return out;
 }
 
-/** shuffle 可用的来源：本地（队列是本地路径）。 */
-export const shuffleSupported = (): boolean => activeSource().kind !== "remote";
+/** shuffle 可用的来源：本地与远程均支持。 */
+export const shuffleSupported = (): boolean => true;

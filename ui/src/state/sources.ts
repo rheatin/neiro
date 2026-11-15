@@ -116,6 +116,7 @@ export function selectSource(id: string): void {
 let seeded = false;
 effect(() => {
   if (seeded) return;
+  seeded = true;
   void (async () => {
     try {
       // 1) 花名册：读 `remote:servers`；没有则迁移旧的单条 `remote:config`。

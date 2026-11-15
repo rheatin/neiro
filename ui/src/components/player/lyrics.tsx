@@ -71,12 +71,18 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
    * every line evenly. */
   const window = () => {
     const lines = lyrics().lines;
-    if (!lyrics().synced) return lines.map((line, index) => ({ line, index }));
+    const span = props.large ? 4 : 3;
+    if (!lyrics().synced) {
+      const count = 2 * span + 1;
+      const maxFrom = Math.max(0, lines.length - count);
+      const from = Math.max(0, Math.min(maxFrom, manual()));
+      const to = Math.min(lines.length, from + count);
+      return lines.slice(from, to).map((line, offset) => ({ line, index: from + offset }));
+    }
     // Before the first timestamp nothing is playing yet, but the file *has*
     // timings: it belongs in the synced layout, centred on its first line.
     // Falling back to the untimed layout made the opening seconds look like a
     // different panel — small, left, two lines.
-    const span = props.large ? 4 : 3;
     const centre = Math.max(active(), 0) + manual();
     const at = Math.max(0, Math.min(lines.length - 1, centre));
     const from = Math.max(0, at - span);
@@ -88,7 +94,6 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
       class={`min-h-24 flex-1 justify-start ${props.large ? "gap-3" : "gap-1.5"}`}
       accessibilityLabel="歌词"
       onWheel={(e: { delta: { x: number; y: number }; deltaMode: string }) => {
-        if (!lyrics().synced) return;
         // One notch is one line; a touchpad's points are gathered until they
         // add up to one, so a slow swipe does not fly through the words.
         const step = e.deltaMode === "lines" ? e.delta.y : e.delta.y / 24;
@@ -119,7 +124,10 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
       <If
         when={lyrics().present}
         else={
-          <View class="flex-1 items-center justify-center">
+          <View
+            class="min-h-0 flex-1 items-center justify-center"
+            style={props.large ? { minHeight: 420 } : { minHeight: 220 }}
+          >
             <Text class="text-sm text-muted-foreground">
               {player().path ? "这首歌没有内嵌歌词。" : "没有播放中的曲目。"}
             </Text>
@@ -129,23 +137,27 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
         <If
           when={lyrics().synced}
           else={
-            // No timestamps: the same centred column, every line at one
-            // weight, scrolled by hand. Nothing marks a "now", so nothing
-            // follows the playback — but the panel is the same panel.
-            <Scroll class="min-h-0 flex-1" contentClass="min-h-full flex-col items-center justify-center gap-2 px-1">
-              <Each of={lyrics().lines}>
-                {(line) => (
+            <View
+              class="min-h-0 flex-1 items-center justify-center gap-2 px-1"
+              style={props.large ? { minHeight: 420 } : { minHeight: 220 }}
+            >
+              <Each of={window()} key={(row) => String(row.index)}>
+                {(row) => (
                   <Text
-                    class={`text-center leading-[1.45] ${props.large ? "text-2xl" : "text-sm"} text-muted-foreground`}
+                    class={`text-center leading-[1.45] ${props.large ? "text-2xl" : "text-sm"} text-foreground`}
+                    style={{ opacity: 0.85 }}
                   >
-                    {line().text}
+                    {row().line.text}
                   </Text>
                 )}
               </Each>
-            </Scroll>
+            </View>
           }
         >
-          <View class="min-h-0 flex-1 items-center justify-center gap-2 px-1">
+          <View
+            class="min-h-0 flex-1 items-center justify-center gap-2 px-1"
+            style={props.large ? { minHeight: 420 } : { minHeight: 220 }}
+          >
             {/* Keyed by the line's own index: keyed by position in the
                 slice, every row would change content when the window moves and
                 the layout animation would draw the old and new line on top of
@@ -163,14 +175,15 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
                   // words playing now.
                   manual.set(0);
                 };
-                const common = `text-center transition duration-500 ease-out ${
-                  props.large ? "leading-[1.45]" : "leading-snug"
-                } ${distance() === 0 ? (props.large ? "text-3xl font-bold" : "text-base font-bold") : props.large ? "text-2xl" : "text-sm"}`;
+                const common = () =>
+                  `text-center transition duration-500 ease-out ${
+                    props.large ? "leading-[1.45]" : "leading-snug"
+                  } ${distance() === 0 ? (props.large ? "text-3xl font-bold" : "text-base font-bold") : props.large ? "text-2xl" : "text-sm"}`;
                 return (
                   <If
                     when={at() !== null}
                     else={
-                      <Text class={common} style={{ opacity: tone().opacity, color: tone().color }}>
+                      <Text class={common()} style={{ opacity: tone().opacity, color: tone().color }}>
                         {row().line.text}
                       </Text>
                     }
@@ -180,7 +193,7 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
                       onPress={seekHere}
                       class={`rounded-(--radius-inset) px-1 ${focusRing}`}
                     >
-                      <Text class={`${common} hover:text-foreground`} style={{ opacity: tone().opacity, color: tone().color }}>
+                      <Text class={`${common()} hover:text-foreground`} style={{ opacity: tone().opacity, color: tone().color }}>
                         {row().line.text}
                       </Text>
                     </Button>

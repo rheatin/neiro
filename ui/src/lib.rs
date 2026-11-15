@@ -961,7 +961,7 @@ impl Inner {
             duration_ms: snapshot.duration * 1000.0,
             at: now_ms(),
             volume: snapshot.render_path.as_ref().map(|path| path.volume),
-            bitrate_kbps: Some(analysis.bitrate_kbps as f64),
+            bitrate_kbps: snapshot.analysis.as_ref().map(|a| a.bitrate_kbps as f64),
             codec: analysis.codec.clone(),
             codec_profile: analysis.codec_profile.clone(),
             track_serial: snapshot.track_serial as f64,

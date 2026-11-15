@@ -1,11 +1,11 @@
 // 三处版式/命名改动的回归：窄侧栏纯图标、E-AC-3 Atmos 识别、窄窗歌词独占。
 
 import { open, test, expect } from "nsh/test";
-import { codecDisplayName, isAtmos, isLossless, lossyCodec } from "../src/components/ui/format-badges";
+import { codecDisplayName, gradeOf, isAtmos, isLossless, lossyCodec } from "../src/components/ui/format-badges";
 
-const PLAY_FILE = "C:\\Users\\Char\\AppData\\Local\\Temp\\ado01.m4a";
+const PLAY_FILE = "../analysis_tone.wav";
 
-test("E-AC-3 / Atmos 不再被叫成 AAC", () => {
+test("E-AC-3 / Atmos 不再被叫成 AAC，44.1 kHz 不会误判为 HI-RES+", () => {
   expect(codecDisplayName("eac3")).toBe("E-AC-3");
   expect(lossyCodec("track.m4a", "eac3")).toBe("E-AC-3");
   expect(lossyCodec("track.m4a")).toBe("AAC"); // 没有引擎答案时才退回扩展名
@@ -14,6 +14,11 @@ test("E-AC-3 / Atmos 不再被叫成 AAC", () => {
   expect(isAtmos("")).toBe(false);
   expect(isLossless("track.m4a", "eac3")).toBe(false);
   expect(isLossless("track.m4a", "alac")).toBe(true);
+  expect(gradeOf(44_100, 16, false)).toBe("CD");
+  expect(gradeOf(44_100, 24, false)).toBe("CD");
+  expect(gradeOf(44_100, 32, false)).toBe("CD");
+  expect(gradeOf(96_000, 24, false)).toBe("HI-RES");
+  expect(gradeOf(192_000, 24, false)).toBe("HI-RES+");
 });
 
 test("窄侧栏：来源只剩图标，动作仍可达", async () => {

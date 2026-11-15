@@ -6,7 +6,7 @@ test("DITHER 是算法开关，不是位深选择器", async () => {
     width: 1440,
     height: 1000,
     storage: { "library:roots": "[]" },
-    host: { params: { debugPlay: "C:\\\\Users\\\\Char\\\\AppData\\\\Local\\\\Temp\\\\ado01.m4a" } },
+    host: { params: { debugPlay: "../analysis_tone.wav" } },
   });
   await app.waitFor("label:暂停", { timeout: 25_000 });
   await app.press("label:输出信息");

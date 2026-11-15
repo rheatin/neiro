@@ -1,6 +1,6 @@
 import { expect, open, test } from "nsh/test";
 
-const PLAY_FILE = "C:\\Users\\Char\\AppData\\Local\\Temp\\ado01.m4a";
+const PLAY_FILE = "../analysis_tone.wav";
 
 test("打开输出信息抽屉不影响播放", async () => {
   const app = await open("../App.tsx", {

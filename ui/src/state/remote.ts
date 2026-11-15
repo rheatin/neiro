@@ -2,11 +2,13 @@
 // `remote_listed` 数据已合并完整 (搜索会在本地过滤)，封面已连接至共享的
 // artwork 栈, 流程 设为 fetch→fetched→play。
 
-import { computed, effect, signal, Storage, untracked } from "nsh";
+import { cleanup, computed, effect, signal, Storage, untracked } from "nsh";
 import { engine, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
-import { playTrack, QUEUE_AHEAD } from "./player";
-import { activeSourceId, registerRemoteActivator, removeServer, servers, type RemoteServer } from "./sources";
+import { registerRemotePlayer, playTrack, QUEUE_AHEAD } from "./player";
+import { registerRemoteCatalog } from "./catalog";
+import { activeSourceId, registerRemoteActivator, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
+import { shuffle, shuffled } from "./shuffle";
 
 const CONFIG_KEY = "remote:config";
 
@@ -103,22 +105,58 @@ export async function disconnectRemote(): Promise<void> {
 let seededRemote = false;
 effect(() => {
   if (engine.health().status !== "ready" || seededRemote) return;
+  if (!serversLoaded()) return;
   seededRemote = true;
   void (async () => {
     try {
-      const activeId = await Storage.getItem("source:active");
+      const serverList = servers();
+      for (const s of serverList) {
+        try {
+          const raw = await Storage.getItem(`remote:tracks:${s.id}`);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed)) {
+              serverCache.set(s.id, parsed);
+            }
+          }
+        } catch {}
+      }
+      cacheVersion.update((v) => v + 1);
+
+      const activeId = activeSourceId();
       if (activeId && activeId.startsWith("remote:")) {
         const serverId = activeId.slice("remote:".length);
-        // 花名册（sources.ts 启动迁移）可能还没读完；给它一小段窗口。
-        for (let i = 0; i < 40 && servers().length === 0; i++) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        if (servers().some((s) => s.id === serverId)) {
+        if (serverList.some((s) => s.id === serverId)) {
+          const cached = serverCache.get(serverId);
+          if (cached && cached.length > 0) {
+            remoteTracks.set([...cached]);
+          }
           await activateServer(serverId);
           configLoaded.set(true);
           return;
         }
       }
+
+      if (serverList.length > 0 && !engine.remoteStatus().configured) {
+        const first = serverList[0];
+        activeEngineServerId = first.id;
+        const cached = serverCache.get(first.id);
+        if (cached && cached.length > 0) {
+          remoteTracks.set([...cached]);
+        }
+        const cfg: RemoteConfig = {
+          kind: first.kind,
+          baseUrl: first.baseUrl,
+          user: first.user ?? "",
+          password: first.password,
+          token: first.token,
+        };
+        config.set(cfg);
+        applyRemote(cfg);
+        configLoaded.set(true);
+        return;
+      }
+
       const saved = await Storage.getItem(CONFIG_KEY);
       if (!saved) return;
       const parsed = JSON.parse(saved) as Partial<RemoteConfig>;
@@ -147,11 +185,26 @@ effect(() => {
  * id 重新注册的重拉在后台进行）。 */
 const serverCache = new Map<string, RemoteTrack[]>();
 const cacheVersion = signal(0);
+let activeEngineServerId = "";
+let fetchingServerId = "";
+let fetchingBaseUrl = "";
 
 export function cachedRemoteTracks(serverId: string): RemoteTrack[] {
   cacheVersion();
   return serverCache.get(serverId) ?? [];
 }
+
+export const allRemoteTracks = computed<RemoteTrack[]>(() => {
+  cacheVersion();
+  const map = new Map<string, RemoteTrack>();
+  for (const t of remoteTracks()) map.set(t.id, t);
+  for (const list of serverCache.values()) {
+    for (const t of list) {
+      if (!map.has(t.id)) map.set(t.id, t);
+    }
+  }
+  return Array.from(map.values());
+});
 
 /** 当前激活的远程服务器（activeSource 指向的；未指向远程 → null）。 */
 export const activeRemoteServer = computed<RemoteServer | null>(() => {
@@ -167,18 +220,35 @@ export const activeRemoteServer = computed<RemoteServer | null>(() => {
  * listener wants from 重新连接, without editing anything. */
 export async function reconnectServer(serverId: string): Promise<void> {
   await activateServer(serverId);
-  if (remoteTracks().length === 0) loadRemote();
+  if (remoteTracks().length === 0) loadRemote(true);
 }
 
 export async function activateServer(serverId: string): Promise<void> {
   const server = servers().find((s) => s.id === serverId);
   if (!server) {
     // 花名册里没有（被删了）：回到本地来源，清空远程视图。
+    activeEngineServerId = "";
+    fetchingServerId = "";
+    fetchingBaseUrl = "";
+    freshList = null;
+    remoteFetching.set(false);
     activeSourceId.set("local:all");
     remoteTracks.set([]);
     remoteLoadingState.set("idle");
     return;
   }
+  // 切换服务器时立即同步替换当前屏幕上的曲目列表（不保留上一台服务器的列表），
+  // 并作废上一台服务器尚未落地的分页拉取。
+  activeEngineServerId = serverId;
+  fetchingServerId = serverId;
+  fetchingBaseUrl = server.baseUrl;
+  freshList = null;
+  remoteFetching.set(false);
+  remoteError.set("");
+  const cached = serverCache.get(serverId);
+  remoteTracks.set(cached ? [...cached] : []);
+  remoteLoadingState.set(cached && cached.length > 0 ? "idle" : "loading");
+
   const status = engine.remoteStatus();
   const sameServer =
     status.configured && status.baseUrl === server.baseUrl && remoteConfig()?.kind === server.kind &&
@@ -200,12 +270,8 @@ export async function activateServer(serverId: string): Promise<void> {
       return;
     }
   }
-  // 有缓存的列表先上屏（封面/文件在 Base 的磁盘缓存里），随后 id 重新
-  // 注册的重拉把列表与 id 表刷新。
-  const cached = serverCache.get(serverId);
-  remoteTracks.set(cached ? [...cached] : []);
-  remoteLoadingState.set(cached && cached.length > 0 ? "idle" : "idle");
-  loadRemote();
+  if (activeEngineServerId !== serverId) return;
+  loadRemote(true);
 }
 
 // sources.ts 的来源切换在这里落地（注册避免模块循环）；激活的失败不悬空。
@@ -215,6 +281,9 @@ registerRemoteActivator((serverId) => {
 
 /** 从花名册删掉一台服务器；删的是当前连着的 → 断开并回到本地来源。 */
 export async function removeServerById(id: string): Promise<void> {
+  serverCache.delete(id);
+  cacheVersion.update((v) => v + 1);
+  void Storage.removeItem(`remote:tracks:${id}`).catch(() => {});
   if (activeRemoteServer()?.id === id) await disconnectRemote();
   await removeServer(id);
 }
@@ -260,7 +329,37 @@ const SYNC_TTL_MS = 5 * 60 * 1000;
 export const remoteIsFresh = (): boolean =>
   remoteTracks().length > 0 && Date.now() - lastSyncAt < SYNC_TTL_MS;
 
+function tracksEqual(a: RemoteTrack[], b: RemoteTrack[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.id !== y.id ||
+      x.title !== y.title ||
+      x.artist !== y.artist ||
+      x.album !== y.album ||
+      x.container !== y.container ||
+      x.durationMs !== y.durationMs ||
+      x.size !== y.size ||
+      x.coverArt !== y.coverArt
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function handleListed(tracks: RemoteTrack[]): void {
+  // 丢弃上一台服务器在切换前已经在路上的旧分页结果。
+  const currentStatusUrl = engine.remoteStatus().baseUrl;
+  if (fetchingBaseUrl && currentStatusUrl && currentStatusUrl !== fetchingBaseUrl) {
+    return;
+  }
+  if (fetchingServerId && activeEngineServerId && fetchingServerId !== activeEngineServerId) {
+    return;
+  }
+  const targetServerId = fetchingServerId;
   // 分页期间 `remoteFetching` 必须保持 true：订阅条件 `if (remoteFetching())`
   // 是"这是当前这一轮拉取的页"的标记；第一页就置 false 会把第二页起的所有
   // 页丢掉（曾经只拉到 200 首）。
@@ -275,27 +374,31 @@ function handleListed(tracks: RemoteTrack[]): void {
     const cfg = remoteConfig();
     const roster = activeRemoteServer();
     const password = (cfg?.password ?? "") !== "" ? cfg?.password : roster?.password;
-    if (!emptyHandled && cfg && (password ?? "") !== "") {
+    if (!emptyHandled && (freshList === null || freshList.length === 0) && cfg && (password ?? "") !== "") {
       emptyHandled = true;
       void saveRemoteConfig({
         kind: cfg.kind,
         baseUrl: cfg.baseUrl,
         user: (cfg.user ?? "") !== "" ? cfg.user : roster?.user ?? "",
         password,
-      }).then(() => loadRemote());
+      }).then(() => loadRemote(true));
+      return;
     }
     // A listing with songs is the proof the session works; an empty one has
     // now been answered by a fresh sign-in, and asking again would be the
     // same question on a loop.
     if (freshList !== null && freshList.length > 0) {
       emptyHandled = false;
-      remoteTracks.set(freshList);
+      if (!tracksEqual(remoteTracks(), freshList)) {
+        remoteTracks.set(freshList);
+      }
+    } else if (freshList !== null) {
+      if (remoteTracks().length > 0) remoteTracks.set([]);
     }
-    else if (freshList !== null) remoteTracks.set([]);
     freshList = null;
     lastSyncAt = Date.now();
     remoteFetching.set(false);
-    finishServerCache();
+    finishServerCache(targetServerId);
     return;
   }
   if (freshList !== null) freshList.push(...tracks);
@@ -305,33 +408,60 @@ function handleListed(tracks: RemoteTrack[]): void {
     } catch (error) {
       console.warn("neiro: 下一页远程列表没有发出去:", String(error));
       remoteFetching.set(false);
-      finishServerCache();
+      finishServerCache(targetServerId);
     }
   } else {
     // The listing is whole: one swap, so the page reads one listing.
     if (freshList !== null) {
       emptyHandled = false;
-      remoteTracks.set(freshList);
+      if (!tracksEqual(remoteTracks(), freshList)) {
+        remoteTracks.set(freshList);
+      }
     }
     freshList = null;
     lastSyncAt = Date.now();
     remoteFetching.set(false);
-    finishServerCache();
+    finishServerCache(targetServerId);
   }
 }
 
-/** 一轮拉取结束：把完整列表存进当前远程来源的缓存（切 Tab 免重拉上屏）。 */
-function finishServerCache(): void {
-  const id = activeSourceId();
-  if (!id.startsWith("remote:")) return;
-  serverCache.set(id.slice("remote:".length), [...remoteTracks()]);
+/** 一轮拉取结束：把完整列表存进当前远程来源的缓存（切 Tab 免重拉上屏，并持久化到 Storage）。 */
+function finishServerCache(targetServerId?: string): void {
+  let serverId = targetServerId || activeEngineServerId;
+  if (!serverId) {
+    const id = activeSourceId();
+    if (id.startsWith("remote:")) {
+      serverId = id.slice("remote:".length);
+    } else {
+      const first = servers()[0];
+      if (first) serverId = first.id;
+    }
+  }
+  if (!serverId) return;
+  const current = [...remoteTracks()];
+  serverCache.set(serverId, current);
   cacheVersion.update((v) => v + 1);
+  void Storage.setItem(`remote:tracks:${serverId}`, JSON.stringify(current)).catch((e) =>
+    console.warn("neiro: 远程曲目缓存没有存下:", String(e)),
+  );
 }
 
-export function loadRemote(): void {
+export function loadRemote(force = false): void {
   // Only a request that is still in flight blocks a new one. A flag left set
   // by a request that never answered used to make the page empty forever.
-  if (remoteFetching() && remoteLoadingState() === "loading") return;
+  if (!force && remoteFetching() && remoteLoadingState() === "loading") return;
+  const srv =
+    activeRemoteServer() ??
+    servers().find((s) => s.id === activeEngineServerId) ??
+    servers()[0] ??
+    null;
+  if (srv) {
+    fetchingServerId = srv.id;
+    fetchingBaseUrl = srv.baseUrl;
+  } else {
+    fetchingServerId = activeEngineServerId;
+    fetchingBaseUrl = remoteConfig()?.baseUrl ?? "";
+  }
   remoteFetching.set(true);
   // The cached rows stay on screen while this runs; `freshList` replaces them
   // in one swap when the last page lands.
@@ -349,7 +479,7 @@ export function loadRemote(): void {
 }
 
 export function retryRemote(): void {
-  if (remoteLoadingState() === "error" || remoteTracks().length === 0) loadRemote();
+  if (remoteLoadingState() === "error" || remoteTracks().length === 0) loadRemote(true);
 }
 
 // remote_listed 从引擎镜像落进来（先于首呼的缓存值由引擎自己给出）。空数
@@ -441,20 +571,31 @@ export function setRemoteQuery(value: string): void {
  * server, not from a file name. Only the lists already in memory answer:
  * a collection must not turn into a network fetch of its own. */
 export function remoteTrackForCachePath(path: string): RemoteTrack | null {
-  const name = path.replace(/\\/g, "/").split("/").pop() ?? "";
+  let name = path;
+  if (name.startsWith("remote://")) {
+    name = name.slice("remote://".length);
+  } else {
+    name = name.replace(/\\/g, "/").split("/").pop() ?? "";
+  }
   const dot = name.lastIndexOf(".");
   if (dot <= 0) return null;
   const id = name.slice(0, dot);
   const container = name.slice(dot + 1).toLowerCase();
   const lists: RemoteTrack[][] = [remoteTracks(), ...serverCache.values()];
   for (const list of lists) {
-    const found = list.find((t) => t.id === id && t.container.toLowerCase() === container);
+    const found = list.find((t) => t.id === id && (t.container.toLowerCase() === container || !t.container));
     if (found) return found;
   }
   return null;
 }
 
 // ---- 播放：fetch → fetched → play --------------------------------------------
+
+export function remoteAsTrack(rt: RemoteTrack): Track {
+  const ext = (rt.container || "flac").toLowerCase();
+  const path = cachedRemotePath(rt) ?? `remote://${rt.id}.${ext}`;
+  return asLocalTrack(rt, path);
+}
 
 /** 把远程行变成播放意图所需的形状（path 是引擎缓存后的本地文件路径）。 */
 export function asLocalTrack(track: RemoteTrack, path: string): Track {
@@ -493,10 +634,13 @@ export function playRemote(track: RemoteTrack): void {
  * 下,拿到路径就入队,顺序不会乱。 */
 export function queueRemoteFrom(rows: RemoteTrack[], index: number): void {
   const at = Math.min(Math.max(index, 0), Math.max(rows.length - 1, 0));
-  const pick = rows.slice(at, at + QUEUE_AHEAD + 1);
-  if (pick.length === 0) return;
-  playRemote(pick[0]);
-  const rest = pick.slice(1);
+  if (rows.length === 0) return;
+  const first = rows[at];
+  const other = rows.filter((_, i) => i !== at);
+  const queuedOther = shuffle() ? shuffled(other) : rows.slice(at + 1);
+  const rest = queuedOther.slice(0, QUEUE_AHEAD);
+
+  playRemote(first);
   const step = (i: number) => {
     if (i >= rest.length) return;
     withRemotePath(rest[i], (path) => {
@@ -569,7 +713,35 @@ effect(() => {
   if (fetchingIds().size === 0) return;
   const timer = setTimeout(() => {
     const stale = fetchingIds();
-    if (stale.size > 0) for (const id of stale) unfetchId(id);
+    if (stale.size > 0) {
+      for (const id of stale) {
+        fetchedActions.delete(id);
+        unfetchId(id);
+      }
+    }
   }, 30_000);
-  return () => clearTimeout(timer);
+  cleanup(() => clearTimeout(timer));
+});
+
+registerRemoteCatalog(
+  () => allRemoteTracks().map(remoteAsTrack),
+  (path) => {
+    const rt = remoteTrackForCachePath(path);
+    return rt ? asLocalTrack(rt, path) : undefined;
+  },
+);
+
+registerRemotePlayer({
+  playRemoteByPath: (path) => {
+    const rt = remoteTrackForCachePath(path);
+    if (!rt) return false;
+    playRemote(rt);
+    return true;
+  },
+  withRemotePathByPath: (path, then) => {
+    const rt = remoteTrackForCachePath(path);
+    if (!rt) return false;
+    withRemotePath(rt, then);
+    return true;
+  },
 });

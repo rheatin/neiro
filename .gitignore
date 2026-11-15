@@ -49,3 +49,5 @@ vendor/
 # Runtime libraries staged beside Base for the Windows host.
 base/*.dll
 base/*.wav
+
+.cache/

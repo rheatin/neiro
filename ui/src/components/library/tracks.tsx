@@ -172,13 +172,29 @@ export function rowActions(track: Track | undefined, close?: () => void): MenuAc
   if (!path) return [];
   const run = (action: () => void) => () => {
     close?.();
+    if (path.startsWith("remote://")) {
+      const rt = remoteTrackForCachePath(path);
+      if (rt) {
+        withRemotePath(rt, (cachedPath) => {
+          if (action === doQueue) addToQueue([cachedPath]);
+          else if (action === doFav) toggleFavourite(cachedPath);
+          else if (action === doPlayList) openAddToPlaylist(cachedPath);
+          else if (action === doSelect) beginSelection(cachedPath);
+        });
+        return;
+      }
+    }
     action();
   };
+  const doQueue = () => addToQueue([path]);
+  const doFav = () => toggleFavourite(path);
+  const doPlayList = () => openAddToPlaylist(path);
+  const doSelect = () => beginSelection(path);
   return [
-    { label: "加入待播", onSelect: run(() => addToQueue([path])) },
-    { label: isFavourite(path) ? "取消收藏" : "加入红心", onSelect: run(() => toggleFavourite(path)), separated: true },
-    { label: "添加到曲单…", onSelect: run(() => openAddToPlaylist(path)) },
-    { label: "选择", onSelect: run(() => beginSelection(path)), separated: true },
+    { label: "加入待播", onSelect: run(doQueue) },
+    { label: isFavourite(path) ? "取消收藏" : "加入红心", onSelect: run(doFav), separated: true },
+    { label: "添加到曲单…", onSelect: run(doPlayList) },
+    { label: "选择", onSelect: run(doSelect), separated: true },
   ];
 }
 
@@ -200,6 +216,7 @@ import { isCurrentTrack, isPlaying, playTrack } from "../../state/player";
 import { ready } from "../../state/engine";
 import { isFavourite, toggleFavourite } from "../../state/user-catalog";
 import { addToQueue, beginSelection, isSelected, selectionActive, toggleSelected } from "../../state/queue";
+import { remoteTrackForCachePath, withRemotePath } from "../../state/remote";
 import { MenuSurface, openContextMenu, type MenuAction } from "../ui/context-menu";
 import { openAddToPlaylist } from "./playlist-dialogs";
 import { Cover } from "../ui/cover";

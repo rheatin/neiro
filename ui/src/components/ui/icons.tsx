@@ -15,7 +15,7 @@ export type IconName =
   | "volume" | "volumeLow" | "volumeMute" | "info"
   | "play" | "pause" | "skipBack" | "skipForward"
   | "heart" | "heartFilled" | "plus" | "sparkles" | "server" | "shuffle"
-  | "dots" | "queue";
+  | "dots" | "queue" | "settings";
 
 // Tabler Icons, outline (1pt in the source files; drawn here at 1.5) and
 // filled for the transport. Each string is the inside of a 24×24 SVG.
@@ -33,6 +33,8 @@ const BODY: Record<IconName, string> = {
   queue: '<path d="M4 6h10" /><path d="M4 12h10" /><path d="M4 18h10" /><path d="M17 9v10" /><path d="M20 6l-3 3l3 3" />',
   dots: '<path d="M5 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M17 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" />',
   server: '<path d="M3 4a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-4z" /><path d="M3 16a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-4z" /><path d="M7 7l0 .01" /><path d="M7 19l0 .01" />',
+  settings:
+    '<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z" /><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" />',
   // 随机播放（Feather 的 shuffle 几何：两条交叉线加两枚箭头；同为描边
   // 风格，笔画与 Tabler 一致画 1.5）。
   shuffle: '<path d="M16 3h5v5" /><path d="M4 20L21 3" /><path d="M21 16v5h-5" /><path d="M15 15l6 6" /><path d="M4 4l5 5" />',

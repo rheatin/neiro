@@ -22,6 +22,7 @@ import {
   formatHz,
   isDsdSource,
   resolvedPath,
+  sourceBits,
   sourceFormatLabel,
 } from "../../../state/resolved";
 
@@ -246,9 +247,10 @@ export function SourceStage(props: {
   const pcmChip = () => {
     const p = path();
     if (!p) return "PCM —";
-    const depth = p.validBits || p.containerBits;
     if (isDsdFile()) return `DSD ${formatHz(p.sourceRate)} / 1-bit`;
-    return `PCM ${formatHz(p.sourceRate || p.sampleRate)} / ${depth}-bit${p.isFloat ? " float" : ""}`;
+    const depth = sourceBits();
+    const rate = formatHz(p.sourceRate || p.sampleRate);
+    return depth > 0 ? `PCM ${rate} / ${depth}-bit` : `PCM ${rate}`;
   };
   const dsdChip = () => {
     const p = path();
@@ -282,7 +284,7 @@ export function SourceStage(props: {
    * The engine reports a count; the pair is what the count means. */
   const channelLabel = () => {
     const p = path();
-    const ch = p?.channels || p?.sourceChannels || 0;
+    const ch = p?.sourceChannels || p?.channels || 0;
     if (ch <= 0) return "—";
     if (ch === 1) return "1.0 MONO";
     if (ch === 2) return "2.0 STEREO";
@@ -290,12 +292,12 @@ export function SourceStage(props: {
     if (ch === 8) return "7.1";
     return `${ch} CH`;
   };
-  /** The depth the source actually carries, as opposed to the container. */
+  /** The depth the source actually carries, as opposed to the output device. */
   const depthLabel = () => {
     const p = path();
     if (!p) return "—";
     if (isDsdFile()) return "1-BIT";
-    const bits = p.validBits || p.containerBits;
+    const bits = sourceBits();
     return bits > 0 ? `${bits}-BIT` : "—";
   };
   /** The file's facts, one chip each. The two names are solid (the library's
@@ -315,7 +317,10 @@ export function SourceStage(props: {
         rows.push({ label: named, tone: "solid" });
       }
     }
-    rows.push({ label: depthLabel(), tone: "quiet" });
+    const depth = depthLabel();
+    if (depth !== "—") {
+      rows.push({ label: depth, tone: "quiet" });
+    }
     rows.push({ label: channelLabel(), tone: "quiet" });
     rows.push({ label: bitrateLabel(), tone: "quiet" });
     return rows;

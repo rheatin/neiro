@@ -184,13 +184,6 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
     void (async () => {
       try {
         await upsertServer(server);
-        await saveRemoteConfig({
-          kind: server.kind,
-          baseUrl: server.baseUrl,
-          user: server.user ?? "",
-          password: server.password,
-          token: server.token,
-        } satisfies RemoteConfig);
         selectSource(`remote:${server.id}`);
         setServerDialogOpen(false);
       } catch (error) {

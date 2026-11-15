@@ -4,7 +4,7 @@
 
 import { open, test, expect, type App as TestApp } from "nsh/test";
 
-const PLAY_FILE = "C:\\Users\\Char\\AppData\\Local\\Temp\\ado01.m4a";
+const PLAY_FILE = "../analysis_tone.wav";
 
 const WINDOW = { width: 1280, height: 837 };
 

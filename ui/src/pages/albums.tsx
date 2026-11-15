@@ -11,6 +11,7 @@ import {
   albumsState,
   dataEpoch,
   ensureAlbums,
+  ensureTracks,
   retryAlbums,
   visibleAlbums,
 } from "../state/catalog";
@@ -27,9 +28,12 @@ import { enter } from "../components/ui/motion";
 export function AlbumsPage() {
   effect(() => {
     dataEpoch();
-    untracked(() => ensureAlbums());
+    untracked(() => {
+      ensureAlbums();
+      ensureTracks();
+    });
   });
-  const items = visibleAlbums().map(albumItemOf);
+  const items = () => visibleAlbums().map(albumItemOf);
   // 来源是远程时，这一页展示该服务器的专辑（由曲目按 album+artist 分组），
   // 与首页的远程段同一数据、同一详情路由。
   const remote = () => activeSource().kind === "remote";
@@ -55,7 +59,7 @@ export function AlbumsPage() {
           when={albumsState() === "error"}
           else={
             <If
-              when={items.length > 0}
+              when={items().length > 0}
               else={
                 <If
                   when={albumsState() === "loading"}
@@ -69,7 +73,7 @@ export function AlbumsPage() {
                 </If>
               }
             >
-              <CardGrid items={items} />
+              <CardGrid items={items()} />
             </If>
           }
         >

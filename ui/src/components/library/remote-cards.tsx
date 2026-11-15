@@ -78,7 +78,12 @@ export function RemoteGroupCard(props: {
       accessibilityLabel={`${label()}，${item().sub}`}
       onPress={() => {
         if (props.variant === "album") {
-          open({ name: "remoteAlbum", serverId: activeRemoteServer()?.id ?? "", album: item().name, artist: item().sub });
+          open({
+            name: "remoteAlbum",
+            serverId: activeRemoteServer()?.id ?? "",
+            album: item().name,
+            artist: item().track.artist || "",
+          });
         } else {
           open({ name: "remoteArtist", serverId: activeRemoteServer()?.id ?? "", artist: item().name });
         }

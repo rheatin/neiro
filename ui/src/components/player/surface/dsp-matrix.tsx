@@ -33,6 +33,7 @@ import { engine, reportEngineFailure } from "../../../backend/engine";
 import { notify } from "../../../state/feedback";
 import { currentDither, currentRate, currentShare, dsdPcmFallback, dsdTransport, isDsdSource, policyJson, resolvedPath, type DitherKind } from "../../../state/resolved";
 import { playSnap, playTick } from "../../../state/foley";
+import { gaplessEnabled, setGaplessEnabled } from "../../../state/player";
 
 /** How far one point of vertical travel moves a full-range control. */
 const DRAG_RANGE_PT = 150;
@@ -104,29 +105,36 @@ export function GainFader(props: {
 }) {
   const height = () => props.height ?? 118;
   const range = 24;
+  const draft = signal<number | null>(null);
+  const current = () => draft() ?? props.value;
   const toNorm = (db: number) => (db + 12) / range;
-  const toDb = (norm: number) => norm * range - 12;
   /** The cap's 0…1 from the top (0 = +12 dB). */
-  const position = () => 1 - toNorm(props.value);
-  const detented = () => Math.abs(props.value) <= DETENT_DB + 1e-9;
+  const position = () => 1 - toNorm(current());
+  const detented = () => Math.abs(current()) <= DETENT_DB + 1e-9;
   const handlers = useVerticalDrag(
     props.label,
     (dy, slow) => {
       if (props.locked || props.disabled) return;
       const step = ((slow ? SLOW_GEAR : 1) * dy) / DRAG_RANGE_PT;
-      const next = props.value + step * range;
+      const next = current() + step * range;
       const clamped = Math.max(-12, Math.min(12, next));
       // The magnetic detent: inside the window the value is exactly 0, so the
       // readout and what the engine receives agree.
       const wasOut = !detented();
       const snapped = Math.abs(clamped) <= DETENT_DB ? 0 : clamped;
       if (wasOut && snapped === 0 && !reduceMotion()) playSnap();
+      draft.set(snapped);
       props.onChange(snapped);
     },
-    () => props.onCommit(props.value),
+    () => {
+      const committed = current();
+      draft.set(null);
+      props.onCommit(committed);
+    },
   );
   const zero = () => {
     if (props.locked || props.disabled) return;
+    draft.set(null);
     props.onChange(0);
     props.onCommit(0);
     playSnap();
@@ -170,8 +178,8 @@ export function GainFader(props: {
           textShadow: detented() && !props.locked ? "0 0 10 rgba(245,166,35,0.5)" : undefined,
         }}
       >
-        {props.value > 0 ? "+" : ""}
-        {props.value.toFixed(1)}
+        {current() > 0 ? "+" : ""}
+        {current().toFixed(1)}
       </Text>
       <MechKey label={`${props.label} 归零`} onPress={zero} disabled={props.disabled || props.locked} class="h-5 w-8 items-center justify-center rounded">
         <Text class="font-mono text-[8px] font-bold" style={{ color: HARDWARE.textDim }}>
@@ -282,16 +290,28 @@ export function RatioEncoder(props: {
   size?: number;
 }) {
   const size = () => props.size ?? 40;
-  const angle = () => -135 + 270 * Math.min(1, Math.max(0, props.value));
+  const draft = signal<number | null>(null);
+  const current = () => draft() ?? props.value;
+  const angle = () => -135 + 270 * Math.min(1, Math.max(0, current()));
+  let movedInDrag = false;
   const handlers = useVerticalDrag(
     props.label,
     (dy, slow) => {
       if (props.disabled || props.locked) return;
-      const next = props.value + ((slow ? SLOW_GEAR : 1) * dy) / DRAG_RANGE_PT;
-      props.onChange(Math.max(0, Math.min(1, next)));
+      movedInDrag = true;
+      const next = Math.max(0, Math.min(1, current() + ((slow ? SLOW_GEAR : 1) * dy) / DRAG_RANGE_PT));
+      draft.set(next);
+      props.onChange(next);
       playTick();
     },
-    () => props.onCommit(props.value),
+    () => {
+      const committed = current();
+      draft.set(null);
+      props.onCommit(committed);
+      setTimeout(() => {
+        movedInDrag = false;
+      }, 0);
+    },
   );
   return (
     <View class="items-center gap-1.5">
@@ -300,13 +320,14 @@ export function RatioEncoder(props: {
         style={{ width: size() + 16, height: size() + 16 }}
         {...handlers}
         onPress={() => {
-          if (props.disabled || props.locked) return;
+          if (movedInDrag || props.disabled || props.locked) return;
+          draft.set(null);
           props.onChange(props.resetTo ?? 0);
           props.onCommit(props.resetTo ?? 0);
           playSnap();
         }}
       >
-        <EncoderRing value={props.value} size={size()} engaged={props.enabled && !props.locked} />
+        <EncoderRing value={current()} size={size()} engaged={props.enabled && !props.locked} />
         <EncoderCap size={size()} angle={angle()} engaged={props.enabled && !props.locked} dragging={dragging() === props.label} />
       </View>
       <Silkscreen class="text-center">{props.label}</Silkscreen>
@@ -314,7 +335,7 @@ export function RatioEncoder(props: {
         class="font-mono text-[11px] tabular-nums"
         style={{ color: props.locked ? HARDWARE.textFaint : props.enabled ? HARDWARE.amberBright : HARDWARE.textDim }}
       >
-        {props.readout(props.value)}
+        {props.readout(current())}
       </Text>
       <Silkscreen tone="faint" class="text-center">{props.unit}</Silkscreen>
       <MechKey
@@ -332,6 +353,64 @@ export function RatioEncoder(props: {
   );
 }
 
+/** A two-position magnetic-detent hardware throw fader (top = ON, bottom = OFF)
+ * with only the fader slot/cap and the silkscreen label. */
+export function ThrowFader(props: {
+  label: string;
+  enabled: boolean;
+  disabled?: boolean;
+  locked?: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  const slotHeight = 108;
+  const position = () => (props.enabled ? 0.04 : 0.96);
+  let movedInDrag = false;
+  const handlers = useVerticalDrag(
+    props.label,
+    (dy) => {
+      if (props.disabled || props.locked) return;
+      if (Math.abs(dy) < 3) return;
+      movedInDrag = true;
+      const next = dy > 0;
+      if (next !== props.enabled) {
+        if (!reduceMotion()) playSnap();
+        props.onChange(next);
+      }
+    },
+    () => {
+      setTimeout(() => {
+        movedInDrag = false;
+      }, 0);
+    },
+  );
+  const toggle = () => {
+    if (props.disabled || props.locked) return;
+    if (!reduceMotion()) playSnap();
+    props.onChange(!props.enabled);
+  };
+  return (
+    <View class="items-center justify-between" style={{ width: 56, paddingTop: 5 }}>
+      <View
+        class="items-center justify-center"
+        style={{ width: 56, height: slotHeight }}
+        {...handlers}
+        onPress={() => {
+          if (movedInDrag) return;
+          toggle();
+        }}
+      >
+        <FaderSlot height={slotHeight} datum={0.5} lit={props.enabled && !props.locked} />
+        <View style={{ position: "absolute", top: position() * (slotHeight - 18), left: 0, right: 0, alignItems: "center" }}>
+          <FaderCap position={position()} dragging={dragging() === props.label} detented={props.enabled && !props.locked} width={26} />
+        </View>
+      </View>
+      <View class="h-5 items-center justify-center">
+        <Silkscreen class="text-center" tone={props.enabled ? "amber" : "dim"}>{props.label}</Silkscreen>
+      </View>
+    </View>
+  );
+}
+
 /** The 02 module: two faders, two key-beds, three encoders, and the DSD lock
  * plate over the PCM-only controls. */
 export function DspMatrix(props: {
@@ -344,6 +423,7 @@ export function DspMatrix(props: {
   // A DSD source carried as DSD (DoP or native) bypasses the float DSP
   // chain in the engine, so the PCM-only controls cannot act on it.
   const locked = () => isDsdSource() && dsdTransport() !== "none" && !dsdPcmFallback();
+  const isGaplessOn = () => gaplessEnabled() && !(settings()?.crossfadeEnabled ?? false);
   return (
     <View class="gap-2">
       <ModuleHeader
@@ -374,7 +454,7 @@ export function DspMatrix(props: {
           one line. */}
       <View class="flex-row items-stretch gap-2">
         {/* Left: the two bipolar gains, stretched to the column's height. */}
-        <View class="items-center gap-1 rounded-lg p-2" style={{ backgroundColor: "rgba(0,0,0,0.25)", width: 132 }}>
+        <View class="items-center gap-1 rounded-lg p-2" style={{ backgroundColor: "rgba(0,0,0,0.25)", width: 146 }}>
           <Silkscreen tone="amber">CHANNEL STRIPS</Silkscreen>
           <View class="w-full flex-row justify-around gap-1">
             <GainFader
@@ -461,7 +541,7 @@ export function DspMatrix(props: {
               <Silkscreen tone="amber">MODULATION & SPATIAL</Silkscreen>
               <Silkscreen tone="faint">DRAG ↑↓</Silkscreen>
             </View>
-            <View class="flex-row w-full justify-around">
+            <View class="flex-row w-full items-stretch justify-around">
               <RatioEncoder
                 label="X-FEED"
                 unit="AMOUNT"
@@ -542,8 +622,10 @@ export function DspMatrix(props: {
                 onCommit={(v) => {
                   const before = settings();
                   if (!before) return;
+                  const ms = Math.round(v * 120) * 100;
                   try {
-                    engine.setCrossfade(before.crossfadeEnabled, Math.round(v * 12) * 1000, before.crossfadeCurve);
+                    engine.setCrossfade(ms > 0 ? true : false, ms, before.crossfadeCurve);
+                    if (ms > 0) setGaplessEnabled(false);
                   } catch (error) {
                     reportEngineFailure(error, "Crossfade 下发失败");
                   }
@@ -551,10 +633,35 @@ export function DspMatrix(props: {
                 onToggle={() => {
                   const before = settings();
                   if (!before) return;
+                  const nextOn = !before.crossfadeEnabled;
+                  const nextMs = nextOn && before.crossfadeDurationMs <= 0 ? 3000 : before.crossfadeDurationMs;
                   try {
-                    engine.setCrossfade(!before.crossfadeEnabled, before.crossfadeDurationMs, before.crossfadeCurve);
+                    engine.setCrossfade(nextOn, nextMs, before.crossfadeCurve);
+                    if (nextOn) setGaplessEnabled(false);
                   } catch (error) {
                     reportEngineFailure(error, "Crossfade 切换失败");
+                  }
+                }}
+              />
+              <ThrowFader
+                label="GAPLESS"
+                enabled={isGaplessOn()}
+                onChange={(next) => {
+                  setGaplessEnabled(next);
+                  const before = settings();
+                  if (!before) return;
+                  if (next && before.crossfadeEnabled) {
+                    try {
+                      engine.setCrossfade(false, before.crossfadeDurationMs, before.crossfadeCurve);
+                    } catch (error) {
+                      reportEngineFailure(error, "Crossfade 旁通失败");
+                    }
+                  } else if (!next && !before.crossfadeEnabled) {
+                    try {
+                      engine.setCrossfade(true, before.crossfadeDurationMs > 0 ? before.crossfadeDurationMs : 3000, before.crossfadeCurve);
+                    } catch (error) {
+                      reportEngineFailure(error, "Crossfade 开启失败");
+                    }
                   }
                 }}
               />

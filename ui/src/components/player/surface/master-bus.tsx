@@ -53,10 +53,10 @@ function Lamp(props: { line1: string; line2: string; pass: boolean; amber?: bool
           borderColor: props.pass ? "#6EE7B7" : "#22262A",
         }}
       />
-      <Text class="text-center font-mono text-[8px] font-bold tracking-[0.08em]" style={{ color: props.pass ? HARDWARE.text : HARDWARE.textDim }}>
+      <Text class="line-clamp-1 shrink-0 text-center font-mono text-[8px] font-bold tracking-[0.08em]" style={{ color: props.pass ? HARDWARE.text : HARDWARE.textDim }}>
         {props.line1}
       </Text>
-      <Text class="text-center font-mono text-[8px] font-bold tracking-[0.08em]" style={{ color: props.pass ? HARDWARE.text : HARDWARE.textDim }}>
+      <Text class="line-clamp-1 shrink-0 text-center font-mono text-[8px] font-bold tracking-[0.08em]" style={{ color: props.pass ? HARDWARE.text : HARDWARE.textDim }}>
         {props.line2}
       </Text>
     </View>
@@ -67,13 +67,15 @@ function Lamp(props: { line1: string; line2: string; pass: boolean; amber?: bool
 export function bitPerfectChecks() {
   const path = () => resolvedPath();
   const rp = () => engine.renderPath();
-  const settings = () => engine.settings();
   const dspClean = () => {
     const p = path();
-    const s = settings();
-    if (!p) return false;
+    const r = rp();
+    if (!p && !r) return false;
     if (opraActive()) return false;
-    return !p.eqActive && !p.crossfeedActive && !p.convolverActive && !p.crossfadeActive && (s?.replayGainMode ?? 0) === 0;
+    if (r) {
+      return !r.eqEnabled && !r.crossfeedEnabled && !r.replayGainEnabled && !r.convolverEnabled && !r.crossfadeEnabled;
+    }
+    return !p!.eqActive && !p!.crossfeedActive && !p!.convolverActive && !p!.crossfadeActive;
   };
   const rateMatch = () => {
     const p = path();
@@ -98,7 +100,7 @@ function exclusiveOf(path: ReturnType<typeof resolvedPath>): boolean {
 /** The whole 03 module. */
 export function MasterBus() {
   const checks = bitPerfectChecks();
-  const bitPerfect = () => engine.renderPath()?.bitPerfect ?? false;
+  const bitPerfect = () => (engine.renderPath()?.bitPerfect ?? false) && checks.dspClean();
   /** The blocking causes, as short panel lines: the engine's reason code and
    * the app's own OPRA layer. */
   const causes = (): string[] => {
@@ -118,8 +120,13 @@ export function MasterBus() {
       11: "REPLAYGAIN ACTIVE",
       12: "CONVOLVER ACTIVE",
       13: "CROSSFADE ACTIVE",
+      14: "SOURCE PRECISION (32-BIT INT IN FLOAT32 PATH)",
+      15: "CLIP GUARD ACTIVE (LIMITER)",
     };
     if (!bitPerfect() && reason !== 0) out.push(named[reason] ?? `REASON ${reason}`);
+    if (!bitPerfect() && reason === 0 && (engine.renderPath()?.crossfadeEnabled || engine.settings()?.crossfadeEnabled)) {
+      out.push("CROSSFADE ACTIVE");
+    }
     if (opraActive()) out.push(`OPRA HEADPHONE CALIBRATION (${opraSelected()})`);
     return out;
   };

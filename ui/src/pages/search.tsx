@@ -15,14 +15,19 @@ import {
   searchQuery,
   searchResults,
   searchRunning,
+  visibleAlbums,
+  visibleArtists,
 } from "../state/catalog";
 import { activeSource } from "../state/sources";
 import {
-  remoteFetching,
+  allRemoteTracks,
+  playRemote,
+  queueRemoteFrom,
   remoteAlbumGroups,
   remoteArtistGroups,
+  remoteAsTrack,
+  remoteFetching,
   remoteLoadingState,
-  playRemote,
   remoteTracks,
 } from "../state/remote";
 import { AppPage } from "../components/page";
@@ -44,10 +49,41 @@ export function SearchPage() {
   // Local: the engine's answer only while its query is still the one asked.
   const songs = () => {
     const reply = searchResults();
-    return reply && reply.query === term() ? reply.tracks.slice(0, MAX_TRACKS) : [];
+    const local = reply && reply.query === term() ? reply.tracks : [];
+    const t = lowerTerm();
+    if (!t) return local.slice(0, MAX_TRACKS);
+    const remoteMatches = allRemoteTracks()
+      .filter(
+        (row) =>
+          row.title.toLowerCase().includes(t) ||
+          row.artist.toLowerCase().includes(t) ||
+          row.album.toLowerCase().includes(t),
+      )
+      .map(remoteAsTrack);
+    const seen = new Set(local.map((s) => s.path));
+    const merged = [...local];
+    for (const rm of remoteMatches) {
+      if (!seen.has(rm.path)) {
+        seen.add(rm.path);
+        merged.push(rm);
+      }
+    }
+    return merged.slice(0, MAX_TRACKS);
   };
-  const albumItems = () => searchAlbums().map(albumItemOf);
-  const artistItems = () => searchArtists().map(artistItemOf);
+  const albumItems = () => {
+    const t = lowerTerm();
+    if (!t) return [];
+    return visibleAlbums()
+      .filter((a) => a.album.toLowerCase().includes(t) || a.albumArtist.toLowerCase().includes(t))
+      .map(albumItemOf);
+  };
+  const artistItems = () => {
+    const t = lowerTerm();
+    if (!t) return [];
+    return visibleArtists()
+      .filter((a) => a.artist.toLowerCase().includes(t))
+      .map(artistItemOf);
+  };
 
   // Remote: substring filter over the loaded list (case-insensitive).
   const lowerTerm = () => term().toLowerCase();
@@ -135,7 +171,7 @@ export function SearchPage() {
                 <View class="gap-2">
                   <SectionTitle class="px-6">曲目</SectionTitle>
                   <Each of={remoteSongs()}>
-                    {(track, i) => <RemoteTrackRow track={track()} number={i()} />}
+                    {(track, i) => <RemoteTrackRow track={track()} number={i()} onPlay={() => queueRemoteFrom(remoteSongs(), i())} />}
                   </Each>
                 </View>
               </If>

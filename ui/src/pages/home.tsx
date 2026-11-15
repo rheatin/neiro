@@ -39,6 +39,8 @@ import {
   remoteAlbumGroups,
   remoteArtistGroups,
   remoteLoadingState,
+  remoteFetching,
+  queueRemoteFrom,
   reconnectServer,
   retryRemote,
   remoteError,
@@ -52,7 +54,7 @@ import { TrackHeader, TrackRow } from "../components/library/tracks";
 import { CardsSkeleton, EmptyState, ErrorState, RowsSkeleton } from "../components/ui/feedback";
 import { ActionButton, SectionTitle } from "../components/ui/controls";
 import { createListWave, enter, waveDelay, type ListWave } from "../components/ui/motion";
-import { currentRoute, rootOpens } from "../nav";
+import { currentRoute, open, rootOpens, REMOTE, TRACKS, switchTo } from "../nav";
 import { mostPlayed, refreshMostPlayed } from "../state/user-catalog";
 import { playTrack, isCurrentTrack, isPlaying } from "../state/player";
 import { Button } from "nsh/base";
@@ -68,7 +70,6 @@ import {
 import { remoteCoverOf } from "../state/artwork";
 import { RemoteTrackRow } from "./remote";
 import { setServerDialogOpen } from "../state/overlays";
-import { open } from "../nav";
 
 function greeting(): string {
   const h = new Date().getHours();
@@ -91,6 +92,7 @@ export function HomePage() {
     untracked(() => {
       ensureAlbums();
       ensureArtists();
+      ensureTracks();
     });
   });
 
@@ -104,37 +106,38 @@ export function HomePage() {
           {greeting()}
         </Text>
         <SourceTabs />
-        <If when={activeSource().kind === "remote"}>
-          <RemoteHomeSections wave={wave} />
-        </If>
         <If
-          when={activeSource().kind !== "remote"}
-          else={<View class="gap-0" />}
+          when={activeSource().kind === "remote"}
+          else={
+            <View>
+              <CardsSection
+                title="专辑"
+                emptyTitle={activeSource().root ? "这个文件夹还没有专辑" : "专辑是空的"}
+                errorLabel="专辑没有读出来。"
+                items={homeAlbums().map(albumItemOf)}
+                state={albumsState()}
+                retry={retryAlbums}
+                wave={wave}
+              />
+              <CardsSection
+                title="歌手"
+                emptyTitle={activeSource().root ? "这个文件夹还没有歌手" : "歌手是空的"}
+                emptyDetail="扫描收录的歌手在这里。"
+                errorLabel="歌手没有读出来。"
+                items={homeArtists().map(artistItemOf)}
+                state={artistsState()}
+                retry={retryArtists}
+                wave={wave.child(waveDelay(1, 4))}
+              />
+              <If when={!activeSource().root}>
+                <RemotePreview />
+                <MostPlayedPreview />
+              </If>
+              <TracksPreview wave={wave.child(waveDelay(2, 4))} />
+            </View>
+          }
         >
-          <View>
-            <CardsSection
-              title="专辑"
-              emptyTitle="专辑是空的"
-              errorLabel="专辑没有读出来。"
-              items={homeAlbums().map(albumItemOf)}
-              state={albumsState()}
-              retry={retryAlbums}
-              wave={wave}
-            />
-            <CardsSection
-              title="歌手"
-              emptyTitle="歌手是空的"
-              emptyDetail="扫描把文件夹里的歌手收进来后，他们在这里。"
-              errorLabel="歌手没有读出来。"
-              items={homeArtists().map(artistItemOf)}
-              state={artistsState()}
-              retry={retryArtists}
-              wave={wave.child(waveDelay(1, 4))}
-            />
-            <RemotePreview />
-            <MostPlayedPreview />
-            <TracksPreview wave={wave.child(waveDelay(2, 4))} />
-          </View>
+          <RemoteHomeSections wave={wave} />
         </If>
       </Scroll>
     </AppPage>
@@ -188,14 +191,14 @@ function SourceTabs() {
   );
 }
 
-/** 首页远程来源的内容：服务器名头 + 专辑卡行 + 歌手卡行 + 前 12 条曲目。
+/** 首页远程来源的内容：专辑卡行 + 歌手卡行 + 前 12 条曲目。
  * 数据来自该服务器的列表（remote.ts 的缓存 + 分页拉取）。 */
 function RemoteHomeSections(props: { wave: ListWave }) {
   const server = () => activeRemoteServer();
   const groups = () => remoteAlbumGroups();
   const singerGroups = () => remoteArtistGroups();
   const rows = () => remoteTracks().slice(0, 12);
-  const state = remoteLoadingState();
+  const showAlbum = wideTracks();
   return (
     <If
       when={server()}
@@ -208,42 +211,22 @@ function RemoteHomeSections(props: { wave: ListWave }) {
         </EmptyState>
       }
     >
-      <View class="gap-2 px-3 pb-2" accessibilityLabel="远程来源">
-        <View class="px-3 gap-0.5">
-          <Text class="text-xs text-muted-foreground">
-            {server()!.label} · {server()!.kind === "navidrome" ? "Navidrome" : "Jellyfin"} ·{" "}
-            {engine.remoteStatus().configured ? "已连接" : "未连接"} · {remoteTracks().length} 首
-          </Text>
-          <If when={remoteError() !== ""}>
-            <Text class="text-[11px] text-destructive">最近一次失败：{remoteError()}</Text>
-          </If>
-          <If when={engine.remoteProbe() !== null}>
-            <Text class={`text-[11px] ${engine.remoteProbe()!.ok ? "text-muted-foreground" : "text-destructive"}`}>
-              测试：{engine.remoteProbe()!.ok ? "有应答" : "失败"} · {engine.remoteProbe()!.count} 条 ·{" "}
-              {engine.remoteProbe()!.message}
-            </Text>
-          </If>
-          <View class="flex-row pt-1">
-            <ActionButton label="测试连接" variant="outline" onPress={() => engine.probeRemote()} />
-          </View>
-        </View>
-      </View>
       {/* Configured and reachable are two different answers; the page said
           "empty" for both, which reads as a server with no music. */}
-      <If when={!engine.remoteStatus().configured}>
+      <If when={!engine.remoteStatus().configured && !remoteFetching() && remoteLoadingState() !== "loading" && remoteTracks().length === 0}>
         <View class="px-3 pb-8">
           <EmptyState title="服务器未连接" detail="引擎还没有这台服务器的登录状态：重新连接一次；密码若改过，在「添加来源」里更新它。">
             <ActionButton label="重新连接" onPress={() => void reconnectServer(server()!.id)} />
           </EmptyState>
         </View>
       </If>
-      <If when={state === "loading" && remoteTracks().length === 0}>
+      <If when={(remoteLoadingState() === "loading" || remoteFetching()) && remoteTracks().length === 0}>
         <View class="gap-4 px-3 pb-8">
           <CardsSkeleton rows={1} />
           <RowsSkeleton rows={4} header />
         </View>
       </If>
-      <If when={state === "error" && remoteTracks().length === 0}>
+      <If when={remoteLoadingState() === "error" && remoteTracks().length === 0}>
         <View class="px-3 pb-8">
           <ErrorState
             message={remoteError() ? `远程库没有读出来：${remoteError()}` : "远程库没有读出来。"}
@@ -251,48 +234,72 @@ function RemoteHomeSections(props: { wave: ListWave }) {
           />
         </View>
       </If>
+      <If when={engine.remoteStatus().configured && !remoteFetching() && remoteLoadingState() === "idle" && remoteTracks().length === 0}>
+        <View class="px-3 pb-8">
+          <EmptyState title="远程库是空的" detail="这台服务器上还没有可播放的曲目。">
+            <ActionButton label="重新加载" onPress={retryRemote} />
+          </EmptyState>
+        </View>
+      </If>
       <If when={remoteTracks().length > 0}>
-        <View class="gap-2 px-3 pb-8">
-          <SectionTitle class="px-3">专辑</SectionTitle>
-          <If
-            when={groups().length > 0}
-            else={<EmptyState title="没有专辑" detail="服务器上的曲目还没有专辑名可分。" />}
-          >
-            <RemoteCardsRow
-              variant="album"
-              items={groups()
-                .slice(0, 24)
-                .map((g) => ({
-                  key: `${g.album}\u0000${g.artist}`,
-                  name: g.album,
-                  sub: g.artist || `${g.tracks.length} 首`,
-                  track: g.tracks[0],
-                  count: g.tracks.length,
-                }))}
-              wave={props.wave}
-            />
-          </If>
-          <If when={singerGroups().length > 0}>
-            <SectionTitle class="px-3 pt-4">歌手</SectionTitle>
-            <RemoteCardsRow
-              variant="artist"
-              items={singerGroups()
-                .slice(0, 24)
-                .map((g) => ({
-                  key: g.artist,
-                  name: g.artist,
-                  sub: `${g.tracks.length} 首`,
-                  track: g.tracks[0],
-                  count: g.tracks.length,
-                }))}
-              wave={props.wave.child(waveDelay(1, 4))}
-            />
-          </If>
-          <SectionTitle class="px-3 pt-4">曲目</SectionTitle>
-          <View class="px-3">
-            <Each of={rows()}>
-              {(track, i) => <RemoteTrackRow track={track()} number={i()} />}
-            </Each>
+        <View>
+          <View class="gap-2 px-3 pb-8">
+            <SectionTitle class="px-3">专辑</SectionTitle>
+            <If
+              when={groups().length > 0}
+              else={<EmptyState title="没有专辑" detail="服务器上的曲目还没有专辑名可分。" />}
+            >
+              <RemoteCardsRow
+                variant="album"
+                items={groups()
+                  .slice(0, 24)
+                  .map((g) => ({
+                    key: `${g.album}\u0000${g.artist}`,
+                    name: g.album,
+                    sub: g.artist || `${g.tracks.length} 首`,
+                    track: g.tracks[0],
+                    count: g.tracks.length,
+                  }))}
+                wave={props.wave}
+              />
+            </If>
+          </View>
+          <View class="gap-2 px-3 pb-8">
+            <SectionTitle class="px-3">歌手</SectionTitle>
+            <If
+              when={singerGroups().length > 0}
+              else={<EmptyState title="没有歌手" detail="服务器上的曲目还没有歌手名可分。" />}
+            >
+              <RemoteCardsRow
+                variant="artist"
+                items={singerGroups()
+                  .slice(0, 24)
+                  .map((g) => ({
+                    key: g.artist,
+                    name: g.artist,
+                    sub: `${g.tracks.length} 首`,
+                    track: g.tracks[0],
+                    count: g.tracks.length,
+                  }))}
+                wave={props.wave.child(waveDelay(1, 4))}
+              />
+            </If>
+          </View>
+          <View class="gap-2">
+            <SectionTitle class="px-6">曲目</SectionTitle>
+            <View class="px-3">
+              <TrackHeader showAlbum={showAlbum} />
+              <Each of={rows()}>
+                {(track, i) => (
+                  <RemoteTrackRow
+                    track={track()}
+                    number={i()}
+                    showAlbum={showAlbum}
+                    onPlay={() => queueRemoteFrom(rows(), i())}
+                  />
+                )}
+              </Each>
+            </View>
           </View>
         </View>
       </If>

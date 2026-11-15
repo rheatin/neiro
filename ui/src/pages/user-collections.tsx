@@ -15,7 +15,7 @@ import {
   removeFromPlaylist,
   tracksForPaths,
 } from "../state/user-catalog";
-import { ensureTracks, tracksState, visibleTracks } from "../state/catalog";
+import { ensureTracks, roots, rootsLoaded, tracksState, visibleTracks } from "../state/catalog";
 
 import { isCurrentTrack, playQueue, playTrack, toggle } from "../state/player";
 import { openRenamePlaylist } from "../components/library/playlist-dialogs";
@@ -123,7 +123,7 @@ function CollectionPage(props: { title: string; kind: CollectionKind }) {
     else if (key === "duration") list.sort((a, b) => a.durationMs - b.durationMs);
     return list;
   };
-  const complete = () => tracksState() === "complete";
+  const complete = () => tracksState() === "complete" || visibleTracks().length > 0 || (rootsLoaded() && roots().length === 0);
   // The count is what the list can show: a path the index does not know (a
   // file that moved, a remote download whose server is disconnected) is not
   // a row, and counting it would promise a row that never comes.

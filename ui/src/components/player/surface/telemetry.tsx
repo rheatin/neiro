@@ -13,7 +13,7 @@
 import { effect, signal, Text, View } from "nsh";
 import { HARDWARE, Led, Silkscreen } from "../../ui/hardware";
 import { engine } from "../../../backend/engine";
-import { player, positionClock } from "../../../state/player";
+import { gaplessEnabled, player, positionClock } from "../../../state/player";
 import { upNext } from "../../../state/queue";
 import { trackForPath } from "../../../state/catalog";
 import { clock, type Track } from "../../../backend/types";
@@ -23,6 +23,7 @@ import {
   lastDiagnostic,
   resolvedPath,
   shareMode,
+  sourceBits,
 } from "../../../state/resolved";
 import { opraActive, currentPoints } from "../../../state/opra";
 
@@ -42,6 +43,8 @@ const REASONS: Record<number, { label: string; detail: string; fix: string }> = 
   11: { label: "REPLAYGAIN ACTIVE", detail: "ReplayGain 在链路上", fix: "旁通 R-GAIN" },
   12: { label: "CONVOLVER ACTIVE", detail: "卷积在链路上", fix: "旁通 CONV" },
   13: { label: "CROSSFADE ACTIVE", detail: "交叉淡入在链路上", fix: "旁通 X-FADE" },
+  14: { label: "SOURCE PRECISION", detail: "32-bit int source in float32 path", fix: "" },
+  15: { label: "CLIP GUARD ACTIVE", detail: "Limiter active", fix: "" },
 };
 
 /** One audit row: the cause, its detail, and the control that clears it. */
@@ -76,7 +79,8 @@ function AuditRow(props: { code: number; appCause?: boolean }) {
 
 /** The cause list: the engine's reason code plus the app's own layers. */
 function Audit() {
-  const bitPerfect = () => engine.renderPath()?.bitPerfect ?? false;
+  const crossfadeOn = () => Boolean(engine.renderPath()?.crossfadeEnabled || engine.settings()?.crossfadeEnabled);
+  const bitPerfect = () => (engine.renderPath()?.bitPerfect ?? false) && !crossfadeOn() && !opraActive();
   const reason = () => engine.renderPath()?.reason ?? 0;
   const opra = () => opraActive();
   /** No open stream: there is nothing to audit, which is not the same as a
@@ -86,6 +90,7 @@ function Audit() {
     if (bitPerfect()) return [];
     const out: number[] = [];
     if (reason() !== 0) out.push(reason());
+    if (crossfadeOn() && !out.includes(13)) out.push(13);
     return out;
   };
   return (
@@ -167,22 +172,27 @@ function Telemetry() {
     // The depth is negotiated with the endpoint (the widest container it
     // takes); what the panel can honestly show is the source's precision, the
     // container it lands in, and whether dither was applied on the way.
-    const source = p.validBits || p.containerBits;
-    const container = p.containerBits || source;
-    const zeroPadded = container > source;
+    const src = sourceBits();
+    const devValid = p.validBits || p.containerBits;
+    const devContainer = p.containerBits || devValid;
     const dithered = p.dithered;
-    if (zeroPadded) {
-      return `${source} → ${container} Container${dithered ? " · DITHERED" : " (Zero-Padded)"}`;
+    const devStr = p.isFloat
+      ? `${devValid}-bit float`
+      : devContainer > devValid
+        ? `${devValid}/${devContainer}-bit`
+        : `${devValid}-bit`;
+    if (src > 0 && (src !== devValid || p.isFloat)) {
+      return `${src}-bit → ${devStr}${dithered ? " · DITHERED" : ""}`;
     }
-    return `${source}${p.isFloat ? "-bit float" : "-bit"}${dithered ? " · DITHERED" : ""}`;
+    return `${devStr}${dithered ? " · DITHERED" : ""}`;
   };
   const protocol = () => {
     const p = path();
     if (!p) return "—";
-    // NAE_SHARE_MODE_*: 1 exclusive, 2 shared.
+    const backend = p.backend === "coreaudio" ? "COREAUDIO" : p.backend === "asio" ? "ASIO" : "WASAPI";
     const share = shareMode() === 2 ? "SHARED" : "EXCL";
-    if (isDsdSource()) return p.dsdTransport === "dop" ? `WASAPI ${share} · DoP` : `WASAPI ${share} · DSD`;
-    return `WASAPI ${share} · PCM`;
+    if (isDsdSource()) return p.dsdTransport === "dop" ? `${backend} ${share} · DoP` : `${backend} ${share} · DSD`;
+    return `${backend} ${share} · PCM`;
   };
   return (
     <View class="gap-1.5">
@@ -214,10 +224,22 @@ function TransportStrip() {
     return path ? trackForPath(path) : undefined;
   };
   const current = () => player();
+  const currentTitle = () => {
+    const p = current();
+    if (p.title) return p.title;
+    const t = trackForPath(p.path ?? "");
+    if (t?.title) return t.title;
+    return p.path ? p.path.split(/[\\/]/).pop() || "—" : "—";
+  };
+  const isCrossfade = () => Boolean(engine.settings()?.crossfadeEnabled);
+  const isGapless = () => gaplessEnabled() && !isCrossfade();
   return (
     <View class="gap-1">
       <View class="flex-row items-center gap-1.5">
         <Silkscreen tone="faint">GAPLESS QUEUE</Silkscreen>
+        <Text class="line-clamp-1 shrink-0 font-mono text-[8px]" style={{ color: isGapless() ? "#34D399" : isCrossfade() ? "#F59E0B" : HARDWARE.textDim }}>
+          [{isGapless() ? "SEAMLESS GAPLESS" : isCrossfade() ? "CROSSFADE ACTIVE" : "GAPLESS BYP"}]
+        </Text>
         <View class="flex-1" />
         <Text class="font-mono text-[8px]" style={{ color: upNext().length > 0 ? "#34D399" : HARDWARE.textFaint }}>
           {upNext().length > 0 ? `NEXT: ${upNext().length} 首待播` : "QUEUE EMPTY"}
@@ -227,7 +249,7 @@ function TransportStrip() {
         <View class="flex-row items-center gap-2">
           <Led lit={current().state === "playing"} tone="amber" size={5} />
           <Text class="min-w-0 flex-1 line-clamp-1 text-[11px] font-medium" style={{ color: HARDWARE.text }}>
-            {current().title || "—"}
+            {currentTitle()}
           </Text>
           <Text class="font-mono text-[8px]" style={{ color: HARDWARE.textFaint }}>
             {positionClock()}

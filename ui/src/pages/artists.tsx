@@ -9,6 +9,7 @@ import {
   artistsState,
   dataEpoch,
   ensureArtists,
+  ensureTracks,
   retryArtists,
   visibleArtists,
 } from "../state/catalog";
@@ -24,9 +25,12 @@ import { enter } from "../components/ui/motion";
 export function ArtistsPage() {
   effect(() => {
     dataEpoch();
-    untracked(() => ensureArtists());
+    untracked(() => {
+      ensureArtists();
+      ensureTracks();
+    });
   });
-  const items = visibleArtists().map(artistItemOf);
+  const items = () => visibleArtists().map(artistItemOf);
   const remote = () => activeSource().kind === "remote";
   const remoteGroups = () =>
     remoteArtistGroups().map((group) => ({
@@ -50,7 +54,7 @@ export function ArtistsPage() {
           when={artistsState() === "error"}
           else={
             <If
-              when={items.length > 0}
+              when={items().length > 0}
               else={
                 <If
                   when={artistsState() === "loading"}
@@ -64,7 +68,7 @@ export function ArtistsPage() {
                 </If>
               }
             >
-              <CardGrid items={items} />
+              <CardGrid items={items()} />
             </If>
           }
         >

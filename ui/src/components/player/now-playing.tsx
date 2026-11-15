@@ -9,7 +9,7 @@ import { lightEffect } from "../../state/visual";
 import { isPlayingSpectrum } from "../../state/visualiser";
 import { animateLayoutOn, enter } from "../ui/motion";
 import { titleBarArea } from "../ui/title-bar";
-import { setNowPlayingOpen, setOutputOpen, nowPlayingOpen } from "../../state/overlays";
+import { setNowPlayingOpen, setOutputOpen, setQueueOpen, nowPlayingOpen } from "../../state/overlays";
 import { AppSheet } from "../ui/overlays";
 import { Button } from "nsh/base";
 import { IconButton } from "../ui/controls";
@@ -173,6 +173,7 @@ function NowPlayingContent() {
         <IconButton name="chevronDown" label="关闭 Now Playing" size={24} onPress={() => setNowPlayingOpen(false)} />
         <View class="flex-1" />
         <View class="flex-row items-center gap-1">
+          <IconButton name="queue" label="待播" size={22} hint onPress={() => setQueueOpen(true)} />
           <IconButton name="info" label="输出信息" size={22} hint onPress={() => setOutputOpen(true)} />
           <If when={lyricsOnly()}>
             <IconButton name="disc" label="显示封面" size={22} onPress={() => lyricsOpen.set(false)} />
@@ -235,7 +236,7 @@ function NowPlayingContent() {
               {/* Capped: a lyric column stretched to the window edge leaves all
                   the text mass on the left of the sheet, which reads as a
                   layout that never finished centring. */}
-              <View class="min-h-0 flex-1" style={{ maxHeight: "82%", maxWidth: 660 }}>
+              <View class="min-h-0 flex-1" style={{ minHeight: 420, maxHeight: "82%", maxWidth: 660 }}>
                 <LyricsPanel large />
               </View>
             </If>
