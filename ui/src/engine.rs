@@ -40,6 +40,11 @@ type SnapshotFn = unsafe extern "C" fn(*mut c_void) -> *mut c_char;
 type FreeStringFn = unsafe extern "C" fn(*mut c_char);
 type UnsubscribeFn = unsafe extern "C" fn(*mut c_void) -> i32;
 type ShutdownFn = unsafe extern "C" fn(*mut c_void);
+type RemoteProvidersFn = unsafe extern "C" fn() -> *mut c_char;
+type ListDirectoryFn = unsafe extern "C" fn(base: *mut c_void, path: *const c_char) -> *mut c_char;
+type ListPluginsFn = unsafe extern "C" fn() -> *mut c_char;
+type SetPluginEnabledFn = unsafe extern "C" fn(base: *mut c_void, plugin_id: *const c_char, enabled: std::os::raw::c_int) -> std::os::raw::c_int;
+type ReloadPluginsFn = unsafe extern "C" fn(base: *mut c_void) -> *mut c_char;
 
 /// A running Base. Dropping it unsubscribes (so no callback ever runs on
 /// freed memory), shuts Base down and releases the DLL.
@@ -50,6 +55,11 @@ pub struct Engine {
     shutdown: ShutdownFn,
     snapshot: SnapshotFn,
     free_string: FreeStringFn,
+    remote_providers: Option<RemoteProvidersFn>,
+    list_directory: Option<ListDirectoryFn>,
+    list_plugins: Option<ListPluginsFn>,
+    set_plugin_enabled: Option<SetPluginEnabledFn>,
+    reload_plugins: Option<ReloadPluginsFn>,
     /// The subscription's context; freed in `Drop`, after `unsubscribe`.
     ctx: *mut Ctx,
     _library: Library,
@@ -114,6 +124,11 @@ struct Prepared {
     snapshot: SnapshotFn,
     free_string: FreeStringFn,
     shutdown: ShutdownFn,
+    remote_providers: Option<RemoteProvidersFn>,
+    list_directory: Option<ListDirectoryFn>,
+    list_plugins: Option<ListPluginsFn>,
+    set_plugin_enabled: Option<SetPluginEnabledFn>,
+    reload_plugins: Option<ReloadPluginsFn>,
     library: Library,
 }
 
@@ -128,6 +143,11 @@ struct Exports {
     snapshot: SnapshotFn,
     free_string: FreeStringFn,
     shutdown: ShutdownFn,
+    remote_providers: Option<RemoteProvidersFn>,
+    list_directory: Option<ListDirectoryFn>,
+    list_plugins: Option<ListPluginsFn>,
+    set_plugin_enabled: Option<SetPluginEnabledFn>,
+    reload_plugins: Option<ReloadPluginsFn>,
 }
 
 impl Engine {
@@ -205,6 +225,11 @@ impl Engine {
             snapshot: exports.snapshot,
             free_string: exports.free_string,
             shutdown: exports.shutdown,
+            remote_providers: exports.remote_providers,
+            list_directory: exports.list_directory,
+            list_plugins: exports.list_plugins,
+            set_plugin_enabled: exports.set_plugin_enabled,
+            reload_plugins: exports.reload_plugins,
             library: library_file,
         })
     }
@@ -233,6 +258,80 @@ impl Engine {
         unsafe { (self.free_string)(raw) };
         serde_json::from_str(&text).map_err(|e| format!("E_ENGINE: snapshot 无法解析：{e}"))
     }
+
+    pub fn remote_providers(&self) -> String {
+        let Some(func) = self.remote_providers else {
+            return String::from("[]");
+        };
+        unsafe {
+            let ptr = func();
+            if ptr.is_null() {
+                return String::from("[]");
+            }
+            let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            (self.free_string)(ptr);
+            text
+        }
+    }
+
+    pub fn list_directory(&self, path: &str) -> Result<String, String> {
+        let Some(func) = self.list_directory else {
+            return Ok(String::from("{\"path\":\"\",\"folders\":[],\"tracks\":[]}"));
+        };
+        let path_c = CString::new(path).map_err(|e| format!("路径包含 NUL: {e}"))?;
+        unsafe {
+            let ptr = func(self.base, path_c.as_ptr());
+            if ptr.is_null() {
+                return Ok(String::from("{\"path\":\"\",\"folders\":[],\"tracks\":[]}"));
+            }
+            let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            (self.free_string)(ptr);
+            Ok(text)
+        }
+    }
+
+    pub fn list_plugins(&self) -> String {
+        let Some(func) = self.list_plugins else {
+            return String::from("[]");
+        };
+        unsafe {
+            let ptr = func();
+            if ptr.is_null() {
+                return String::from("[]");
+            }
+            let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            (self.free_string)(ptr);
+            text
+        }
+    }
+
+    pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
+        let Some(func) = self.set_plugin_enabled else {
+            return Err("E_ENGINE: set_plugin_enabled unsupported".to_string());
+        };
+        let c_id = CString::new(id).map_err(|e| e.to_string())?;
+        let res = unsafe { func(self.base, c_id.as_ptr(), if enabled { 1 } else { 0 }) };
+        if res == 1 {
+            Ok(())
+        } else {
+            Err("E_ENGINE: set_plugin_enabled failed".to_string())
+        }
+    }
+
+    pub fn reload_plugins(&self) -> String {
+        let Some(func) = self.reload_plugins else {
+            return String::from("[]");
+        };
+        unsafe {
+            let ptr = func(self.base);
+            if ptr.is_null() {
+                return String::from("[]");
+            }
+            let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            (self.free_string)(ptr);
+            text
+        }
+    }
 }
 
 impl Prepared {
@@ -260,6 +359,11 @@ impl Prepared {
                 shutdown: self.shutdown,
                 snapshot: self.snapshot,
                 free_string: self.free_string,
+                remote_providers: self.remote_providers,
+                list_directory: self.list_directory,
+                list_plugins: self.list_plugins,
+                set_plugin_enabled: self.set_plugin_enabled,
+                reload_plugins: self.reload_plugins,
                 ctx,
                 _library: self.library,
             },
@@ -295,6 +399,26 @@ impl Exports {
                 "NAE_BaseFreeString",
             )?,
             shutdown: symbol::<ShutdownFn>(library, b"NAE_BaseShutdown\0", "NAE_BaseShutdown")?,
+            remote_providers: symbol_optional::<RemoteProvidersFn>(
+                library,
+                b"NAE_BaseRemoteProviders\0",
+            ),
+            list_directory: symbol_optional::<ListDirectoryFn>(
+                library,
+                b"NAE_BaseListDirectory\0",
+            ),
+            list_plugins: symbol_optional::<ListPluginsFn>(
+                library,
+                b"NAE_BaseListPlugins\0",
+            ),
+            set_plugin_enabled: symbol_optional::<SetPluginEnabledFn>(
+                library,
+                b"NAE_BaseSetPluginEnabled\0",
+            ),
+            reload_plugins: symbol_optional::<ReloadPluginsFn>(
+                library,
+                b"NAE_BaseReloadPlugins\0",
+            ),
         })
     }
 }
@@ -319,6 +443,10 @@ fn symbol<T: Copy>(library: &Library, name: &[u8], printed: &str) -> Result<T, S
     let resolved: Symbol<'_, T> =
         unsafe { library.get(name) }.map_err(|e| format!("缺少符号 {printed}：{e}"))?;
     Ok(*resolved)
+}
+
+fn symbol_optional<T: Copy>(library: &Library, name: &[u8]) -> Option<T> {
+    unsafe { library.get(name).ok().map(|s: Symbol<'_, T>| *s) }
 }
 
 // ------------------------------------------------------------------ the wire

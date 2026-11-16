@@ -9,6 +9,28 @@ const nowPlaying = signal(false);
 const output = signal(false);
 /** 服务器设置（连接/修改/断开远程库）的对话框。 */
 const serverDialog = signal(false);
+const pluginDialog = signal(false);
+
+export type ModalId = "shortcuts" | "server" | "metadata" | "device" | "plugins" | null;
+const activeModal = signal<ModalId>(null);
+export const modalOpen = () => activeModal();
+export function openModal(id: ModalId): void {
+  activeModal.set(id);
+  if (id === "server") serverDialog.set(true);
+  if (id === "plugins") pluginDialog.set(true);
+}
+export function closeModal(): void {
+  activeModal.set(null);
+  serverDialog.set(false);
+  pluginDialog.set(false);
+}
+
+export const pluginDialogOpen = () => pluginDialog() || activeModal() === "plugins";
+export function setPluginDialogOpen(open: boolean): void {
+  pluginDialog.set(open);
+  if (open) activeModal.set("plugins");
+  else if (activeModal() === "plugins") activeModal.set(null);
+}
 /** 待播列表抽屉（右侧）。 */
 const queueSheet = signal(false);
 /** Whether the 均衡器 page was opened from the output drawer: its back must
@@ -64,6 +86,8 @@ export function closeOverlays(): void {
     nowPlaying.set(false);
     output.set(false);
     serverDialog.set(false);
+    pluginDialog.set(false);
+    activeModal.set(null);
     queueSheet.set(false);
   });
 }

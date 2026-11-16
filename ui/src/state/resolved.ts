@@ -9,10 +9,11 @@
 // fallback flags are all in the JSON the engine already sends, and no view
 // read them before.
 
-import { computed } from "nsh";
+import { computed, signal } from "nsh";
 import { engine } from "../backend/engine";
 import type { RenderPath } from "../backend/types";
 import { trackForPath } from "./catalog";
+import { remoteTrackForPath } from "./remote";
 
 /** The engine's DSD domain. */
 export type DsdMode = "pcm" | "dsd" | "pcm_to_dsd" | null;
@@ -67,6 +68,8 @@ export interface ResolvedPath {
   convolverActive: boolean;
   crossfadeActive: boolean;
   gapless: boolean;
+  sourceIsDsd: boolean;
+  sourceDsdRate: number;
 }
 
 // `NAE_DsdMode`: 0 PCM, 1 DSD, 2 PCM_TO_DSD (`-1` is AUTO). The list is
@@ -156,6 +159,8 @@ export const resolvedPath = computed<ResolvedPath | null>(() => {
     convolverActive: bool(raw.convolverActive),
     crossfadeActive: bool(raw.crossfadeActive),
     gapless: bool(raw.gapless),
+    sourceIsDsd: bool(raw.sourceIsDsd),
+    sourceDsdRate: num(raw.sourceDsdRate),
   };
 });
 
@@ -189,9 +194,16 @@ export const dsdPcmFallback = (): boolean => resolvedPath()?.dsdPcmFallback ?? f
 export const isDsdFile = (): boolean => {
   const path = resolvedPath();
   if (!path) return false;
+  if (path.sourceIsDsd || path.sourceDsdRate >= 2_822_400) return true;
   const rate = path.sourceRate;
   // DSD bit rates are 64 × 44.1 kHz and its multiples of two.
   return rate >= 2_822_400 && rate % 44_100 === 0 && rate % 2_822_400 === 0;
+};
+
+export const sourceDsdRate = (): number => {
+  const p = resolvedPath();
+  if (!p) return 0;
+  return p.sourceDsdRate > 0 ? p.sourceDsdRate : p.sourceRate;
 };
 
 /** Whether the stream is DSD at all (source is DSD and the path keeps it). */
@@ -223,6 +235,8 @@ export function dsdFamily(hz: number): string {
 export function displayName(path: string | null, title: string): string {
   if (title !== "") return title;
   if (!path) return "—";
+  const known = trackForPath(path)?.title || remoteTrackForPath(path)?.title;
+  if (known && known.trim() !== "") return known;
   const name = path.replace(/\\/g, "/").split("/").pop() ?? "";
   return isRemoteCachePath(path) ? "远程缓存" : name;
 }
@@ -232,6 +246,10 @@ export type RateKind = "native" | "device" | "fixed";
 
 /** The dither algorithm the engine applies (`NAE_DITHER_*`). */
 export type DitherKind = "auto" | "off" | "tpdf" | "noise_shaped";
+
+export type DsdPolicy = "auto" | "dop" | "pcm";
+
+export const currentDsdPolicy = signal<DsdPolicy>("auto");
 
 /** The output policy JSON, built from the *current* stream's other half.
  *
@@ -246,10 +264,11 @@ export function policyJson(
   fixedRate: number,
   share: "exclusive" | "shared",
   dither: DitherKind = "auto",
+  dsd: DsdPolicy = currentDsdPolicy(),
 ): string {
   const ratePart =
     rate === "fixed" ? `{ "mode": "fixed", "rate_hz": ${Math.round(fixedRate)} }` : `{ "mode": "${rate}" }`;
-  return `{ "rate": ${ratePart}, "quality": "very_high", "share": "${share}", "dither": "${dither}" }`;
+  return `{ "rate": ${ratePart}, "quality": "very_high", "share": "${share}", "dither": "${dither}", "dsd_mode": "${dsd}" }`;
 }
 
 /** The dither algorithm the stream is actually applying, as the engine

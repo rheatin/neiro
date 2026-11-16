@@ -20,6 +20,7 @@ export interface RemoteServer {
   user?: string;
   password?: string;
   token?: string;
+  params?: Record<string, string>;
 }
 
 export interface Source {
@@ -128,7 +129,7 @@ effect(() => {
           list = parsed
             .filter((row): row is RemoteServer =>
               !!row && typeof row === "object" &&
-              ((row as RemoteServer).kind === "jellyfin" || (row as RemoteServer).kind === "navidrome") &&
+              typeof (row as RemoteServer).kind === "string" && (row as RemoteServer).kind !== "" &&
               typeof (row as RemoteServer).baseUrl === "string" && (row as RemoteServer).baseUrl !== "")
             .map((row, i) => ({
               id: typeof row.id === "string" && row.id ? row.id : `srv-${i}`,
@@ -138,6 +139,7 @@ effect(() => {
               user: typeof row.user === "string" ? row.user : undefined,
               password: typeof row.password === "string" && row.password ? row.password : undefined,
               token: typeof row.token === "string" && row.token ? row.token : undefined,
+              params: typeof row.params === "object" ? row.params : undefined,
             }));
         }
       }
@@ -145,7 +147,7 @@ effect(() => {
         const legacy = await Storage.getItem("remote:config");
         if (legacy) {
           const parsed = JSON.parse(legacy) as Partial<RemoteServer>;
-          if ((parsed.kind === "jellyfin" || parsed.kind === "navidrome") && typeof parsed.baseUrl === "string" && parsed.baseUrl !== "") {
+          if (typeof parsed.kind === "string" && parsed.kind !== "" && typeof parsed.baseUrl === "string" && parsed.baseUrl !== "") {
             list = [
               {
                 id: `srv-0`,
@@ -155,6 +157,7 @@ effect(() => {
                 user: typeof parsed.user === "string" ? parsed.user : undefined,
                 password: typeof parsed.password === "string" && parsed.password ? parsed.password : undefined,
                 token: typeof parsed.token === "string" && parsed.token ? parsed.token : undefined,
+                params: typeof parsed.params === "object" ? parsed.params : undefined,
               },
             ];
             void Storage.setItem(SERVERS_KEY, JSON.stringify(list)).catch(() => {});

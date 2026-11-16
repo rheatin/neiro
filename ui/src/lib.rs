@@ -1485,6 +1485,39 @@ impl Base {
         }))
     }
 
+    /// Points the remote worker at a WebDAV server.
+    pub fn set_remote_webdav(
+        &self,
+        base_url: String,
+        user: String,
+        password: String,
+    ) -> Result<(), String> {
+        self.command(&serde_json::json!({
+            "command": "set_remote",
+            "cache_dir": remote_cache_dir(),
+            "server": {
+                "kind": "webdav",
+                "base_url": base_url,
+                "user": if user.is_empty() { None } else { Some(user) },
+                "password": if password.is_empty() { None } else { Some(password) },
+            },
+        }))
+    }
+
+    /// Points the remote worker at any registered `RemoteProviderPlugin` by kind and JSON params map.
+    pub fn set_remote(&self, kind: String, params_json: String) -> Result<(), String> {
+        let params: serde_json::Value = serde_json::from_str(&params_json)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+        self.command(&serde_json::json!({
+            "command": "set_remote",
+            "cache_dir": remote_cache_dir(),
+            "server": {
+                "kind": kind,
+                "params": params,
+            },
+        }))
+    }
+
     /// Disconnects. The local cover cache survives: a server that is
     /// re-configured later (the common case) keeps its downloads.
     pub fn clear_remote(&self) -> Result<(), String> {
@@ -1907,6 +1940,56 @@ impl Base {
     /// Seeks to `seconds` into the track.
     pub fn seek(&self, seconds: f64) -> Result<(), String> {
         self.command(&serde_json::json!({ "command": "seek", "seconds": seconds }))
+    }
+
+    /// Releases the output device/DAC immediately while preserving track position and queue.
+    pub fn release_device(&self) -> Result<(), String> {
+        self.command(&serde_json::json!({ "command": "release_device" }))
+    }
+
+    /// Returns the registered remote providers JSON string from Base.
+    pub fn remote_providers(&self) -> Result<String, String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => Ok(engine.remote_providers()),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Lists immediate child folders and audio tracks in `path` on demand.
+    pub fn list_directory(&self, path: String) -> Result<String, String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.list_directory(&path),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Returns JSON array of all registered plugins across UI, Base, and Engine tiers.
+    pub fn list_plugins(&self) -> Result<String, String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => Ok(engine.list_plugins()),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Toggles whether a plugin is enabled.
+    pub fn set_plugin_enabled(&self, id: String, enabled: bool) -> Result<(), String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.set_plugin_enabled(&id, enabled),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Rescans external plugins and returns the updated JSON array of all plugins.
+    pub fn reload_plugins(&self) -> Result<String, String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => Ok(engine.reload_plugins()),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
     }
 
     /// Sets the linear gain (0..1). The engine's volume is linear

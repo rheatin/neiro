@@ -48,6 +48,7 @@ import {
   type ArtworkList,
   type Backend,
   type Device,
+  type DirectoryListing,
   type EqBand,
   type Favourites,
   type Health,
@@ -55,6 +56,9 @@ import {
   type Player,
   type Playlist,
   type PlaylistEntriesPage,
+  type PluginInfo,
+  type ProviderDescriptor,
+  type ProviderField,
   type Queue,
   type RemoteArtwork,
   type RemoteFetched,
@@ -142,14 +146,34 @@ function gain(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+let trackLookup: ((path: string) => { title?: string; artist?: string; album?: string } | undefined) | null = null;
+
+export function registerTrackLookup(
+  lookup: (path: string) => { title?: string; artist?: string; album?: string } | undefined,
+): void {
+  trackLookup = lookup;
+}
+
 function playerOf(n: NativePlayer | null | undefined): Player {
   if (!n) return { ...EMPTY_PLAYER, at: Date.now() };
+  let title = text(n.title);
+  let artist = text(n.artist);
+  let album = text(n.album);
+  const path = n.path ?? null;
+  if (path && (!title || !artist || !album)) {
+    const fallback = trackLookup?.(path);
+    if (fallback) {
+      if (!title && fallback.title) title = fallback.title;
+      if (!artist && fallback.artist) artist = fallback.artist;
+      if (!album && fallback.album) album = fallback.album;
+    }
+  }
   return {
     state: (text(n.state) || "stopped") as Player["state"],
-    path: n.path ?? null,
-    title: text(n.title),
-    artist: text(n.artist),
-    album: text(n.album),
+    path,
+    title,
+    artist,
+    album,
     positionMs: num(n.positionMs),
     durationMs: num(n.durationMs),
     at: num(n.at) || Date.now(),
@@ -302,7 +326,7 @@ function remoteStatusOf(n: NativeRemoteStatus | undefined | null): RemoteStatus 
   const kind = text(n?.kind);
   return {
     configured: n?.configured ?? false,
-    kind: kind === "jellyfin" || kind === "navidrome" ? (kind as RemoteKind) : null,
+    kind: kind === "jellyfin" || kind === "navidrome" || kind === "webdav" ? (kind as RemoteKind) : null,
     baseUrl: text(n?.baseUrl),
   };
 }
@@ -647,6 +671,10 @@ export class Engine implements Backend {
     this.#command((base) => base.seek(seconds));
   }
 
+  releaseDevice(): void {
+    this.#command((base) => (base as any).releaseDevice());
+  }
+
   setVolume(gainValue: number): void {
     this.#command((base) => base.setVolume(gainValue));
   }
@@ -771,6 +799,10 @@ export class Engine implements Backend {
     this.#command((base) => base.setRemoteNavidrome(baseUrl, user, password));
   }
 
+  setRemoteWebdav(baseUrl: string, user: string, password: string): void {
+    this.#command((base) => (base as any).setRemoteWebdav(baseUrl, user, password));
+  }
+
   /** 断开：丢弃内存层，磁盘缓存保留 —— 引擎自己清。 */
   clearRemote(): void {
     this.#command((base) => base.clearRemote());
@@ -811,6 +843,70 @@ export class Engine implements Backend {
 
   listRemotePlaylistItems(id: string, start: number, limit: number): void {
     this.#command((base) => base.listRemotePlaylistItems(id, start, limit));
+  }
+
+  remoteProviders(): ProviderDescriptor[] {
+    const base = this.#base;
+    if (!base) return [];
+    try {
+      const json = (base as any).remoteProviders();
+      const parsed = typeof json === "string" ? JSON.parse(json) : json;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  setRemote(kind: string, params: Record<string, string>): void {
+    this.#command((base) => (base as any).setRemote(kind, JSON.stringify(params)));
+  }
+
+  listPlugins(): PluginInfo[] {
+    const base = this.#base;
+    if (!base) return [];
+    try {
+      const raw = (base as any).listPlugins?.() ?? "[]";
+      return typeof raw === "string" ? (JSON.parse(raw) as PluginInfo[]) : (raw as PluginInfo[]);
+    } catch {
+      return [];
+    }
+  }
+
+  setPluginEnabled(id: string, enabled: boolean): void {
+    const base = this.#base;
+    if (!base) return;
+    try {
+      (base as any).setPluginEnabled?.(id, enabled);
+    } catch (e) {
+      console.warn("neiro: setPluginEnabled error:", e);
+    }
+  }
+
+  reloadPlugins(): PluginInfo[] {
+    const base = this.#base;
+    if (!base) return [];
+    try {
+      const raw = (base as any).reloadPlugins?.() ?? "[]";
+      return typeof raw === "string" ? (JSON.parse(raw) as PluginInfo[]) : (raw as PluginInfo[]);
+    } catch {
+      return [];
+    }
+  }
+
+  async listDirectory(path: string): Promise<DirectoryListing> {
+    const base = this.#base;
+    if (!base) return { path, folders: [], tracks: [] };
+    try {
+      const json = (base as any).listDirectory(path);
+      const parsed = typeof json === "string" ? JSON.parse(json) : json;
+      return {
+        path: typeof parsed.path === "string" ? parsed.path : path,
+        folders: Array.isArray(parsed.folders) ? parsed.folders : [],
+        tracks: Array.isArray(parsed.tracks) ? parsed.tracks.map(trackOf) : [],
+      };
+    } catch {
+      return { path, folders: [], tracks: [] };
+    }
   }
 
   // ---- 曲库的用户层（v3） ----------------------------------------------------

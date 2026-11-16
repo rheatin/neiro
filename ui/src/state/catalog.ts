@@ -5,7 +5,7 @@
 // that was never opened.
 
 import { cleanup, computed, effect, signal, Storage, untracked, type Accessor } from "nsh";
-import { engine, reportEngineFailure, TRACK_PAGE } from "../backend/engine";
+import { engine, registerTrackLookup, reportEngineFailure, TRACK_PAGE } from "../backend/engine";
 import { albumKey, type Album, type Artist, type Track } from "../backend/types";
 import { open } from "../nav";
 
@@ -18,6 +18,8 @@ export function registerRemoteCatalog(
   remoteTracksAccessor.set({ get: getTracks });
   remotePathResolver = resolvePath;
 }
+
+registerTrackLookup((path) => trackForPath(path));
 
 // ---- The watched folders ---------------------------------------------------
 

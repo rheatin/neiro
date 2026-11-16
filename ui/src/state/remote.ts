@@ -17,9 +17,9 @@ export interface RemoteConfig {
   kind: RemoteKind;
   baseUrl: string;
   user: string;
-  /** Jellyfin `password` — 不适用于 token 登录; `token` 适用于。 */
   password?: string;
   token?: string;
+  params?: Record<string, string>;
 }
 
 const config = signal<RemoteConfig | null>(null);
@@ -53,29 +53,25 @@ export { fetchingId as isFetchingRemote };
 // ---- 会话：凭据只进 Storage，重启后自动 setRemoteXxx 重连 -------------------
 
 function applyRemote(cfg: RemoteConfig): void {
-  // A password is a credential this app can renew; a stored token is one that
-  // may have expired, or belong to another user on the same server. When both
-  // are known the password wins, and the token is only what an API key is.
-  if (cfg.kind === "jellyfin" && (cfg.user ?? "") !== "" && (cfg.password ?? "") !== "") {
-    engine.setRemoteJellyfinPassword(cfg.baseUrl, cfg.user ?? "", cfg.password ?? "");
-    return;
+  const params: Record<string, string> = {
+    base_url: cfg.baseUrl,
+    ...(cfg.user ? { user: cfg.user } : {}),
+    ...(cfg.password ? { password: cfg.password } : {}),
+    ...(cfg.token ? { token: cfg.token } : {}),
+    ...(cfg.params ?? {}),
+  };
+  let effectiveKind = cfg.kind;
+  if (effectiveKind === "jellyfin" && cfg.token && !cfg.password) {
+    effectiveKind = "jellyfin_token";
   }
-  if (cfg.kind === "jellyfin" && cfg.token) {
-    engine.setRemoteJellyfinToken(cfg.baseUrl, cfg.token);
-    return;
-  }
-  if (cfg.kind === "jellyfin") {
-    engine.setRemoteJellyfinPassword(cfg.baseUrl, cfg.user ?? "", cfg.password ?? "");
-    return;
-  }
-  engine.setRemoteNavidrome(cfg.baseUrl, cfg.user, cfg.password ?? "");
+  engine.setRemote(effectiveKind, params);
 }
 
 /** 保存、下发、记住：一个失败的原语（命令被拒就抛，调用方 toast）。 */
 export async function saveRemoteConfig(cfg: RemoteConfig): Promise<void> {
   applyRemote(cfg);
   config.set(cfg);
-  await Storage.setItem(CONFIG_KEY, JSON.stringify({ ...cfg, password: cfg.password ?? "" })).catch((error) =>
+  await Storage.setItem(CONFIG_KEY, JSON.stringify(cfg)).catch((error) =>
     console.warn("neiro: 远程配置没有记住:", String(error)),
   );
 }
@@ -160,7 +156,7 @@ effect(() => {
       const saved = await Storage.getItem(CONFIG_KEY);
       if (!saved) return;
       const parsed = JSON.parse(saved) as Partial<RemoteConfig>;
-      if (parsed.kind !== "jellyfin" && parsed.kind !== "navidrome") return;
+      if (typeof parsed.kind !== "string" || parsed.kind === "") return;
       if (typeof parsed.baseUrl !== "string" || parsed.baseUrl === "") return;
       const cfg: RemoteConfig = {
         kind: parsed.kind,
@@ -168,6 +164,7 @@ effect(() => {
         user: typeof parsed.user === "string" ? parsed.user : "",
         password: typeof parsed.password === "string" && parsed.password ? parsed.password : undefined,
         token: typeof parsed.token === "string" && parsed.token ? parsed.token : undefined,
+        params: parsed.params,
       };
       config.set(cfg);
       applyRemote(cfg);
@@ -588,6 +585,8 @@ export function remoteTrackForCachePath(path: string): RemoteTrack | null {
   }
   return null;
 }
+
+export const remoteTrackForPath = remoteTrackForCachePath;
 
 // ---- 播放：fetch → fetched → play --------------------------------------------
 

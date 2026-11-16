@@ -314,8 +314,32 @@ export interface MostPlayed {
 
 // ---- 远程库（v2） ------------------------------------------------------------
 
-/** One remote server's shape. */
-export type RemoteKind = "jellyfin" | "navidrome";
+/** Dynamic provider plugin field schema. */
+export interface ProviderField {
+  key: string;
+  label: string;
+  kind: "url" | "text" | "password";
+  placeholder: string;
+  required: boolean;
+  secret?: boolean;
+}
+
+/** Descriptor for a registered remote provider plugin. */
+export interface ProviderDescriptor {
+  id: string;
+  name: string;
+  fields: ProviderField[];
+}
+
+/** Open string for any dynamically registered remote provider plugin. */
+export type RemoteKind = string;
+
+/** On-demand directory browser response. */
+export interface DirectoryListing {
+  path: string;
+  folders: string[];
+  tracks: Track[];
+}
 
 /** Whether a server is configured (and which); never credentials. */
 export interface RemoteStatus {
@@ -471,6 +495,46 @@ export interface Backend {
   listPlaylistEntries(id: number): void;
   listMostPlayed(limit: number): void;
   recordPlay(path: string, atMs: number): void;
+}
+
+// ---- Plugins across UI, Base, and Engine tiers ------------------------------
+
+export type PluginTier = "ui" | "base" | "engine";
+export type PluginCategory =
+  | "ui.shell"
+  | "ui.slot"
+  | "ui.visualizer"
+  | "source.connector"
+  | "source.storage"
+  | "source.expander"
+  | "source.enricher"
+  | "playback.dsp"
+  | "playback.decoder"
+  | "playback.output";
+
+export interface PluginSettingSchema {
+  key: string;
+  label: string;
+  type: string;
+  defaultValue?: unknown;
+}
+
+export interface PluginInfo {
+  id: string;
+  name: string;
+  version: string;
+  tier: PluginTier;
+  category: PluginCategory | string;
+  description: string;
+  author: string;
+  builtin: boolean;
+  enabled: boolean;
+  requiresRestart: boolean;
+  entry?: string;
+  slot?: string;
+  permissions?: string[];
+  fields?: ProviderField[];
+  settings?: PluginSettingSchema[];
 }
 
 // ---- Helpers on the models --------------------------------------------------
