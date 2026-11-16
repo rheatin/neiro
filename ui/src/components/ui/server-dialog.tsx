@@ -2,9 +2,9 @@
 // 表单字段完全由引擎的动态插件注册表（PluginRegistry / engine.remoteProviders()）下发，
 // 零硬编码枚举，支持任意新增的远程协议与存储插件。
 
-import { signal, Text, View, token, type JSX } from "nsh";
+import { effect, signal, Text, View, type JSX } from "nsh";
 import { Button, Input } from "nsh/base";
-import type { ProviderDescriptor, ProviderField } from "../../backend/types";
+import type { ProviderDescriptor } from "../../backend/types";
 import {
   activeRemoteServer,
   removeServerById,
@@ -12,14 +12,15 @@ import {
 import { selectSource, servers, upsertServer, type RemoteServer } from "../../state/sources";
 import { isRemoteConfigured } from "../../state/remote";
 import { setServerDialogOpen, serverDialogOpen } from "../../state/overlays";
-import { engine, reportEngineFailure } from "../../backend/engine";
+import { refreshPlugins, remoteProviders } from "../../state/plugins";
+import { reportEngineFailure } from "../../backend/engine";
 import { ActionButton, TextLink, focusRing } from "./controls";
 import { AppDialog } from "./overlays";
 import { Icon } from "./icons";
 import { addRoot } from "../../state/catalog";
 
 function remoteProvidersList(): ProviderDescriptor[] {
-  return engine.remoteProviders();
+  return remoteProviders();
 }
 
 function hostOf(baseUrl: string): string {
@@ -29,25 +30,43 @@ function hostOf(baseUrl: string): string {
 const editing = signal<RemoteServer | null | undefined>(undefined);
 
 export function openSourceDialog(): void {
+  refreshPlugins();
   editing.set(null);
   setServerDialogOpen(true);
 }
 
 export function ServerDialog() {
+  effect(() => {
+    if (serverDialogOpen()) {
+      refreshPlugins();
+    }
+  });
   return (
-    <AppDialog open={serverDialogOpen()} onOpenChange={(next) => setServerDialogOpen(next)} testID="server-dialog">
+    <AppDialog
+      open={serverDialogOpen()}
+      onOpenChange={(next) => {
+        if (next) refreshPlugins();
+        setServerDialogOpen(next);
+      }}
+      maxWidthClass="max-w-lg"
+      testID="server-dialog"
+    >
       <ServerDialogContent />
     </AppDialog>
   );
 }
 
 function ServerDialogContent() {
+  const showForm = () => editing() !== undefined || servers().length === 0;
   return (
-    <If when={editing() !== undefined} else={<ServerList onNew={() => editing.set(null)} onEdit={(s) => editing.set(s)} />}>
+    <If when={showForm()} else={<ServerList onNew={() => editing.set(null)} onEdit={(s) => editing.set(s)} />}>
       <ServerForm
         server={editing() ?? null}
         onDone={() => editing.set(undefined)}
-        onCancel={() => editing.set(undefined)}
+        onCancel={() => {
+          editing.set(undefined);
+          if (servers().length === 0) setServerDialogOpen(false);
+        }}
       />
     </If>
   );
@@ -190,14 +209,16 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
 
       <View class="gap-2">
         <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">类型</Text>
-        <View class="flex-row flex-wrap gap-1">
+        <View class="flex-row flex-wrap gap-1.5">
           <Each of={providers()}>
             {(p) => (
               <Button
                 selected={selectedKind() === p().id}
                 onPress={() => selectedKind.set(p().id)}
-                class={`flex-1 rounded-(--radius) px-2.5 py-2 transition duration-150 ease-out ${
-                  selectedKind() === p().id ? "bg-secondary text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
+                class={`rounded-(--radius) border px-3 py-2 transition duration-150 ease-out ${
+                  selectedKind() === p().id
+                    ? "border-primary bg-secondary text-foreground"
+                    : "border-border hover:bg-row-hover text-muted-foreground hover:text-foreground"
                 } ${focusRing}`}
               >
                 <Text class="line-clamp-1 text-center text-xs font-bold">{p().name}</Text>
@@ -207,8 +228,10 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
           <Button
             selected={selectedKind() === "local"}
             onPress={() => selectedKind.set("local")}
-            class={`flex-1 rounded-(--radius) px-2.5 py-2 transition duration-150 ease-out ${
-              selectedKind() === "local" ? "bg-secondary text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
+            class={`rounded-(--radius) border px-3 py-2 transition duration-150 ease-out ${
+              selectedKind() === "local"
+                ? "border-primary bg-secondary text-foreground"
+                : "border-border hover:bg-row-hover text-muted-foreground hover:text-foreground"
             } ${focusRing}`}
           >
             <Text class="line-clamp-1 text-center text-xs font-bold">本地路径</Text>
@@ -240,7 +263,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
           />
         </Field>
 
-        <Each of={currentDescriptor().fields}>
+        <Each of={currentDescriptor()?.fields ?? []}>
           {(field) => (
             <Field label={field().label} hint={field().required ? "必填" : "选填"}>
               <Input

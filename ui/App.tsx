@@ -28,6 +28,7 @@ import {
   createPluginContext,
   DEFAULT_SHELL_ID,
   getExternalUiShell,
+  isStudioMinimalShell,
   type NeiroPluginContext,
   plugins,
   refreshPlugins,
@@ -99,14 +100,12 @@ function App() {
     });
     return stop;
   });
-  function renderActiveShell() {
+
+  effect(() => {
     const currentId = activeShellId();
     if (activeShellCtx) {
       activeShellCtx.dispose();
       activeShellCtx = null;
-    }
-    if (currentId === "builtin.shell.studio-minimal") {
-      return <StudioMinimalShell />;
     }
     const extRenderer = getExternalUiShell(currentId);
     if (extRenderer) {
@@ -115,7 +114,7 @@ function App() {
         if (pInfo) {
           const ctx = createPluginContext(pInfo);
           activeShellCtx = ctx;
-          return (extRenderer(ctx) as any) ?? <DesktopShell />;
+          extRenderer(ctx);
         }
       } catch (e) {
         console.error("neiro: external shell error, falling back to default:", e);
@@ -123,13 +122,14 @@ function App() {
         switchShell(DEFAULT_SHELL_ID);
       }
     }
-    return <DesktopShell />;
-  }
+  });
 
   return (
     <View class="flex-1 bg-sidebar">
       <If when={layout() === "desktop"} else={<UnsupportedPage />}>
-        {renderActiveShell()}
+        <If when={isStudioMinimalShell()} else={<DesktopShell />}>
+          <StudioMinimalShell />
+        </If>
       </If>
       <NowPlayingSheet />
       <OutputSheet />

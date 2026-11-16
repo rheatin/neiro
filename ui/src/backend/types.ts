@@ -530,6 +530,7 @@ export interface PluginInfo {
   builtin: boolean;
   enabled: boolean;
   requiresRestart: boolean;
+  breaksBitPerfect?: boolean;
   entry?: string;
   slot?: string;
   permissions?: string[];

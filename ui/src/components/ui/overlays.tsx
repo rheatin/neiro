@@ -27,9 +27,11 @@ export function AppDialog(props: {
   onOpenChange: (open: boolean) => void;
   closeOnEscape?: boolean;
   closeOnBackdropPress?: boolean;
+  maxWidthClass?: string;
   testID?: string;
   children?: JSX.Element;
 }) {
+  const maxW = props.maxWidthClass ?? "max-w-md";
   return (
     <Dialog
       open={props.open}
@@ -38,7 +40,7 @@ export function AppDialog(props: {
       closeOnEscape={props.closeOnEscape ?? true}
       closeOnBackdropPress={props.closeOnBackdropPress ?? true}
       onOpenChange={(e) => props.onOpenChange(e.open)}
-      class="m-auto w-full max-w-md overflow-hidden rounded-(--radius-panel) bg-popover shadow-2xl"
+      class={`m-auto w-full ${maxW} overflow-hidden rounded-(--radius-panel) bg-popover shadow-2xl`}
       backdropClass={BACKDROP}
     >
       {/* The panel pops in as the scrim fades. */}

@@ -2,10 +2,23 @@
 
 import { signal, Storage } from "nsh";
 import { engine } from "../backend/engine";
-import type { PluginInfo } from "../backend/types";
+import type { PluginInfo, ProviderDescriptor } from "../backend/types";
 
 const ACTIVE_SHELL_KEY = "neiro:active-shell-id";
 export const DEFAULT_SHELL_ID = "builtin.shell.industrial-rack";
+export const STUDIO_MINIMAL_SHELL_ID = "builtin.shell.studio-minimal";
+
+export function isStudioMinimalShell(id: string = activeShellId()): boolean {
+  return id === STUDIO_MINIMAL_SHELL_ID || id === "builtin.ui.shell.studio-minimal";
+}
+
+export function isClassicShell(id: string = activeShellId()): boolean {
+  return (
+    id === DEFAULT_SHELL_ID ||
+    id === "builtin.ui.shell.classic" ||
+    !isStudioMinimalShell(id)
+  );
+}
 
 export class PermissionDeniedError extends Error {
   constructor(message: string) {
@@ -79,6 +92,7 @@ export function createPluginContext(manifest: PluginInfo): NeiroPluginContext {
 }
 
 export const plugins = signal<PluginInfo[]>([]);
+export const remoteProviders = signal<ProviderDescriptor[]>([]);
 export const pluginsLoaded = signal(false);
 export const activeShellId = signal<string>(DEFAULT_SHELL_ID);
 export const shellError = signal<{ shellId: string; message: string } | null>(null);
@@ -97,7 +111,9 @@ export function getExternalUiShell(id: string): ((ctx: NeiroPluginContext) => un
 export function refreshPlugins(): void {
   try {
     const list = engine.listPlugins();
+    const providers = engine.remoteProviders();
     plugins.set(list);
+    remoteProviders.set(providers);
     pluginsLoaded.set(true);
   } catch (error) {
     console.warn("neiro: 刷新插件列表失败:", error);
@@ -107,7 +123,9 @@ export function refreshPlugins(): void {
 export function rescanPlugins(): void {
   try {
     const list = engine.reloadPlugins();
+    const providers = engine.remoteProviders();
     plugins.set(list);
+    remoteProviders.set(providers);
     pluginsLoaded.set(true);
   } catch (error) {
     console.warn("neiro: 重新扫描本地插件失败:", error);

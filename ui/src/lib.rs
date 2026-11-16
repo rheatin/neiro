@@ -1508,13 +1508,67 @@ impl Base {
     pub fn set_remote(&self, kind: String, params_json: String) -> Result<(), String> {
         let params: serde_json::Value = serde_json::from_str(&params_json)
             .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let user = params
+            .get("user")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let password = params
+            .get("password")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let token = params
+            .get("token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let server = match kind.as_str() {
+            "jellyfin" | "jellyfin_token" => {
+                let auth = if kind == "jellyfin_token" || (!token.is_empty() && password.is_empty())
+                {
+                    serde_json::json!({ "kind": "token", "token": token })
+                } else {
+                    serde_json::json!({ "kind": "password", "user": user, "password": password })
+                };
+                serde_json::json!({
+                    "kind": "jellyfin",
+                    "base_url": base_url,
+                    "auth": auth,
+                    "params": params,
+                })
+            }
+            "navidrome" => serde_json::json!({
+                "kind": "navidrome",
+                "base_url": base_url,
+                "user": user,
+                "password": password,
+                "params": params,
+            }),
+            "webdav" => serde_json::json!({
+                "kind": "webdav",
+                "base_url": base_url,
+                "user": if user.is_empty() { None } else { Some(user) },
+                "password": if password.is_empty() { None } else { Some(password) },
+                "params": params,
+            }),
+            _ => serde_json::json!({
+                "kind": kind,
+                "base_url": base_url,
+                "params": params,
+            }),
+        };
+
         self.command(&serde_json::json!({
             "command": "set_remote",
             "cache_dir": remote_cache_dir(),
-            "server": {
-                "kind": kind,
-                "params": params,
-            },
+            "server": server,
         }))
     }
 

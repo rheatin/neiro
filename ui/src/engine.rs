@@ -162,7 +162,21 @@ impl Engine {
             .ok()
             .and_then(|path| path.parent().map(Path::to_path_buf));
         let mut tried = Vec::new();
-        for candidate in dll_candidates(exe_dir.as_deref()) {
+        let all_candidates = dll_candidates(exe_dir.as_deref());
+        // Prefer a candidate that exports the full plugin C ABI (`NAE_BaseListPlugins`)
+        // when a local `../neiro-core` build is newer than a cached v0.2.0 prebuilt.
+        let mut ordered = Vec::with_capacity(all_candidates.len());
+        let mut legacy = Vec::new();
+        for c in all_candidates {
+            if c.is_file() && Self::exports_plugin_api(&c) {
+                ordered.push(c);
+            } else {
+                legacy.push(c);
+            }
+        }
+        ordered.extend(legacy);
+
+        for candidate in ordered {
             if !candidate.is_file() {
                 tried.push(format!("{}（没有文件）", candidate.display()));
                 continue;
@@ -180,6 +194,22 @@ impl Engine {
             "E_ENGINE: 无法打开 {DLL}。试过的位置：{}。需要先构建 ../Neiro/base。",
             tried.join("；")
         ))
+    }
+
+    fn exports_plugin_api(path: &Path) -> bool {
+        #[cfg(windows)]
+        let lib = unsafe {
+            libloading::os::windows::Library::load_with_flags(
+                path,
+                libloading::os::windows::LOAD_WITH_ALTERED_SEARCH_PATH,
+            )
+        }
+        .ok()
+        .map(libloading::Library::from);
+        #[cfg(not(windows))]
+        let lib = unsafe { libloading::Library::new(path) }.ok();
+        let Some(lib) = lib else { return false };
+        symbol_optional::<ListPluginsFn>(&lib, b"NAE_BaseListPlugins\0").is_some()
     }
 
     /// Loads the exports and starts Base. Nothing subscribes yet: without an
@@ -260,18 +290,17 @@ impl Engine {
     }
 
     pub fn remote_providers(&self) -> String {
-        let Some(func) = self.remote_providers else {
-            return String::from("[]");
-        };
-        unsafe {
-            let ptr = func();
-            if ptr.is_null() {
-                return String::from("[]");
+        if let Some(func) = self.remote_providers {
+            unsafe {
+                let ptr = func();
+                if !ptr.is_null() {
+                    let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+                    (self.free_string)(ptr);
+                    return text;
+                }
             }
-            let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-            (self.free_string)(ptr);
-            text
         }
+        fallback_remote_providers_json()
     }
 
     pub fn list_directory(&self, path: &str) -> Result<String, String> {
@@ -291,27 +320,30 @@ impl Engine {
     }
 
     pub fn list_plugins(&self) -> String {
-        let Some(func) = self.list_plugins else {
-            return String::from("[]");
-        };
-        unsafe {
-            let ptr = func();
-            if ptr.is_null() {
-                return String::from("[]");
+        if let Some(func) = self.list_plugins {
+            unsafe {
+                let ptr = func();
+                if !ptr.is_null() {
+                    let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+                    (self.free_string)(ptr);
+                    return text;
+                }
             }
-            let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-            (self.free_string)(ptr);
-            text
         }
+        fallback_list_plugins_json()
     }
 
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
-        let Some(func) = self.set_plugin_enabled else {
-            return Err("E_ENGINE: set_plugin_enabled unsupported".to_string());
-        };
-        let c_id = CString::new(id).map_err(|e| e.to_string())?;
-        let res = unsafe { func(self.base, c_id.as_ptr(), if enabled { 1 } else { 0 }) };
-        if res == 1 {
+        if let Some(func) = self.set_plugin_enabled {
+            let c_id = CString::new(id).map_err(|e| e.to_string())?;
+            let res = unsafe { func(self.base, c_id.as_ptr(), if enabled { 1 } else { 0 }) };
+            if res == 1 {
+                return Ok(());
+            } else {
+                return Err("E_ENGINE: set_plugin_enabled failed".to_string());
+            }
+        }
+        if fallback_set_plugin_enabled(id, enabled) {
             Ok(())
         } else {
             Err("E_ENGINE: set_plugin_enabled failed".to_string())
@@ -319,18 +351,17 @@ impl Engine {
     }
 
     pub fn reload_plugins(&self) -> String {
-        let Some(func) = self.reload_plugins else {
-            return String::from("[]");
-        };
-        unsafe {
-            let ptr = func(self.base);
-            if ptr.is_null() {
-                return String::from("[]");
+        if let Some(func) = self.reload_plugins {
+            unsafe {
+                let ptr = func(self.base);
+                if !ptr.is_null() {
+                    let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+                    (self.free_string)(ptr);
+                    return text;
+                }
             }
-            let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-            (self.free_string)(ptr);
-            text
         }
+        fallback_list_plugins_json()
     }
 }
 
@@ -447,6 +478,246 @@ fn symbol<T: Copy>(library: &Library, name: &[u8], printed: &str) -> Result<T, S
 
 fn symbol_optional<T: Copy>(library: &Library, name: &[u8]) -> Option<T> {
     unsafe { library.get(name).ok().map(|s: Symbol<'_, T>| *s) }
+}
+
+fn fallback_disabled_set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static DISABLED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    DISABLED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn is_fallback_enabled(id: &str) -> bool {
+    !fallback_disabled_set()
+        .lock()
+        .map(|s| s.contains(id))
+        .unwrap_or(false)
+}
+
+fn fallback_set_plugin_enabled(id: &str, enabled: bool) -> bool {
+    let known = [
+        "builtin.shell.industrial-rack",
+        "builtin.shell.studio-minimal",
+        "builtin.visualizer.signal-chain",
+        "jellyfin",
+        "jellyfin_token",
+        "navidrome",
+        "webdav",
+        "builtin.expander.cue",
+        "builtin.expander.sacd",
+        "builtin.decoder.dsd",
+        "builtin.dsp.soxr",
+    ];
+    if !known.contains(&id) {
+        return false;
+    }
+    if let Ok(mut set) = fallback_disabled_set().lock() {
+        if enabled {
+            set.remove(id);
+        } else {
+            set.insert(id.to_string());
+        }
+        true
+    } else {
+        false
+    }
+}
+
+fn fallback_list_plugins_json() -> String {
+    let items = serde_json::json!([
+        {
+            "id": "builtin.shell.industrial-rack",
+            "name": "Industrial Rack (Default)",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "Neiro 默认工业机架高保真主视图，具备完整的左右分栏与状态遥测",
+            "tier": "ui",
+            "category": "ui.shell",
+            "enabled": is_fallback_enabled("builtin.shell.industrial-rack"),
+            "builtin": true,
+            "requiresRestart": false,
+            "permissions": ["playback.control", "library.read", "library.manage", "tags.write", "remote.manage", "dsp.read"]
+        },
+        {
+            "id": "builtin.shell.studio-minimal",
+            "name": "Studio Minimal Deck",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "极简母带工作室控制台视图，居中大黑胶封套与通栏信号链与曲目",
+            "tier": "ui",
+            "category": "ui.shell",
+            "enabled": is_fallback_enabled("builtin.shell.studio-minimal"),
+            "builtin": true,
+            "requiresRestart": false,
+            "permissions": ["playback.control", "library.read", "remote.manage", "dsp.read"]
+        },
+        {
+            "id": "builtin.visualizer.signal-chain",
+            "name": "HiFi Signal Path & Spectrum Inspector",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "实时 60Hz FFT 音频频谱与信号链路可视化插槽",
+            "tier": "ui",
+            "category": "ui.visualizer",
+            "enabled": is_fallback_enabled("builtin.visualizer.signal-chain"),
+            "builtin": true,
+            "requiresRestart": false,
+            "permissions": ["dsp.read", "playback.control"]
+        },
+        {
+            "id": "jellyfin",
+            "name": "Jellyfin 密码",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "通过用户密码认证连接 Jellyfin 远程音乐媒体库",
+            "tier": "base",
+            "category": "source.connector",
+            "enabled": is_fallback_enabled("jellyfin"),
+            "builtin": true,
+            "requiresRestart": false,
+            "permissions": ["remote.read", "remote.manage"]
+        },
+        {
+            "id": "jellyfin_token",
+            "name": "Jellyfin Token",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "通过 API Token 免密安全连接 Jellyfin 远程媒体库",
+            "tier": "base",
+            "category": "source.connector",
+            "enabled": is_fallback_enabled("jellyfin_token"),
+            "builtin": true,
+            "requiresRestart": false,
+            "permissions": ["remote.read", "remote.manage"]
+        },
+        {
+            "id": "navidrome",
+            "name": "Navidrome / Subsonic",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "基于 Subsonic / OpenSubsonic 协议连接 Navidrome 个人音乐服务器",
+            "tier": "base",
+            "category": "source.connector",
+            "enabled": is_fallback_enabled("navidrome"),
+            "builtin": true,
+            "requiresRestart": false,
+            "permissions": ["remote.read", "remote.manage"]
+        },
+        {
+            "id": "webdav",
+            "name": "WebDAV / NAS",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "通过 WebDAV 挂载 NAS 或网盘目录并按需流式读取音轨",
+            "tier": "base",
+            "category": "source.connector",
+            "enabled": is_fallback_enabled("webdav"),
+            "builtin": true,
+            "requiresRestart": false,
+            "permissions": ["remote.read"]
+        },
+        {
+            "id": "builtin.expander.cue",
+            "name": "CUE Sheet 分轨解析器",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "CUE 索引切片与中文 GB18030/GBK/Big5 编码自动探测分轨",
+            "tier": "base",
+            "category": "source.expander",
+            "enabled": is_fallback_enabled("builtin.expander.cue"),
+            "builtin": true,
+            "requiresRestart": false,
+            "permissions": ["library.read"]
+        },
+        {
+            "id": "builtin.expander.sacd",
+            "name": "Scarlet Book SACD ISO 光盘解析器",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "直接读取 SACD .iso 扇区 510 结构、Area TOC 分轨与 DSD 实时切片物化",
+            "tier": "base",
+            "category": "source.expander",
+            "enabled": is_fallback_enabled("builtin.expander.sacd"),
+            "builtin": true,
+            "requiresRestart": false,
+            "permissions": ["library.read"]
+        },
+        {
+            "id": "builtin.decoder.dsd",
+            "name": "DSD64/128/256 & DoP 帧解码器",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "原生 1-bit DSD 比特流解码与 DoP 0x05/0xFA 帧打包器",
+            "tier": "engine",
+            "category": "playback.decoder",
+            "enabled": is_fallback_enabled("builtin.decoder.dsd"),
+            "builtin": true,
+            "requiresRestart": true,
+            "permissions": []
+        },
+        {
+            "id": "builtin.dsp.soxr",
+            "name": "SoXR 母带级重采样与 TPDF 抖动",
+            "version": "1.0.0",
+            "author": "Char ONE",
+            "description": "64-bit 浮点重采样卷积与三角概率密度函数随机抖动",
+            "tier": "engine",
+            "category": "playback.dsp",
+            "enabled": is_fallback_enabled("builtin.dsp.soxr"),
+            "builtin": true,
+            "requiresRestart": false,
+            "breaksBitPerfect": true,
+            "permissions": ["dsp.control"]
+        }
+    ]);
+    serde_json::to_string(&items).unwrap_or_else(|_| "[]".into())
+}
+
+fn fallback_remote_providers_json() -> String {
+    let mut list = Vec::new();
+    if is_fallback_enabled("jellyfin") {
+        list.push(serde_json::json!({
+            "id": "jellyfin",
+            "name": "Jellyfin 密码",
+            "fields": [
+                { "key": "base_url", "label": "服务器地址", "kind": "url", "placeholder": "http://192.168.1.2:8096", "required": true, "secret": false },
+                { "key": "user", "label": "用户名", "kind": "text", "placeholder": "admin", "required": true, "secret": false },
+                { "key": "password", "label": "密码", "kind": "password", "placeholder": "", "required": true, "secret": true }
+            ]
+        }));
+    }
+    if is_fallback_enabled("jellyfin_token") {
+        list.push(serde_json::json!({
+            "id": "jellyfin_token",
+            "name": "Jellyfin Token",
+            "fields": [
+                { "key": "base_url", "label": "服务器地址", "kind": "url", "placeholder": "http://192.168.1.2:8096", "required": true, "secret": false },
+                { "key": "token", "label": "API Key / Token", "kind": "password", "placeholder": "MediaBrowser Token", "required": true, "secret": true }
+            ]
+        }));
+    }
+    if is_fallback_enabled("navidrome") {
+        list.push(serde_json::json!({
+            "id": "navidrome",
+            "name": "Navidrome / Subsonic",
+            "fields": [
+                { "key": "base_url", "label": "服务器地址", "kind": "url", "placeholder": "http://192.168.1.2:4533", "required": true, "secret": false },
+                { "key": "user", "label": "用户名", "kind": "text", "placeholder": "admin", "required": true, "secret": false },
+                { "key": "password", "label": "密码", "kind": "password", "placeholder": "", "required": true, "secret": true }
+            ]
+        }));
+    }
+    if is_fallback_enabled("webdav") {
+        list.push(serde_json::json!({
+            "id": "webdav",
+            "name": "WebDAV / NAS",
+            "fields": [
+                { "key": "base_url", "label": "WebDAV 地址", "kind": "url", "placeholder": "http://192.168.1.2:5005/Music", "required": true, "secret": false },
+                { "key": "user", "label": "用户名", "kind": "text", "placeholder": "可选", "required": false, "secret": false },
+                { "key": "password", "label": "密码", "kind": "password", "placeholder": "可选", "required": false, "secret": true }
+            ]
+        }));
+    }
+    serde_json::to_string(&list).unwrap_or_else(|_| "[]".into())
 }
 
 // ------------------------------------------------------------------ the wire

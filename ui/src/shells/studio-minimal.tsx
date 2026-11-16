@@ -2,16 +2,18 @@
 // Full-width track stage, centered large vinyl cover art, precision signal path telemetry,
 // and floating master bus controls.
 
-import { token, Text, View } from "nsh";
+import { Text, View } from "nsh";
+import { Button } from "nsh/base";
 import { player } from "../state/player";
 import { resolvedPath } from "../state/resolved";
 import { engine } from "../backend/engine";
 import { Cover } from "../components/ui/cover";
 import { PlayerBar } from "../components/player/player-bar";
 import { MainStack } from "./main";
-import { TitleBar } from "../components/ui/title-bar";
+import { Logo, titleBarArea } from "../components/ui/title-bar";
 import { NavControls } from "../components/header";
 import { Icon } from "../components/ui/icons";
+import { focusRing } from "../components/ui/controls";
 import { openModal } from "../state/overlays";
 import { switchShell, DEFAULT_SHELL_ID } from "../state/plugins";
 
@@ -31,21 +33,36 @@ export function StudioMinimalShell() {
     return bits > 0 ? `${bits}-bit` : "";
   };
 
+  const barHeight = () => (titleBarArea().height > 0 ? titleBarArea().height : 48);
+  const padLeft = () => titleBarArea().left + (titleBarArea().left > 0 ? 16 : 16);
+  const padRight = () => titleBarArea().right + 16;
+
   return (
-    <View class="flex-1" style={{ backgroundColor: "#0c0d10" }}>
-      {/* Precision Signal Path Telemetry Header */}
-      <TitleBar brand>
+    <View class="flex-1 bg-background" testID="studio-minimal-shell">
+      {/* Precision Signal Path Telemetry Header (always visible, including fullscreen) */}
+      <View
+        desktop={{ windowDrag: true }}
+        class="shrink-0 flex-row items-center gap-2"
+        style={{
+          height: barHeight(),
+          paddingLeft: padLeft(),
+          paddingRight: padRight(),
+        }}
+      >
+        <Logo size={18} />
+        <Text class="mr-3 font-mono text-[12px] font-bold uppercase tracking-[0.3em] text-foreground">
+          NEIRO
+        </Text>
         <View class="flex-1 flex-row items-center gap-3 pr-2">
           <NavControls />
-          <View class="flex-row items-center gap-2 rounded px-2 py-0.5" style={{ backgroundColor: "#16181f" }}>
+          <View class="flex-row items-center gap-2 rounded-(--radius) border border-border bg-secondary px-2.5 py-1">
             <View
-              class="h-1.5 w-1.5 rounded-full"
-              style={{ backgroundColor: isBitPerfect() ? "#22c55e" : "#eab308" }}
+              class={`h-2 w-2 rounded-full ${isBitPerfect() ? "bg-emerald-500" : "bg-amber-500"}`}
             />
-            <Text class="text-xs font-semibold" style={{ color: isBitPerfect() ? "#22c55e" : "#eab308" }}>
+            <Text class={`text-xs font-bold ${isBitPerfect() ? "text-emerald-500" : "text-amber-500"}`}>
               {isBitPerfect() ? "BIT-PERFECT" : "DSP ACTIVE"}
             </Text>
-            <Text class="text-xs font-mono" style={{ color: token("muted") }}>
+            <Text class="font-mono text-xs text-muted-foreground">
               {sampleRate()} {formatStr()}
             </Text>
           </View>
@@ -53,70 +70,65 @@ export function StudioMinimalShell() {
           <View class="flex-1" />
 
           {/* Quick Shell Switcher Pill */}
-          <View
-            class="flex-row items-center gap-1.5 rounded-full px-2.5 py-1"
-            style={{ backgroundColor: "#1e212b" }}
+          <Button
             onPress={() => switchShell(DEFAULT_SHELL_ID)}
-            accessibilityLabel="切换回工业机架主视图"
+            accessibilityLabel="切回经典工作台"
+            class={`flex-row items-center gap-1.5 rounded-full border border-border bg-secondary px-3 py-1 hover:bg-muted active:opacity-75 ${focusRing}`}
           >
             <Icon name="disc" size={13} color="primary" />
-            <Text class="text-xs font-medium" style={{ color: token("foreground") }}>
-              切回 Industrial Rack
+            <Text class="text-xs font-bold text-foreground">
+              切回 Classic Deck
             </Text>
-          </View>
+          </Button>
 
           {/* Open Plugin Manager */}
-          <View
-            class="rounded p-1"
-            style={{ backgroundColor: "#16181f" }}
+          <Button
             onPress={() => openModal("plugins")}
             accessibilityLabel="插件与壳层管理器"
+            class={`items-center justify-center rounded-(--radius) border border-border bg-secondary p-1.5 hover:bg-muted active:opacity-75 ${focusRing}`}
           >
-            <Icon name="settings" size={15} color="muted" />
-          </View>
+            <Icon name="settings" size={15} color="muted-foreground" />
+          </Button>
         </View>
-      </TitleBar>
+      </View>
 
       {/* Main Mastering Console Body */}
-      <View class="flex-1 flex-row gap-4 px-4 pb-20 pt-2">
+      <View class="flex-1 flex-row gap-4 px-4 pb-24 pt-2">
         {/* Left Side: Large Centered Artwork & Master Deck Card */}
-        <View
-          class="w-72 shrink-0 flex-col items-center justify-center rounded-xl border border-border p-5"
-          style={{ backgroundColor: "#12141a" }}
-        >
+        <View class="w-72 shrink-0 flex-col items-center justify-center rounded-xl border border-border bg-card p-5">
           <View
-            class="overflow-hidden rounded-lg shadow-2xl"
-            style={{ width: 220, height: 220, backgroundColor: "#0a0a0c" }}
+            class="overflow-hidden rounded-lg border border-border bg-secondary shadow-xl"
+            style={{ width: 220, height: 220 }}
           >
             <Cover path={currentPath()} size={220} fallback="disc" />
           </View>
 
           <View class="mt-4 w-full flex-col items-center text-center">
-            <Text class="truncate text-base font-bold" style={{ color: "#ffffff" }}>
+            <Text class="truncate text-base font-bold text-foreground">
               {trackTitle()}
             </Text>
-            <Text class="mt-1 truncate text-xs" style={{ color: token("primary") }}>
+            <Text class="mt-1 truncate text-xs font-semibold text-primary">
               {trackArtist()}
             </Text>
-            <Text class="mt-0.5 truncate text-xs" style={{ color: token("muted") }}>
+            <Text class="mt-0.5 truncate text-xs text-muted-foreground">
               {trackAlbum()}
             </Text>
           </View>
 
-          <View class="mt-5 w-full rounded-md p-2.5" style={{ backgroundColor: "#181a22" }}>
+          <View class="mt-5 w-full gap-1.5 rounded-lg border border-border bg-secondary p-3">
             <View class="flex-row items-center justify-between">
-              <Text class="text-xs" style={{ color: token("muted") }}>
+              <Text class="text-xs text-muted-foreground">
                 Master Clock
               </Text>
-              <Text class="text-xs font-mono font-medium" style={{ color: resolvedPath()?.sampleRate ? "#22c55e" : token("muted") }}>
+              <Text class={`font-mono text-xs font-bold ${resolvedPath()?.sampleRate ? "text-emerald-500" : "text-muted-foreground"}`}>
                 {resolvedPath()?.sampleRate ? `${resolvedPath()!.sampleRate} Hz` : "IDLE"}
               </Text>
             </View>
-            <View class="mt-1.5 flex-row items-center justify-between">
-              <Text class="text-xs" style={{ color: token("muted") }}>
+            <View class="flex-row items-center justify-between">
+              <Text class="text-xs text-muted-foreground">
                 Render Mode
               </Text>
-              <Text class="text-xs font-mono font-medium" style={{ color: token("foreground") }}>
+              <Text class="font-mono text-xs font-bold text-foreground">
                 {resolvedPath()?.backend ? resolvedPath()!.backend!.toUpperCase() : "STANDBY"}
               </Text>
             </View>
@@ -124,7 +136,7 @@ export function StudioMinimalShell() {
         </View>
 
         {/* Right Side: Full Nav Stack & Track Browser */}
-        <View class="min-w-0 flex-1 overflow-hidden rounded-xl border border-border" style={{ backgroundColor: "#12141a" }}>
+        <View class="min-w-0 flex-1 overflow-hidden rounded-xl border border-border bg-card">
           <MainStack class="min-w-0 flex-1" />
         </View>
       </View>
