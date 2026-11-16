@@ -11,19 +11,27 @@
 import { Animated, createAnimatedValue, createMotion, effect, reduceMotion, Text, View } from "nsh";
 import { codecDisplayName, isLossless, MetaChip, NowPlayingBadges } from "../../ui/format-badges";
 import { HARDWARE, Led, ModuleHeader, Screen, Silkscreen } from "../../ui/hardware";
-import { engine } from "../../../backend/engine";
+import { Button } from "nsh/base";
 import { player } from "../../../state/player";
+import { engine, reportEngineFailure } from "../../../backend/engine";
 import {
   codecLabel,
+  currentDither,
+  currentDsdPolicy,
+  currentRate,
+  currentShare,
   isDsdFile,
   displayName,
   dsdFamily,
   dsdRateLabel,
   formatHz,
   isDsdSource,
+  policyJson,
   resolvedPath,
   sourceBits,
+  sourceDsdRate,
   sourceFormatLabel,
+  type DsdPolicy,
 } from "../../../state/resolved";
 
 /** The PPM ladder's floor, dBFS. */
@@ -247,14 +255,14 @@ export function SourceStage(props: {
   const pcmChip = () => {
     const p = path();
     if (!p) return "PCM —";
-    if (isDsdFile()) return `DSD ${formatHz(p.sourceRate)} / 1-bit`;
+    if (isDsdFile()) return `DSD ${formatHz(sourceDsdRate())} / 1-bit`;
     const depth = sourceBits();
     const rate = formatHz(p.sourceRate || p.sampleRate);
     return depth > 0 ? `PCM ${rate} / ${depth}-bit` : `PCM ${rate}`;
   };
   const dsdChip = () => {
     const p = path();
-    const dsdHz = p ? (p.dsdRate > 0 ? p.dsdRate : isDsdFile() ? p.sourceRate : 0) : 0;
+    const dsdHz = p ? (p.dsdRate > 0 ? p.dsdRate : isDsdFile() ? sourceDsdRate() : 0) : 0;
     if (dsdHz > 0) return `${dsdFamily(dsdHz)} ${dsdRateLabel(dsdHz)} / 1-bit`;
     // No DSD source: the chip says what would be carried, not what is. It is
     // drawn as an outline only (see `FormatChip`'s `dim` tone), which reads as
@@ -472,7 +480,7 @@ export function SourceStage(props: {
         </View>
       </Screen>
       <If when={dsd()}>
-        <View class="px-1">
+        <View class="px-1 flex-row items-center justify-between">
           <Silkscreen tone="faint">
             {path()?.dsdPcmFallback
               ? "DSD → PCM 抽取（Bit-Perfect 已关闭）"
@@ -482,6 +490,37 @@ export function SourceStage(props: {
                   ? "DoP 载波直通"
                   : "Native DSD 直通"}
           </Silkscreen>
+          <View class="flex-row items-center gap-1">
+            <Silkscreen tone="amber">POLICY:</Silkscreen>
+            <Each of={(["auto", "dop", "pcm"] as const)}>
+              {(mode) => {
+                const active = () => currentDsdPolicy() === mode();
+                return (
+                  <Button
+                    accessibilityLabel={`DSD 策略 ${mode().toUpperCase()}`}
+                    onPress={() => {
+                      currentDsdPolicy.set(mode());
+                      const rate = currentRate();
+                      const share = currentShare();
+                      const dither = currentDither();
+                      try {
+                        engine.setPolicy(policyJson(rate.kind, rate.fixedRate, share, dither, mode()));
+                      } catch (error) {
+                        reportEngineFailure(error, "设置 DSD 策略失败");
+                      }
+                    }}
+                    class={`rounded px-1.5 py-0.5 border text-[9px] font-mono font-bold ${
+                      active()
+                        ? "border-amber-500 bg-amber-500/20 text-amber-500"
+                        : "border-border/60 text-muted-foreground hover:bg-muted"
+                    }`}
+                  >
+                    {mode().toUpperCase()}
+                  </Button>
+                );
+              }}
+            </Each>
+          </View>
         </View>
       </If>
     </View>

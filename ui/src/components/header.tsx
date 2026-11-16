@@ -7,7 +7,7 @@ import { createMotion, signal, token, untracked, View } from "nsh";
 import { Input } from "nsh/base";
 import { open, back, canBack, canForward, currentRoute, forward, SEARCH, SETTINGS, switchTo } from "../nav";
 import { searchQuery } from "../state/catalog";
-import { sidebarCollapsed, toggleSidebar } from "../state/overlays";
+import { setPluginDialogOpen, sidebarCollapsed, toggleSidebar } from "../state/overlays";
 import { Icon } from "./ui/icons";
 import { IconButton } from "./ui/controls";
 import { DISTANCE, DURATION, EASING } from "./ui/tokens";
@@ -100,6 +100,7 @@ export function TrailingControls() {
   return (
     <View class="flex-row items-center gap-1">
       <SearchField />
+      <IconButton name="disc" label="插件与壳层" hint onPress={() => setPluginDialogOpen(true)} />
       <IconButton name="settings" label="设置" hint onPress={() => switchTo(SETTINGS)} />
     </View>
   );

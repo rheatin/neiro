@@ -1,66 +1,33 @@
-// 服务器管理（连接/编辑/删除远程库）的对话框：列表 + 表单两态。列表列出
-// 每台已配置的服务器（label、类型、地址、状态点），每行 编辑/删除；尾部
-// 新建。表单：Jellyfin 密码 / Jellyfin Token /
-// Navidrome 三选一，地址（无尾斜杠）、备注名、用户、密码或
-// Token。凭据只进 Storage（TSX 侧），从来不见源码或日志；连接被拒时
-// 引擎的说法原样进 toast。
+// 服务器管理（连接/编辑/删除远程库）的对话框：列表 + 表单两态。
+// 表单字段完全由引擎的动态插件注册表（PluginRegistry / engine.remoteProviders()）下发，
+// 零硬编码枚举，支持任意新增的远程协议与存储插件。
 
 import { signal, Text, View, token, type JSX } from "nsh";
 import { Button, Input } from "nsh/base";
-import type { RemoteKind } from "../../backend/types";
+import type { ProviderDescriptor, ProviderField } from "../../backend/types";
 import {
   activeRemoteServer,
   removeServerById,
-  saveRemoteConfig,
-  type RemoteConfig,
 } from "../../state/remote";
 import { selectSource, servers, upsertServer, type RemoteServer } from "../../state/sources";
 import { isRemoteConfigured } from "../../state/remote";
 import { setServerDialogOpen, serverDialogOpen } from "../../state/overlays";
-import { reportEngineFailure } from "../../backend/engine";
+import { engine, reportEngineFailure } from "../../backend/engine";
 import { ActionButton, TextLink, focusRing } from "./controls";
 import { AppDialog } from "./overlays";
 import { Icon } from "./icons";
 import { addRoot } from "../../state/catalog";
 
-/** The three server kinds the engine speaks, as unmasked forms here: the
- * labels carry the real names. */
-type ServerKind = "jf-password" | "jf-token" | "nd" | "local";
-
-const KIND_LABEL: Record<ServerKind, string> = {
-  "jf-password": "Jellyfin 密码",
-  "jf-token": "Jellyfin Token",
-  nd: "Navidrome",
-  local: "本地路径",
-};
-
-const KIND_ORDER: ServerKind[] = ["jf-password", "jf-token", "nd", "local"];
-
-function remoteKindOf(kind: ServerKind): RemoteKind {
-  return kind === "nd" ? "navidrome" : "jellyfin";
-}
-
-/** A folder on this machine is a source too, so the same 加号 asks for it. */
-function isLocal(kind: ServerKind): boolean {
-  return kind === "local";
-}
-
-function kindOfServer(server: RemoteServer | null): ServerKind {
-  if (!server) return "jf-password";
-  if (server.kind === "navidrome") return "nd";
-  return server.token ? "jf-token" : "jf-password";
+function remoteProvidersList(): ProviderDescriptor[] {
+  return engine.remoteProviders();
 }
 
 function hostOf(baseUrl: string): string {
   return baseUrl.replace(/^\w+:\/\//, "").replace(/\/.*$/, "") || baseUrl;
 }
 
-/** The form's "which kind" state, at module scope so the sidebar's 加号 can
- * open the dialog straight on it: the 加号 asks for a source, and the kinds are
- * that dialog's tabs, not a second menu in front of it. */
 const editing = signal<RemoteServer | null | undefined>(undefined);
 
-/** Opens the source dialog on a blank form (the tabs are the kinds). */
 export function openSourceDialog(): void {
   editing.set(null);
   setServerDialogOpen(true);
@@ -75,7 +42,6 @@ export function ServerDialog() {
 }
 
 function ServerDialogContent() {
-  /** undefined = 列表；null = 新建；RemoteServer = 编辑。 */
   return (
     <If when={editing() !== undefined} else={<ServerList onNew={() => editing.set(null)} onEdit={(s) => editing.set(s)} />}>
       <ServerForm
@@ -87,8 +53,6 @@ function ServerDialogContent() {
   );
 }
 
-/** 列表态：每台服务器一行（label + 类型 + 地址 + 状态点），行尾 编辑 /
- * 删除；尾部 新建服务器…。 */
 function ServerList(props: { onNew: () => void; onEdit: (server: RemoteServer) => void }) {
   const list = () => servers();
   const activeId = () => activeRemoteServer()?.id;
@@ -120,29 +84,28 @@ function ServerList(props: { onNew: () => void; onEdit: (server: RemoteServer) =
                 accessibilityLabel={`服务器 ${server().label}`}
               >
                 <View
-                  class="h-2 w-2 shrink-0 rounded-full"
-                  style={{ backgroundColor: online(server()) ? token("chart-1") : token("muted-foreground") }}
+                  class={`h-2 w-2 rounded-full ${online(server()) ? "bg-emerald-500" : "bg-muted-foreground/40"}`}
                 />
                 <View class="min-w-0 flex-1">
-                  <Text class="line-clamp-1 text-sm font-bold text-foreground">{server().label}</Text>
-                  <Text class="line-clamp-1 text-[11px] text-muted-foreground">
-                    {KIND_LABEL[kindOfServer(server())]} · {server().baseUrl}
+                  <Text class="truncate text-sm font-bold text-foreground">{server().label}</Text>
+                  <Text class="truncate text-xs text-muted-foreground">
+                    {server().kind.toUpperCase()} · {server().baseUrl}
                   </Text>
                 </View>
-                <TextLink label="编辑" small onPress={() => props.onEdit(server())} />
-                <TextLink
-                  label="删除"
-                  small
-                  onPress={() => {
-                    void (async () => {
-                      try {
-                        await removeServerById(server().id);
-                      } catch (error) {
-                        reportEngineFailure(error, "删除失败");
-                      }
-                    })();
-                  }}
-                />
+                <Button
+                  accessibilityLabel={`编辑 ${server().label}`}
+                  onPress={() => props.onEdit(server())}
+                  class={`rounded-(--radius) p-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground ${focusRing}`}
+                >
+                  编辑
+                </Button>
+                <Button
+                  accessibilityLabel={`删除 ${server().label}`}
+                  onPress={() => void removeServerById(server().id)}
+                  class={`rounded-(--radius) p-1.5 text-xs text-destructive hover:bg-destructive/10 ${focusRing}`}
+                >
+                  删除
+                </Button>
               </View>
             )}
           </Each>
@@ -156,31 +119,47 @@ function ServerList(props: { onNew: () => void; onEdit: (server: RemoteServer) =
   );
 }
 
-/** 表单态（新建/编辑）：保存 = 写花名册 + 下发引擎 + 切到该来源。 */
 function ServerForm(props: { server: RemoteServer | null; onDone: () => void; onCancel: () => void }) {
   const existing = props.server;
-  const kind = signal<ServerKind>(kindOfServer(existing));
-  const baseUrl = signal(existing?.baseUrl ?? "");
+  const providers = () => remoteProvidersList();
+  const selectedKind = signal<string>(existing?.kind ?? providers()[0]?.id ?? "jellyfin");
+  const values = signal<Record<string, string>>({
+    base_url: existing?.baseUrl ?? "",
+    user: existing?.user ?? "",
+    password: existing?.password ?? "",
+    token: existing?.token ?? "",
+  });
   const label = signal(existing?.label ?? "");
-  const user = signal(existing?.user ?? "");
-  const secret = signal(existing?.token ?? existing?.password ?? "");
   const busy = signal(false);
 
-  const secretLabel = () => (kind() === "jf-token" ? "Token" : "密码");
+  const currentDescriptor = () => providers().find((p) => p.id === selectedKind()) ?? providers()[0];
+
+  const updateValue = (key: string, val: string) => {
+    values.update((v) => ({ ...v, [key]: val }));
+  };
+
+  const isLocal = () => selectedKind() === "local";
+
   const save = () => {
-    const url = baseUrl().trim().replace(/\/+$/, "");
-    const secretValue = secret().trim();
-    const userName = user().trim();
-    if (!url || !userName || !secretValue) return;
+    const vals = values();
+    const url = (vals.base_url ?? "").trim();
+    if (!url) return;
+    const host = hostOf(url);
+    const serverLabel = label().trim() || host;
+    const userName = (vals.user ?? "").trim();
+
     busy.set(true);
     const server: RemoteServer = {
       id: existing?.id ?? `srv-${Date.now().toString(36)}`,
-      label: label().trim() || hostOf(url),
-      kind: remoteKindOf(kind()),
+      label: serverLabel,
+      kind: selectedKind(),
       baseUrl: url,
       user: userName,
-      ...(kind() === "jf-token" ? { token: secretValue } : { password: secretValue }),
+      ...(vals.token ? { token: vals.token.trim() } : {}),
+      ...(vals.password ? { password: vals.password.trim() } : {}),
+      params: vals,
     };
+
     void (async () => {
       try {
         await upsertServer(server);
@@ -211,24 +190,33 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
 
       <View class="gap-2">
         <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">类型</Text>
-        <View class="flex-row gap-1">
-          <Each of={KIND_ORDER}>
-            {(key) => (
+        <View class="flex-row flex-wrap gap-1">
+          <Each of={providers()}>
+            {(p) => (
               <Button
-                selected={kind() === key()}
-                onPress={() => kind.set(key())}
+                selected={selectedKind() === p().id}
+                onPress={() => selectedKind.set(p().id)}
                 class={`flex-1 rounded-(--radius) px-2.5 py-2 transition duration-150 ease-out ${
-                  kind() === key() ? "bg-secondary text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
+                  selectedKind() === p().id ? "bg-secondary text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
                 } ${focusRing}`}
               >
-                <Text class="line-clamp-1 text-center text-xs font-bold">{KIND_LABEL[key()]}</Text>
+                <Text class="line-clamp-1 text-center text-xs font-bold">{p().name}</Text>
               </Button>
             )}
           </Each>
+          <Button
+            selected={selectedKind() === "local"}
+            onPress={() => selectedKind.set("local")}
+            class={`flex-1 rounded-(--radius) px-2.5 py-2 transition duration-150 ease-out ${
+              selectedKind() === "local" ? "bg-secondary text-foreground" : "hover:bg-row-hover text-foreground opacity-80"
+            } ${focusRing}`}
+          >
+            <Text class="line-clamp-1 text-center text-xs font-bold">本地路径</Text>
+          </Button>
         </View>
       </View>
 
-      <If when={isLocal(kind())}>
+      <If when={isLocal()}>
         <Text class="text-xs leading-relaxed text-muted-foreground">
           选一个文件夹，扫描把里面的文件收进本地曲库。可以加多个。
         </Text>
@@ -241,63 +229,48 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
         />
       </If>
 
-      <If when={!isLocal(kind())}>
-      <Field label="服务器地址" hint="结尾的斜杠自动去掉，如 http://192.168.1.2:8096">
-        <Input
-          value={baseUrl()}
-          onChange={({ value }) => baseUrl.set(value)}
-          placeholder="http://192.168.1.2:8096"
-          autoCapitalize="none"
-          autoCorrect={false}
-          class="flex-1 text-sm text-foreground"
-        />
-      </Field>
-      <Field label="备注名" hint="留空用地址里的主机名">
-        <Input
-          value={label()}
-          onChange={({ value }) => label.set(value)}
-          autoCapitalize="none"
-          autoCorrect={false}
-          class="flex-1 text-sm text-foreground"
-        />
-      </Field>
-      <Field label="用户">
-        <Input
-          value={user()}
-          onChange={({ value }) => user.set(value)}
-          autoCapitalize="none"
-          autoCorrect={false}
-          class="flex-1 text-sm text-foreground"
-        />
-      </Field>
-      <Field label={secretLabel()}>
-        <Input
-          value={secret()}
-          onChange={({ value }) => secret.set(value)}
-          masked
-          autoCapitalize="none"
-          autoCorrect={false}
-          class="flex-1 text-sm text-foreground"
-        />
-      </Field>
+      <If when={!isLocal()}>
+        <Field label="备注名" hint="留空用地址里的主机名">
+          <Input
+            value={label()}
+            onChange={({ value }) => label.set(value)}
+            autoCapitalize="none"
+            autoCorrect={false}
+            class="flex-1 text-sm text-foreground"
+          />
+        </Field>
 
-      <View class="flex-row items-center justify-between pt-2">
-        <TextLink label="取消" small onPress={props.onCancel} />
-        <View class="flex-1" />
-        <ActionButton label={existing ? "保存并连接" : "连接"} disabled={busy()} onPress={save} />
-      </View>
+        <Each of={currentDescriptor().fields}>
+          {(field) => (
+            <Field label={field().label} hint={field().required ? "必填" : "选填"}>
+              <Input
+                value={values()[field().key] ?? ""}
+                onChange={({ value }) => updateValue(field().key, value)}
+                placeholder={field().placeholder}
+                masked={field().kind === "password"}
+                autoCapitalize="none"
+                autoCorrect={false}
+                class="flex-1 text-sm text-foreground"
+              />
+            </Field>
+          )}
+        </Each>
+
+        <View class="flex-row items-center justify-between pt-2">
+          <TextLink label="取消" small onPress={props.onCancel} />
+          <View class="flex-1" />
+          <ActionButton label={existing ? "保存并连接" : "连接"} disabled={busy()} onPress={save} />
+        </View>
       </If>
     </View>
   );
 }
 
-/** One labeled field: the label over the input, in a shared quiet field
- * surface. */
 function Field(props: { label: string; hint?: string; children: JSX.Element }) {
   return (
     <View class="gap-1.5">
       <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">{props.label}</Text>
-      <View class="h-10 flex-row items-center gap-2 rounded-(--radius) border border-border bg-secondary px-3 focus-within:border-muted-foreground">
+      <View class="flex-row items-center rounded-(--radius) border border-border bg-secondary px-3 py-2 focus-within:border-foreground/40">
         {props.children}
       </View>
       <If when={props.hint}>

@@ -8,7 +8,7 @@ import { Icon } from "../components/ui/icons";
 import { enter } from "../components/ui/motion";
 import { engine } from "../backend/engine";
 import { gaplessEnabled, setGaplessEnabled } from "../state/player";
-import { setOutputOpen, setServerDialogOpen, sidebarCollapsed, toggleSidebar } from "../state/overlays";
+import { setOutputOpen, setPluginDialogOpen, setServerDialogOpen, sidebarCollapsed, toggleSidebar } from "../state/overlays";
 import { open, switchTo, REMOTE, TRACKS } from "../nav";
 import { addRoot, removeRoot, roots, setHomeRoot } from "../state/catalog";
 import { servers, selectSource } from "../state/sources";
@@ -16,7 +16,7 @@ import { cachedRemoteTracks, reconnectServer, removeServerById } from "../state/
 import { EFFECT_NAMES, TOOLBAR_EFFECTS, type ToolbarEffect } from "../components/ui/toolbar-fx";
 import { lightEffect, setLight, type LightChoice } from "../state/visual";
 import { resolvedPath } from "../state/resolved";
-
+import { activeShellId, plugins } from "../state/plugins";
 export function SettingsPage() {
   const path = () => engine.renderPath();
   const res = () => resolvedPath();
@@ -302,6 +302,28 @@ export function SettingsPage() {
               >
                 <Text class="text-center text-xs font-medium leading-none text-foreground">
                   {sidebarCollapsed() ? "当前：纯图标 (点击展开)" : "当前：完整 (点击收起)"}
+                </Text>
+              </Button>
+            </View>
+          </View>
+
+          {/* ---- 4. 插件与界面壳层 ---- */}
+          <View class="gap-3">
+            <SectionTitle>插件与界面壳层</SectionTitle>
+            <View class="flex-row items-center justify-between rounded-(--radius-panel) border border-border bg-card p-4">
+              <View class="gap-0.5 min-w-0 flex-1 pr-4">
+                <Text class="text-sm font-bold text-foreground">三层插件与整套界面热插拔</Text>
+                <Text class="text-xs text-muted-foreground">
+                  已加载 {plugins().length} 个插件 · 当前界面壳层：{activeShellId() === "builtin.shell.studio-minimal" ? "Studio Minimal Deck" : "Industrial Rack (Default)"}
+                </Text>
+              </View>
+              <Button
+                accessibilityLabel="管理插件与界面壳层"
+                onPress={() => setPluginDialogOpen(true)}
+                class={`h-8 items-center justify-center rounded-full border border-primary bg-primary/10 px-4 active:scale-95 ${focusRing}`}
+              >
+                <Text class="text-center text-xs font-semibold leading-none text-primary">
+                  打开插件管理器
                 </Text>
               </Button>
             </View>

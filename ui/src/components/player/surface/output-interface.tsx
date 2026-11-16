@@ -283,6 +283,21 @@ export function OutputInterface() {
       <View class="flex-row items-center justify-between">
         <Silkscreen tone="amber">EXCLUSIVE / SHARED</Silkscreen>
         <View class="flex-row items-center gap-1.5">
+          <If when={shareMode() === 1}>
+            <Button
+              accessibilityLabel="释放独占设备 (挂起 DAC，保留播放进度)"
+              onPress={() => {
+                try {
+                  engine.releaseDevice();
+                } catch (error) {
+                  reportEngineFailure(error, "释放设备失败");
+                }
+              }}
+              class={`rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 active:scale-95 ${focusRing}`}
+            >
+              <Text class="font-mono text-[9px] font-bold text-amber-500">释放设备 / RELEASE</Text>
+            </Button>
+          </If>
           <Led lit={locked()} tone={locked() ? "amber" : "emerald"} size={5} />
           <Silkscreen tone="faint">{locked() ? "ENUM LOCK: ON" : "ENUM LOCK: OFF"}</Silkscreen>
         </View>
