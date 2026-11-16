@@ -51,3 +51,4 @@ base/*.dll
 base/*.wav
 
 .cache/
+ui/prebuilts/
