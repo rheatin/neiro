@@ -11,14 +11,6 @@ import { focusRing } from "../ui/controls";
 import type { ListWave } from "../ui/motion";
 import { Icon } from "../ui/icons";
 
-export interface RemoteCardItem {
-  key: string;
-  name: string;
-  sub: string;
-  track: RemoteTrack;
-  count: number;
-}
-
 /** 远程 专辑/歌手 卡行（144 卡样式）。 */
 export interface RemoteCardItem {
   key: string;

@@ -1,211 +1,77 @@
-# AGENTS.md
+# AGENTS.md — Neiro Standalone UI Host Architecture & Invariants
 
-Rules for changing this repository. There is no UI here; this is the audio
-layer beneath one. `README.md` says what is here, `engine/README.md` says how
-the engine behaves, and `engine/LESSONS.md` records what went wrong on the way
-there. Read those before touching the render loop.
+This repository (`neiro`) is the standalone desktop client and host for the Neiro High-Fidelity Audio System, built on [Native Shell](https://nsh.dev) (NSH) TSX and a Rust host integration crate (`neiro-ui`).
 
-The rules below are the ones that have already been broken at least once, with
-the measurement that showed it.
+It communicates with the audio engine exclusively across the `neiro-core` C ABI (`neiro_base.dll` / `libneiro_base.dylib`). Prebuilt core SDK binaries are fetched via `scripts/fetch-core.sh` (or `scripts/fetch-core.ps1`). **Do NOT assume local compilation of C++ engine or local submodules in this repository.**
 
 ---
 
-## 1. A value has exactly one owner
+## 1. Single Owner State Invariants
 
-**Never re-derive a value from a second source to decide what to report.**
+Every piece of state has exactly ONE authoritative owner. Never re-derive or maintain competing copies.
 
-- The device is the authority on its own format. The engine negotiates it and
-  reports the result; a host must not cache a format and present it as current.
-- `bit_perfect` is computed once, in the engine, and is deliberately
-  conservative: a channel conversion counts as processing. The host displays the
-  flag and the reason code; it does not recompute either.
-- Position comes from device frames written, not from wall-clock time or from
-  the host's own counter. Two consumers of a position must call the same
-  function.
-- A rate the engine asked for and a rate the device granted are two fields for a
-  reason. Collapsing them hides a coercion.
+- **Audio Stream Bit-Perfect Status**:
+  The only authoritative predicate is `isStreamBitPerfect()` in `ui/src/state/resolved.ts`.
+  It evaluates both the engine's reported `renderPath().bitPerfect` and host-side DSP layers (OPRA headphone calibration, crossfade, host EQ). All UI surfaces (`surface/source.tsx`, `surface/master-bus.tsx`, `surface/telemetry.tsx`, `shells/studio-minimal.tsx`, `format-badges.tsx`, `output-interface.tsx`, `pages/settings.tsx`) MUST call `isStreamBitPerfect()`.
+- **Sample Rate Formatting**:
+  The canonical formatter is `formatHz` in `ui/src/state/resolved.ts`. `formatRate` in `formats.ts` re-exports `formatHz`.
+- **Playback Order (Shuffle / Repeat)**:
+  `shuffleMode` and `repeatMode` in `ui/src/state/player.ts` are the single source of truth for the host. When the engine emits `queueSnapshot`, host state syncs immediately; user toggles persist to `Storage` and send commands to the engine. `state/shuffle.ts` re-exports directly from `player.ts`.
+- **Output Policy (Rate, Share Mode, Dither, DSD)**:
+  `applyPolicy(...)` in `ui/src/state/resolved.ts` is the single point for changing and persisting output policies. On startup when engine health becomes ready, `restorePolicyAtStartup()` reapplies the user's saved policy over the engine's default.
 
-Ask of every new field: *if two places displayed this, would they agree?* If the
-answer depends on which place, it belongs in one function.
+---
 
-## 2. A probe that cannot fail is worse than no probe
+## 2. C ABI & Backward Compatibility Invariants
 
-Every check must have been seen **failing against the real bug**, and must fail
-fast.
+The UI host must remain backward and forward compatible across `neiro-core` SDK versions (specifically `v0.2.0` and `>= v0.2.1` / `QueueDirector`).
 
-- **Measure a consequence, not a callback having fired.** "The playhead is at
-  the line's timestamp", not "the handler ran".
-- **Wait for the state you are measuring**, with a bounded budget — not a fixed
-  sleep. A seek is asynchronous; reading `position()` right after it returns the
-  pre-seek value.
-- **Report a timeout as a failure**, with the raw payload.
-- **If a key can be `undefined`/null, assert it exists first.** `null > -80` is
-  `true` in JS; the equivalent C++ mistake is a zeroed field that reads as a
-  valid measurement.
-- **A test signal has to be shown to reproduce the fault.** A -20 dBFS tone
-  cannot answer "is there a click"; a 0 dBFS sine answers a different question.
-- **Leave the device and the process as you found them.** Close every handle,
-  join every thread, release the COM apartment.
+- **Queue Item JSON Normalization**:
+  Any `QueueItem` serialized across the boundary MUST supply snake_case `duration_ms: u64` (even if TypeScript has camelCase `durationMs`). In `ui/src/engine.rs`, `normalize_queue_items_json` cleans and normalizes all incoming queue items.
+- **Graceful v0.2.0 `-2` Command Fallback**:
+  If the loaded DLL lacks newer symbols (`NAE_BasePlayContext`, `NAE_BasePlayNext`, `NAE_BasePlayLater`, `NAE_BaseSetRepeatMode`, `NAE_BaseSetShuffleMode`, `NAE_BasePrevious`, etc.) or returns `NAE_BASE_ERR_PARSE = -2`, `ui/src/engine.rs` MUST automatically degrade to `v0.2.0` primitive commands (`play`, `enqueue`, `clear_queue`, `seek 0.0`) without raising fatal errors to the user.
+- **Honest Plugin Reporting**:
+  In fallback mode without dynamic plugin control ABI symbols, the host must not falsely report built-in decoders (`cue`, `sacd`, `dsd`, `soxr`) as togglable. Built-in engine stages remain marked as permanently active.
 
-## 3. Two consumers of one measurement go through one function
+---
 
-`localDynamicRangeDb` filtered on frames the tap had produced; `currentLevelDb`
-did not. Same envelope, same moment, two answers. When a value is computed in
-more than one place, extract it and let both call it. The duplicated version is
-always the one that gets forgotten.
+## 3. Remote Streaming & Virtual Path Invariants
 
-## 4. When the source cannot answer, say nothing
+- **`remote://` Virtual Paths**:
+  Tracks originating from remote sources (Jellyfin, Navidrome, WebDAV) carry virtual paths in the format `remote://{id}.{ext}`.
+  The host player MUST intercept `path.startsWith("remote://")` before dispatching to the native playback engine. The first track must resolve to a valid local cache path via `withRemotePath` / `playRemoteByPath`; subsequent items in context queues must resolve to cached local files or be deferred until cached, preventing C++ decoders from opening raw virtual URIs.
+- **Callback Array & Epoch Guards**:
+  In `ui/src/state/remote.ts`, `fetchedActions` must hold an array of callbacks (`Array<(path: string) => void>`) so concurrent requests for the same track do not drop handlers. All pagination must verify `listEpoch` to discard outdated page responses.
 
-- A meter that cannot be measured draws nothing — not `--`, not a plausible
-  number. A held reading expires when its basis moves (track change, seek,
-  device change).
-- A short render is a failure, not a success with less audio.
-- A device that is gone is `NAE_ERR_DEVICE_LOST`, not a generic open error.
-  Playback pauses; the handle, the decoder and the position stay valid.
-- **No device is chosen on the caller's behalf.** A play carrying no device id
-  can only land on the endpoint used last; if it is gone, that is device-lost,
-  never a different endpoint.
+---
 
-## 5. Constants and layouts are exported, not restated
+## 4. UI Performance & Resource Lifecycle
 
-- `output_mode.h`, `nae.h` and the Rust `ffi.rs` describe the same structures.
-  Every mirrored struct must pin its neighbours with `static_assert`; a
-  total-size check cannot catch two adjacent doubles swapped.
-- Layout constants live in one header and are read by both the producer and the
-  consumer. A probe that writes the constant into itself measures itself.
+- **List Virtualization**:
+  Large collections (all tracks, scoped folder workspaces, remote catalog) must use virtualized `<List>` with item recycling rather than unbounded `<Each>` inside `<Scroll>`, avoiding UI freezing.
+- **On-Demand 60Hz Visualizer**:
+  `visualiserWanted` in `ui/src/state/visualiser.ts` must only request 60Hz FFT frames when music is actively playing AND an actual visual consumer is visible (Now Playing sheet open, Output console open, Studio Minimal shell active, or non-off toolbar effect). When hidden, it calls `engine.setVisualiser(null)`.
+- **LRU Cache & Watchdog Cleanups**:
+  When evicting items from `artwork.ts` cache, always delete from the `asked` set to allow re-fetching on scroll-back. Background catalog pagination must employ watchdog timeouts (15s) to recover from lost IPC events. Subscriptions (e.g. lyrics search) must provide explicit cancellation on sheet closure.
 
-## 6. The C ABI contract
+---
 
-From `nae.h`, and the only things to get right:
+## 5. Verification Commands
 
-- **No exceptions cross the boundary.** Every export is `noexcept`; an escaping
-  C++ exception into Rust is undefined behaviour. Allocation failure is
-  `NAE_ERR_NO_MEMORY`.
-- **Memory belongs to the side that allocated it.** Strings from the engine go
-  back through `NAE_FreeString`; handles go back through `NAE_Close`, exactly
-  once.
-- **The export list is a link input.** `nae.map` / `nae.def` / the Rust `ffi.rs`
-  are three copies of one list. A missing entry is not a link error inside the
-  DLL — it links, and simply is not in the export table, so the host fails at
-  load. Ninja does not track `nae.map` as a link input; a forced relink is
-  needed after editing it.
+Run all checks from the repository root:
 
-## 7. Verify on the running engine
+```bash
+# Set up Rust environment if needed
+export RUSTUP_HOME="$HOME/Library/Caches/puccinialin/rustup"
+export CARGO_HOME="$HOME/Library/Caches/puccinialin/cargo"
+export PATH="$HOME/.local/bin:$RUSTUP_HOME/toolchains/stable-aarch64-apple-darwin/bin:$CARGO_HOME/bin:/opt/homebrew/bin:$PATH"
 
-`cmake --build` passing is not verification. Run the checks against the real
-endpoint:
+# Typecheck and build Rust crate & TSX
+(cd ui && nsh check)
 
-```powershell
-cd engine/build
-.\nae_test.exe
-.\resample_check.exe
-.\dither_check.exe
-.\mode_check.exe
-.\reopen_check.exe
-.\source_width_check.exe
-.\skip_check.exe  g1.wav g2.wav
+# Run Rust unit tests
+cargo test --manifest-path ui/Cargo.toml --lib
+
+# Run all headless UI integration tests
+(cd ui && nsh test)
 ```
-
-The Rust binding is the cross-language ABI probe:
-
-```powershell
-cd binding
-$env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
-cargo run --bin probe -- <file.flac>
-```
-
-The tag writer is the one path that can destroy a listener's audio, so it is
-checked by consequence: the samples are decoded before and after the write and
-compared, and the temp file is checked to be gone.
-
-```powershell
-cd base
-$env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
-cargo run --bin tag_check -- ..\test\tagtmp\a.flac ..\test\tagtmp\b.mp3 ..\test\tagtmp\c.wav
-```
-
-The whole set, on both platforms, is one command — it builds, runs every
-device-free check, then Base's probes and the binding, and it is what CI calls:
-
-```powershell
-powershell -File scripts/verify.ps1 -WithDevices     # Windows
-./scripts/verify.sh --with-devices                    # macOS
-```
-
-Without the flag it runs only what needs no sound card. A check that needs a
-device is skipped there on purpose; do not read a green CI run as "playback
-works".
-
-Do not pass `--target x86_64-pc-windows-gnu`. That toolchain's default host is
-already GNU; naming the target again selects the self-contained link setup, and
-every binary it produces dies at process start with `STATUS_STACK_OVERFLOW`.
-
-If `nae.dll` is held by a running process, the link fails. Stop it first.
-
-### Toolchain
-
-There is no MSVC `link.exe` here. Rust uses
-`stable-x86_64-pc-windows-gnu`; the C++ side uses the scoop MinGW. The current
-MinGW-Builds `16.2.0-rt_v14` is a UCRT-only toolchain -- it ships `libucrt.a`
-and no `libmsvcrt.a` -- so `cmake/mingw-ucrt.cmake` selects `-mcrtdll=ucrt`.
-Without it, even a hello world fails to link (`ld: cannot find -lmsvcrt`), and
-folding `libwinpthread` into the DLL fails on `__intrinsic_setjmpex`.
-
-That is a **toolchain file, not a line in `CMakeLists.txt`**, and it has to stay
-that way. `cmake_minimum_required()` implicitly runs `project()`, which compiles
-the first test program; anything set inside `CMakeLists.txt` arrives after that
-check has already failed. Configure with `cmake --preset windows`, or pass
-`-DCMAKE_TOOLCHAIN_FILE=cmake/mingw-ucrt.cmake` by hand.
-
-### LGPL build
-
-`scripts/build-lgpl.ps1` builds against a shared LGPL FFmpeg and asserts the
-DLL reports one. The engine only uses decoding APIs, so nothing above the link
-changes; the script refuses a build whose configuration still enables
-`--enable-gpl` or `--enable-nonfree`.
-
-A function is only reachable if it is in all three export lists. The DLL is
-loaded by name; an ordinal-only DLL cannot be used by the Rust binding.
-
-**`nae.def` and `nae.map` must agree exactly; `ffi.rs` may declare less.** It
-declares what the binding calls, and the binding calls the `NAE_Session*` form
-of every runtime setter -- `NAE_SetVolume` and `NAE_SessionSetVolume` are two
-entry points to one operation, and declaring both would be a second way to do
-the same thing. The rule that matters is the converse: a symbol the binding
-*uses* must be declared, or it fails to link. That was checked, and all 61 used
-symbols are declared. A handle-level export that no Rust code calls is
-reachable from C and from the CLI, which is why it stays exported.
-
-## 8. PowerShell 5 will silently rewrite your UTF-8 files
-
-`Get-Content` without `-Encoding` reads a BOM-less UTF-8 file as the system ANSI
-code page; `Set-Content -Encoding UTF8` writes it back with a BOM. Every CJK
-character and every em dash changes. Nothing errors, the build still passes, and
-the diff looks mangled on both sides because the console decodes it the same way.
-
-Run `scripts/check-encoding.ps1` before committing anything a PowerShell script
-touched. The safe pattern is to decode and encode explicitly:
-
-```powershell
-$utf8 = New-Object System.Text.UTF8Encoding($false)
-$t = $utf8.GetString([System.IO.File]::ReadAllBytes($p))
-# ... change ...
-[System.IO.File]::WriteAllBytes($p, $utf8.GetBytes($t))
-```
-
-Or use the editor, which is byte-safe. **Write ASCII only in `.ps1` files** —
-`powershell -File` reads a BOM-less script as ANSI too, and a backtick in a
-double-quoted string is an escape, not text.
-
-## 9. Licensing
-
-The current FFmpeg shared build is **GPL**. Linking it makes `nae.dll` GPL: fine
-for development, not fine to distribute. The player needs none of the GPL
-components; switching to an LGPL build is a link-time change, and nothing above
-it moves. `soxr` is vendored under LGPL 2.1.
-
-## 10. No UI in this branch
-
-There is no web view, no Tauri shell, no GPUI. If a change needs pixels, it goes
-in a separate host through the same C ABI. Do not add a UI framework to this
-build graph.

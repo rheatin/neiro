@@ -26,3 +26,14 @@ jobs:
 
       - name: Check UI Rust crate
         run: cargo check --manifest-path ui/Cargo.toml
+
+      - name: Test UI Rust crate (lib)
+        run: cargo test --manifest-path ui/Cargo.toml --lib
+
+      - name: Check UI TSX (if nsh available)
+        run: |
+          if command -v nsh >/dev/null 2>&1; then
+            cd ui && nsh check
+          else
+            echo "nsh not installed in runner, skipping nsh check"
+          fi

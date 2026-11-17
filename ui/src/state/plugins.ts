@@ -53,16 +53,19 @@ export function createPluginContext(manifest: PluginInfo): NeiroPluginContext {
   return {
     manifest,
     hasPermission: (perm: string) => perms.has(perm),
-    writeTags: async (_path, _tags) => {
+    writeTags: async (path, _tags) => {
       assertPerm("tags.write");
-      // Delegated to engine/Base atomic rename pipeline
+      if (!path) throw new Error("path is required");
+      console.warn("neiro: writeTags: 底层引擎尚未开放标签批量重写 ABI");
     },
     writeLyrics: async (path, lyrics) => {
       assertPerm("tags.write");
       engine.writeLyrics(path, lyrics);
     },
-    setArtwork: async (_path, _mime, _data) => {
+    setArtwork: async (path, _mime, _data) => {
       assertPerm("tags.write");
+      if (!path) throw new Error("path is required");
+      console.warn("neiro: setArtwork: 底层引擎尚未开放内嵌封面重写 ABI");
     },
     addFolder: (path: string) => {
       assertPerm("library.manage");

@@ -27,8 +27,7 @@ for dylib in "$SDK_LIB"/*.dylib; do
     [ -f "$dylib" ] || continue
     base="$(basename "$dylib")"
     cp "$dylib" "$FRAMEWORKS/$base"
-    cp "$dylib" "$MACOS/$base"
-    chmod u+w "$FRAMEWORKS/$base" "$MACOS/$base"
+    chmod u+w "$FRAMEWORKS/$base"
 done
 
 for bin in "$MACOS/neiro" "$MACOS/Neiro"; do
@@ -38,7 +37,7 @@ for bin in "$MACOS/neiro" "$MACOS/Neiro"; do
     fi
 done
 
-for lib in "$FRAMEWORKS"/*.dylib "$MACOS"/*.dylib; do
+for lib in "$FRAMEWORKS"/*.dylib; do
     [ -f "$lib" ] || continue
     codesign --force --sign - "$lib" >/dev/null 2>&1 || true
 done
@@ -46,4 +45,4 @@ done
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
 
 echo "--- Bundled Core SDK from: $SDK_DIR ---"
-ls -1 "$MACOS"/*.dylib
+ls -1 "$FRAMEWORKS"/*.dylib

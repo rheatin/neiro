@@ -28,3 +28,18 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
         run: cargo check --manifest-path ui/Cargo.toml
+
+      - name: Test UI Rust crate (lib)
+        env:
+          RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
+        run: cargo test --manifest-path ui/Cargo.toml --lib
+
+      - name: Check UI TSX (if nsh available)
+        shell: pwsh
+        run: |
+          if (Get-Command nsh -ErrorAction SilentlyContinue) {
+            Set-Location ui
+            nsh check
+          } else {
+            Write-Host "nsh not installed in runner, skipping nsh check"
+          }

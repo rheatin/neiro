@@ -10,7 +10,7 @@
 # ASCII only in this file. See check-commit.ps1 for why.
 
 $ErrorActionPreference = "Stop"
-Set-Location "C:\Users\Char\Documents\Repos\Neiro"
+Set-Location (Join-Path $PSScriptRoot "..")
 
 $tmp = Join-Path $env:TEMP "opencode\blob.bin"
 $utf8 = New-Object System.Text.UTF8Encoding($false)

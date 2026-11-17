@@ -1162,7 +1162,7 @@ async fn lyrics_pump(
     loop {
         match receiver.try_recv() {
             Ok(candidates) => {
-                if let Ok(mut guard) = inner.lock() {
+                if let Ok(guard) = inner.lock() {
                     guard.on_lyrics_found.post(&candidates);
                 }
             }

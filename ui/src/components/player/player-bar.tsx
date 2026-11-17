@@ -1,7 +1,6 @@
 // The player bar the pages scroll behind: a 72pt pill, a step lighter than
-// the page, its rim faint and its shadow small. What plays and its
-// controls only — the engine is behind the pill, so nothing pretends
-// (shuffle and repeat do not exist here and are not drawn).
+// the page, its rim faint and its shadow small. Houses what plays and its
+// controls (transport, seek, volume, shuffle, repeat, queue, and output drawer).
 
 import { View } from "nsh";
 import { IconButton } from "../ui/controls";
