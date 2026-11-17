@@ -111,6 +111,8 @@ fn dll_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
     }
     if let Some(dir) = exe_dir {
         paths.push(dir.join(DLL));
+        #[cfg(target_os = "macos")]
+        paths.push(dir.join("../Frameworks").join(DLL));
     }
     for sdk in ["../.cache/neiro-core/current", ".cache/neiro-core/current"] {
         #[cfg(windows)]
@@ -410,55 +412,118 @@ impl Engine {
     }
 
     pub fn play_context(&self, items_json: &str, start_index: usize) -> Result<(), String> {
-        if let Some(func) = self.play_context {
-            let c_json = CString::new(items_json).map_err(|e| e.to_string())?;
+        let (norm_json, paths) = normalize_queue_items_json(items_json)?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let tried_res = if let Some(func) = self.play_context {
+            let c_json = CString::new(norm_json.as_str()).map_err(|e| e.to_string())?;
             let code = unsafe { func(self.base, c_json.as_ptr(), start_index) };
-            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: play_context failed ({code})")) }
+            if code == 0 {
+                return Ok(());
+            } else if code == -2 {
+                Err("E_ENGINE: command 被拒绝（-2）".to_string())
+            } else {
+                return Err(format!("E_ENGINE: play_context failed ({code})"));
+            }
         } else {
-            let items: serde_json::Value = serde_json::from_str(items_json).map_err(|e| e.to_string())?;
+            let items: serde_json::Value = serde_json::from_str(&norm_json).map_err(|e| e.to_string())?;
             let cmd = serde_json::json!({
                 "command": "play_context",
                 "items": items,
                 "start_index": start_index
             });
             self.command(&cmd.to_string())
+        };
+
+        if is_rejected_2(&tried_res) || (self.play_context.is_none() && tried_res.is_err()) {
+            let first_idx = if start_index < paths.len() { start_index } else { 0 };
+            let first_path = &paths[first_idx];
+            self.command(&serde_json::json!({ "command": "play", "path": first_path }).to_string())?;
+            if first_idx + 1 < paths.len() {
+                let rest = &paths[first_idx + 1..];
+                if !rest.is_empty() {
+                    self.command(&serde_json::json!({ "command": "enqueue", "paths": rest }).to_string())?;
+                }
+            }
+            Ok(())
+        } else {
+            tried_res
         }
     }
 
     pub fn play_next(&self, items_json: &str) -> Result<(), String> {
-        if let Some(func) = self.play_next {
-            let c_json = CString::new(items_json).map_err(|e| e.to_string())?;
+        let (norm_json, paths) = normalize_queue_items_json(items_json)?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let tried_res = if let Some(func) = self.play_next {
+            let c_json = CString::new(norm_json.as_str()).map_err(|e| e.to_string())?;
             let code = unsafe { func(self.base, c_json.as_ptr()) };
-            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: play_next failed ({code})")) }
+            if code == 0 {
+                return Ok(());
+            } else if code == -2 {
+                Err("E_ENGINE: command 被拒绝（-2）".to_string())
+            } else {
+                return Err(format!("E_ENGINE: play_next failed ({code})"));
+            }
         } else {
-            let items: serde_json::Value = serde_json::from_str(items_json).map_err(|e| e.to_string())?;
+            let items: serde_json::Value = serde_json::from_str(&norm_json).map_err(|e| e.to_string())?;
             let cmd = serde_json::json!({
                 "command": "play_next",
                 "items": items,
             });
             self.command(&cmd.to_string())
+        };
+
+        if is_rejected_2(&tried_res) || (self.play_next.is_none() && tried_res.is_err()) {
+            self.command(&serde_json::json!({ "command": "enqueue", "paths": paths }).to_string())
+        } else {
+            tried_res
         }
     }
 
     pub fn play_later(&self, items_json: &str) -> Result<(), String> {
-        if let Some(func) = self.play_later {
-            let c_json = CString::new(items_json).map_err(|e| e.to_string())?;
+        let (norm_json, paths) = normalize_queue_items_json(items_json)?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let tried_res = if let Some(func) = self.play_later {
+            let c_json = CString::new(norm_json.as_str()).map_err(|e| e.to_string())?;
             let code = unsafe { func(self.base, c_json.as_ptr()) };
-            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: play_later failed ({code})")) }
+            if code == 0 {
+                return Ok(());
+            } else if code == -2 {
+                Err("E_ENGINE: command 被拒绝（-2）".to_string())
+            } else {
+                return Err(format!("E_ENGINE: play_later failed ({code})"));
+            }
         } else {
-            let items: serde_json::Value = serde_json::from_str(items_json).map_err(|e| e.to_string())?;
+            let items: serde_json::Value = serde_json::from_str(&norm_json).map_err(|e| e.to_string())?;
             let cmd = serde_json::json!({
                 "command": "play_later",
                 "items": items,
             });
             self.command(&cmd.to_string())
+        };
+
+        if is_rejected_2(&tried_res) || (self.play_later.is_none() && tried_res.is_err()) {
+            self.command(&serde_json::json!({ "command": "enqueue", "paths": paths }).to_string())
+        } else {
+            tried_res
         }
     }
 
     pub fn set_repeat_mode(&self, mode: i32) -> Result<(), String> {
-        if let Some(func) = self.set_repeat_mode {
+        let tried_res = if let Some(func) = self.set_repeat_mode {
             let code = unsafe { func(self.base, mode) };
-            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: set_repeat_mode failed ({code})")) }
+            if code == 0 {
+                return Ok(());
+            } else if code == -2 {
+                Err("E_ENGINE: command 被拒绝（-2）".to_string())
+            } else {
+                return Err(format!("E_ENGINE: set_repeat_mode failed ({code})"));
+            }
         } else {
             let mode_str = match mode {
                 1 => "All",
@@ -470,61 +535,220 @@ impl Engine {
                 "mode": mode_str,
             });
             self.command(&cmd.to_string())
+        };
+
+        if is_rejected_2(&tried_res) || (self.set_repeat_mode.is_none() && tried_res.is_err()) {
+            Ok(())
+        } else {
+            tried_res
         }
     }
 
     pub fn set_shuffle_mode(&self, enabled: bool) -> Result<(), String> {
-        if let Some(func) = self.set_shuffle_mode {
+        let tried_res = if let Some(func) = self.set_shuffle_mode {
             let code = unsafe { func(self.base, enabled) };
-            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: set_shuffle_mode failed ({code})")) }
+            if code == 0 {
+                return Ok(());
+            } else if code == -2 {
+                Err("E_ENGINE: command 被拒绝（-2）".to_string())
+            } else {
+                return Err(format!("E_ENGINE: set_shuffle_mode failed ({code})"));
+            }
         } else {
             let cmd = serde_json::json!({
                 "command": "set_shuffle_mode",
                 "enabled": enabled,
             });
             self.command(&cmd.to_string())
+        };
+
+        if is_rejected_2(&tried_res) || (self.set_shuffle_mode.is_none() && tried_res.is_err()) {
+            Ok(())
+        } else {
+            tried_res
         }
     }
 
     pub fn previous(&self) -> Result<(), String> {
-        if let Some(func) = self.previous {
+        let tried_res = if let Some(func) = self.previous {
             let code = unsafe { func(self.base) };
-            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: previous failed ({code})")) }
+            if code == 0 {
+                return Ok(());
+            } else if code == -2 {
+                Err("E_ENGINE: command 被拒绝（-2）".to_string())
+            } else {
+                return Err(format!("E_ENGINE: previous failed ({code})"));
+            }
         } else {
             let cmd = serde_json::json!({ "command": "previous" });
             self.command(&cmd.to_string())
+        };
+
+        if is_rejected_2(&tried_res) || (self.previous.is_none() && tried_res.is_err()) {
+            if let Ok(snap) = self.snapshot() {
+                if snap.position > 3.0 {
+                    return self.command(&serde_json::json!({ "command": "seek", "seconds": 0.0 }).to_string());
+                }
+                if let Some(idx) = snap.queue_index {
+                    if idx > 0 && idx - 1 < snap.queue.len() {
+                        let prev_path = &snap.queue[idx - 1];
+                        return self.command(&serde_json::json!({ "command": "play", "path": prev_path }).to_string());
+                    }
+                }
+            }
+            self.command(&serde_json::json!({ "command": "seek", "seconds": 0.0 }).to_string())
+        } else {
+            tried_res
         }
     }
 
     pub fn remove_queue_item(&self, id: &str) -> Result<(), String> {
-        if let Some(func) = self.remove_queue_item {
+        let tried_res = if let Some(func) = self.remove_queue_item {
             let c_id = CString::new(id).map_err(|e| e.to_string())?;
             let code = unsafe { func(self.base, c_id.as_ptr()) };
-            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: remove_queue_item failed ({code})")) }
+            if code == 0 {
+                return Ok(());
+            } else if code == -2 {
+                Err("E_ENGINE: command 被拒绝（-2）".to_string())
+            } else {
+                return Err(format!("E_ENGINE: remove_queue_item failed ({code})"));
+            }
         } else {
             let cmd = serde_json::json!({ "command": "remove_queue_item", "id": id });
             self.command(&cmd.to_string())
+        };
+
+        if is_rejected_2(&tried_res) || (self.remove_queue_item.is_none() && tried_res.is_err()) {
+            if let Ok(idx) = id.parse::<u32>() {
+                let _ = self.command(&serde_json::json!({ "command": "remove_from_queue", "index": idx }).to_string());
+            }
+            Ok(())
+        } else {
+            tried_res
         }
     }
 
     pub fn clear_user_queue(&self) -> Result<(), String> {
-        if let Some(func) = self.clear_user_queue {
+        let tried_res = if let Some(func) = self.clear_user_queue {
             let code = unsafe { func(self.base) };
-            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: clear_user_queue failed ({code})")) }
+            if code == 0 {
+                return Ok(());
+            } else if code == -2 {
+                Err("E_ENGINE: command 被拒绝（-2）".to_string())
+            } else {
+                return Err(format!("E_ENGINE: clear_user_queue failed ({code})"));
+            }
         } else {
             let cmd = serde_json::json!({ "command": "clear_user_queue" });
             self.command(&cmd.to_string())
+        };
+
+        if is_rejected_2(&tried_res) || (self.clear_user_queue.is_none() && tried_res.is_err()) {
+            self.command(&serde_json::json!({ "command": "clear_queue" }).to_string())
+        } else {
+            tried_res
         }
     }
 
     pub fn move_user_queue_item(&self, from: usize, to: usize) -> Result<(), String> {
-        if let Some(func) = self.move_user_queue_item {
+        let tried_res = if let Some(func) = self.move_user_queue_item {
             let code = unsafe { func(self.base, from, to) };
-            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: move_user_queue_item failed ({code})")) }
+            if code == 0 {
+                return Ok(());
+            } else if code == -2 {
+                Err("E_ENGINE: command 被拒绝（-2）".to_string())
+            } else {
+                return Err(format!("E_ENGINE: move_user_queue_item failed ({code})"));
+            }
         } else {
             let cmd = serde_json::json!({ "command": "move_user_queue_item", "from": from, "to": to });
             self.command(&cmd.to_string())
+        };
+
+        if is_rejected_2(&tried_res) || (self.move_user_queue_item.is_none() && tried_res.is_err()) {
+            let _ = self.command(&serde_json::json!({ "command": "move_in_queue", "from": from, "to": to }).to_string());
+            Ok(())
+        } else {
+            tried_res
         }
+    }
+}
+
+pub fn normalize_queue_items_json(items_json: &str) -> Result<(String, Vec<String>), String> {
+    let val: serde_json::Value =
+        serde_json::from_str(items_json).map_err(|e| format!("E_PARSE: {e}"))?;
+    let items = match val {
+        serde_json::Value::Array(arr) => arr,
+        other => vec![other],
+    };
+    let mut normalized = Vec::with_capacity(items.len());
+    let mut paths = Vec::with_capacity(items.len());
+
+    for item in items {
+        let obj = match item {
+            serde_json::Value::Object(map) => map,
+            _ => continue,
+        };
+        let path = obj
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| path.clone());
+        let title = obj
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let artist = obj
+            .get("artist")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let duration_ms = if let Some(v) = obj.get("duration_ms").and_then(|v| v.as_u64()) {
+            v
+        } else if let Some(v) = obj.get("durationMs").and_then(|v| v.as_f64()) {
+            v.round() as u64
+        } else if let Some(v) = obj.get("duration_ms").and_then(|v| v.as_f64()) {
+            v.round() as u64
+        } else if let Some(v) = obj.get("durationMs").and_then(|v| v.as_u64()) {
+            v
+        } else {
+            0u64
+        };
+
+        paths.push(path.clone());
+        let mut norm_obj = serde_json::Map::new();
+        norm_obj.insert("id".to_string(), serde_json::Value::String(id));
+        norm_obj.insert("path".to_string(), serde_json::Value::String(path));
+        if let Some(t) = title {
+            norm_obj.insert("title".to_string(), serde_json::Value::String(t));
+        } else {
+            norm_obj.insert("title".to_string(), serde_json::Value::Null);
+        }
+        if let Some(a) = artist {
+            norm_obj.insert("artist".to_string(), serde_json::Value::String(a));
+        } else {
+            norm_obj.insert("artist".to_string(), serde_json::Value::Null);
+        }
+        norm_obj.insert(
+            "duration_ms".to_string(),
+            serde_json::Value::Number(duration_ms.into()),
+        );
+        normalized.push(serde_json::Value::Object(norm_obj));
+    }
+    let norm_json = serde_json::to_string(&normalized).map_err(|e| format!("E_SERIALIZE: {e}"))?;
+    Ok((norm_json, paths))
+}
+
+fn is_rejected_2(res: &Result<(), String>) -> bool {
+    if let Err(msg) = res {
+        msg.contains("-2") || msg.contains("被拒绝（-2）")
+    } else {
+        false
     }
 }
 
@@ -695,6 +919,18 @@ fn fallback_disabled_set() -> &'static std::sync::Mutex<std::collections::HashSe
 }
 
 fn is_fallback_enabled(id: &str) -> bool {
+    // Engine built-in decoders, expanders and DSP are permanent builtins in v0.2.0
+    // and cannot be disabled without C ABI symbol support.
+    let permanent_builtins = [
+        "builtin.expander.cue",
+        "builtin.expander.sacd",
+        "builtin.decoder.dsd",
+        "builtin.dsp.soxr",
+    ];
+    if permanent_builtins.contains(&id) {
+        return true;
+    }
+
     !fallback_disabled_set()
         .lock()
         .map(|s| s.contains(id))
@@ -702,7 +938,18 @@ fn is_fallback_enabled(id: &str) -> bool {
 }
 
 fn fallback_set_plugin_enabled(id: &str, enabled: bool) -> bool {
-    let known = [
+    let permanent_builtins = [
+        "builtin.expander.cue",
+        "builtin.expander.sacd",
+        "builtin.decoder.dsd",
+        "builtin.dsp.soxr",
+    ];
+    if permanent_builtins.contains(&id) {
+        // Refuse to fake dynamic disabling of built-in engine plugins on v0.2.0
+        return enabled;
+    }
+
+    let toggleable = [
         "builtin.shell.industrial-rack",
         "builtin.shell.studio-minimal",
         "builtin.visualizer.signal-chain",
@@ -710,12 +957,8 @@ fn fallback_set_plugin_enabled(id: &str, enabled: bool) -> bool {
         "jellyfin_token",
         "navidrome",
         "webdav",
-        "builtin.expander.cue",
-        "builtin.expander.sacd",
-        "builtin.decoder.dsd",
-        "builtin.dsp.soxr",
     ];
-    if !known.contains(&id) {
+    if !toggleable.contains(&id) {
         return false;
     }
     if let Ok(mut set) = fallback_disabled_set().lock() {
@@ -1494,5 +1737,39 @@ mod tests {
         assert!(parse(r#"{"event":"telepathy_frame"}"#)
             .expect_err("unknown variants must not parse")
             .contains("unknown variant"));
+    }
+
+    #[test]
+    fn test_normalize_queue_items_json_camel_case_duration() {
+        let input = r#"[{"id":"t1","path":"/path/1.flac","title":"Title 1","artist":"Artist 1","durationMs":180234.6}]"#;
+        let (normalized, paths) = normalize_queue_items_json(input).expect("normalization succeeds");
+        assert_eq!(paths, vec!["/path/1.flac"]);
+        assert!(normalized.contains("\"duration_ms\":180235"));
+        assert!(normalized.contains("\"title\":\"Title 1\""));
+    }
+
+    #[test]
+    fn test_normalize_queue_items_json_snake_case_duration() {
+        let input = r#"[{"id":"t2","path":"/path/2.flac","title":"Title 2","artist":"Artist 2","duration_ms":240000}]"#;
+        let (normalized, paths) = normalize_queue_items_json(input).expect("normalization succeeds");
+        assert_eq!(paths, vec!["/path/2.flac"]);
+        assert!(normalized.contains("\"duration_ms\":240000"));
+    }
+
+    #[test]
+    fn test_normalize_queue_items_json_missing_duration_defaults_to_zero() {
+        let input = r#"[{"id":"t3","path":"/path/3.flac","title":"Title 3","artist":"Artist 3"}]"#;
+        let (normalized, paths) = normalize_queue_items_json(input).expect("normalization succeeds");
+        assert_eq!(paths, vec!["/path/3.flac"]);
+        assert!(normalized.contains("\"duration_ms\":0"));
+    }
+
+    #[test]
+    fn test_is_rejected_2_detection() {
+        assert!(is_rejected_2(&Err("NAE_BASE_ERR_PARSE = -2".to_string())));
+        assert!(is_rejected_2(&Err("播放失败：command 被拒绝（-2）".to_string())));
+        assert!(is_rejected_2(&Err("rejected with -2".to_string())));
+        assert!(!is_rejected_2(&Err("different error".to_string())));
+        assert!(!is_rejected_2(&Ok(())));
     }
 }

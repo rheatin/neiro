@@ -20,7 +20,7 @@ import {
   userQueue,
 } from "../../state/queue";
 import { trackForPath } from "../../state/catalog";
-import { playQueueAt, playTrack } from "../../state/player";
+import { playQueue, playQueueAt, playTrack } from "../../state/player";
 import { Cover } from "../ui/cover";
 import { Digits } from "../ui/digits";
 import { Icon } from "../ui/icons";
@@ -31,14 +31,30 @@ import { PlayingBars } from "../ui/playing";
 /** One queue row: its place, cover, title and artist, and its length. A
  * press plays it (the engine's queue is the order, so playing a later entry
  * is `play` of that path — the rest stays queued after it). */
-function QueueRow(props: { path: string; index: number; current: boolean }) {
+function QueueRow(props: {
+  path: string;
+  title?: string;
+  artist?: string;
+  durationMs?: number;
+  index: number;
+  current: boolean;
+  onPlay?: () => void;
+  onRemove?: () => void;
+}) {
   const track = (): Track | undefined => trackForPath(props.path);
+  const displayTitle = () => props.title || track()?.title || props.path.split(/[\\/]/).pop() || "—";
+  const displayArtist = () => props.artist || track()?.artist || "—";
+  const displayDuration = () => props.durationMs ?? track()?.durationMs ?? 0;
+
   return (
     <View class="group w-full flex-row items-center gap-2 rounded-(--radius) px-2 py-1 hover:bg-row-hover">
       <Button
-        accessibilityLabel={props.current ? `正在播放：${track()?.title || "曲目"}` : `播放：${track()?.title || "曲目"}`}
+        accessibilityLabel={props.current ? `正在播放：${displayTitle()}` : `播放：${displayTitle()}`}
         disabled={props.current}
-        onPress={() => playQueueAt(props.index)}
+        onPress={() => {
+          if (props.onPlay) props.onPlay();
+          else playQueueAt(props.index);
+        }}
         class={`min-w-0 flex-1 flex-row items-center gap-2 text-left ${focusRing}`}
       >
         <View class="w-4 items-center shrink-0">
@@ -49,16 +65,19 @@ function QueueRow(props: { path: string; index: number; current: boolean }) {
         <Cover path={props.path} size={28} fallback="music" />
         <View class="min-w-0 flex-1 gap-0.5">
           <Text class={`line-clamp-1 text-xs ${props.current ? "font-bold text-foreground" : "text-foreground"}`}>
-            {track()?.title || props.path.split(/[\\/]/).pop() || "—"}
+            {displayTitle()}
           </Text>
-          <Text class="line-clamp-1 text-[10px] text-muted-foreground">{track()?.artist || "—"}</Text>
+          <Text class="line-clamp-1 text-[10px] text-muted-foreground">{displayArtist()}</Text>
         </View>
-        <Digits class="text-[10px] text-muted-foreground shrink-0">{clock(track()?.durationMs ?? 0, true)}</Digits>
+        <Digits class="text-[10px] text-muted-foreground shrink-0">{clock(displayDuration(), true)}</Digits>
       </Button>
       <If when={!props.current}>
         <Button
           accessibilityLabel="移出待播"
-          onPress={() => removeFromQueue(props.index)}
+          onPress={() => {
+            if (props.onRemove) props.onRemove();
+            else removeFromQueue(props.index);
+          }}
           class={`shrink-0 items-center justify-center rounded-(--radius) p-1 opacity-0 transition duration-150 ease-out group-hover:opacity-100 hover:bg-muted active:opacity-60 motion-reduce:transition-none ${focusRing}`}
         >
           <Icon name="close" size={12} color="muted-foreground" />
@@ -159,18 +178,44 @@ export function QueuePanel() {
         >
           <View class="gap-0.5">
             <If when={snap() && cQueue().length > 0} else={
-              <Each of={rest()} key={(path) => path}>
+              <Each of={rest()} key={(path, i) => `${path}_${i}`}>
                 {(path, i) => <QueueRow path={path()} index={(queueIndex() ?? 0) + i() + 1} current={false} />}
               </Each>
             }>
               <Each of={cQueue()} key={(item) => item.id}>
-                {(item, i) => (
-                  <QueueRow
-                    path={item().path}
-                    index={(queueIndex() ?? 0) + uQueue().length + i() + 1}
-                    current={false}
-                  />
-                )}
+                {(item, i) => {
+                  const playContextFromHere = () => {
+                    const all = cQueue();
+                    const tracks: Track[] = all.map((it) => trackForPath(it.path) ?? {
+                      path: it.path,
+                      title: it.title ?? "",
+                      artist: it.artist ?? "",
+                      album: "",
+                      albumArtist: "",
+                      discNo: 0,
+                      trackNo: 0,
+                      year: 0,
+                      genre: "",
+                      durationMs: it.durationMs ?? 0,
+                      sampleRate: 0,
+                      bits: 0,
+                      channels: 0,
+                    });
+                    playQueue(tracks, i());
+                  };
+                  return (
+                    <QueueRow
+                      path={item().path}
+                      title={item().title}
+                      artist={item().artist}
+                      durationMs={item().durationMs}
+                      index={i()}
+                      current={false}
+                      onPlay={playContextFromHere}
+                      onRemove={() => removeUserItem(item().id)}
+                    />
+                  );
+                }}
               </Each>
             </If>
           </View>

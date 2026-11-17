@@ -208,6 +208,7 @@ export interface QueueItem {
   title?: string;
   artist?: string;
   durationMs: number;
+  duration_ms?: number;
 }
 
 export interface QueueSnapshot {

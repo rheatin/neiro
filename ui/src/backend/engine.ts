@@ -268,9 +268,9 @@ function deviceOf(n: NativeDevice): Device {
 
 function queueOf(n: NativeQueue | null | undefined): Queue {
   let snapshot: QueueSnapshot | null = null;
-  if ((n as any)?.snapshotJson) {
+  if (n?.snapshotJson) {
     try {
-      const parsed = JSON.parse((n as any).snapshotJson);
+      const parsed = JSON.parse(n.snapshotJson);
       snapshot = {
         current: parsed.current ?? null,
         userQueue: parsed.user_queue ?? parsed.userQueue ?? [],
@@ -279,7 +279,9 @@ function queueOf(n: NativeQueue | null | undefined): Queue {
         repeatMode: (parsed.repeat_mode ?? parsed.repeatMode ?? "off").toLowerCase() as RepeatMode,
         shuffleEnabled: parsed.shuffle_enabled ?? parsed.shuffleEnabled ?? false,
       };
-    } catch {}
+    } catch (e) {
+      console.warn("neiro: 解析 queue snapshotJson 失败:", String(e));
+    }
   }
   return {
     queue: (n?.queue ?? []).map(text),
@@ -582,7 +584,7 @@ export class Engine implements Backend {
 
   /** Asks the server one item; the outcome arrives on `subscribeRemoteProbe`. */
   probeRemote(): void {
-    this.#command((base) => (base as any).probeRemote());
+    this.#command((base) => base.probeRemote());
   }
 
   /** The answer to one online lyrics search, as the provider returned it. */
@@ -689,40 +691,55 @@ export class Engine implements Backend {
   }
 
   previous(): void {
-    this.#command((base) => (base as any).previous());
+    this.#command((base) => base.previous());
   }
 
   playContext(items: QueueItem[], startIndex = 0): void {
-    this.#command((base) => (base as any).playContext(JSON.stringify(items), startIndex));
+    const serialized = items.map((i) => ({
+      ...i,
+      duration_ms: i.duration_ms ?? i.durationMs ?? 0,
+      durationMs: i.durationMs ?? i.duration_ms ?? 0,
+    }));
+    this.#command((base) => base.playContext(JSON.stringify(serialized), startIndex));
   }
 
   playNext(items: QueueItem[]): void {
-    this.#command((base) => (base as any).playNext(JSON.stringify(items)));
+    const serialized = items.map((i) => ({
+      ...i,
+      duration_ms: i.duration_ms ?? i.durationMs ?? 0,
+      durationMs: i.durationMs ?? i.duration_ms ?? 0,
+    }));
+    this.#command((base) => base.playNext(JSON.stringify(serialized)));
   }
 
   playLater(items: QueueItem[]): void {
-    this.#command((base) => (base as any).playLater(JSON.stringify(items)));
+    const serialized = items.map((i) => ({
+      ...i,
+      duration_ms: i.duration_ms ?? i.durationMs ?? 0,
+      durationMs: i.durationMs ?? i.duration_ms ?? 0,
+    }));
+    this.#command((base) => base.playLater(JSON.stringify(serialized)));
   }
 
   setRepeatMode(mode: RepeatMode): void {
     const num = mode === "all" ? 1 : mode === "one" ? 2 : 0;
-    this.#command((base) => (base as any).setRepeatMode(num));
+    this.#command((base) => base.setRepeatMode(num));
   }
 
   setShuffleMode(enabled: boolean): void {
-    this.#command((base) => (base as any).setShuffleMode(enabled));
+    this.#command((base) => base.setShuffleMode(enabled));
   }
 
   removeQueueItem(id: string): void {
-    this.#command((base) => (base as any).removeQueueItem(id));
+    this.#command((base) => base.removeQueueItem(id));
   }
 
   clearUserQueue(): void {
-    this.#command((base) => (base as any).clearUserQueue());
+    this.#command((base) => base.clearUserQueue());
   }
 
   moveUserQueueItem(from: number, to: number): void {
-    this.#command((base) => (base as any).moveUserQueueItem(from, to));
+    this.#command((base) => base.moveUserQueueItem(from, to));
   }
 
   seek(seconds: number): void {
@@ -730,7 +747,7 @@ export class Engine implements Backend {
   }
 
   releaseDevice(): void {
-    this.#command((base) => (base as any).releaseDevice());
+    this.#command((base) => base.releaseDevice());
   }
 
   setVolume(gainValue: number): void {
@@ -858,7 +875,7 @@ export class Engine implements Backend {
   }
 
   setRemoteWebdav(baseUrl: string, user: string, password: string): void {
-    this.#command((base) => (base as any).setRemoteWebdav(baseUrl, user, password));
+    this.#command((base) => base.setRemoteWebdav(baseUrl, user, password));
   }
 
   /** 断开：丢弃内存层，磁盘缓存保留 —— 引擎自己清。 */
@@ -870,16 +887,14 @@ export class Engine implements Backend {
   /** Writes words into the file's own tag. The caller confirms first: this
    * is the only call that changes an audio file. */
   writeLyrics(path: string, text: string): void {
-    this.#command((base) => (base as any).writeLyrics(path, text));
+    this.#command((base) => base.writeLyrics(path, text));
   }
 
   /** Asks the online provider for this track's words; the answer arrives on
    * `subscribeLyricsFound`. */
   searchLyrics(artist: string, title: string, album: string, durationS: number | null): void {
     this.#command((base) => {
-      const search = (base as any).searchLyrics;
-      if (typeof search !== "function") throw new Error("E_LYRICS: 这个构建没有歌词搜索。");
-      search.call(base, artist, title, album ?? null, durationS ?? null);
+      base.searchLyrics(artist, title, album ?? null, durationS ?? null);
     });
   }
 
@@ -907,25 +922,27 @@ export class Engine implements Backend {
     const base = this.#base;
     if (!base) return [];
     try {
-      const json = (base as any).remoteProviders();
+      const json = base.remoteProviders();
       const parsed = typeof json === "string" ? JSON.parse(json) : json;
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
+      return Array.isArray(parsed) ? (parsed as ProviderDescriptor[]) : [];
+    } catch (e) {
+      console.warn("neiro: 读取 remoteProviders 失败:", String(e));
       return [];
     }
   }
 
   setRemote(kind: string, params: Record<string, string>): void {
-    this.#command((base) => (base as any).setRemote(kind, JSON.stringify(params)));
+    this.#command((base) => base.setRemote(kind, JSON.stringify(params)));
   }
 
   listPlugins(): PluginInfo[] {
     const base = this.#base;
     if (!base) return [];
     try {
-      const raw = (base as any).listPlugins?.() ?? "[]";
+      const raw = base.listPlugins();
       return typeof raw === "string" ? (JSON.parse(raw) as PluginInfo[]) : (raw as PluginInfo[]);
-    } catch {
+    } catch (e) {
+      console.warn("neiro: 读取 listPlugins 失败:", String(e));
       return [];
     }
   }
@@ -934,9 +951,9 @@ export class Engine implements Backend {
     const base = this.#base;
     if (!base) return;
     try {
-      (base as any).setPluginEnabled?.(id, enabled);
+      base.setPluginEnabled(id, enabled);
     } catch (e) {
-      console.warn("neiro: setPluginEnabled error:", e);
+      console.warn("neiro: setPluginEnabled 失败:", String(e));
     }
   }
 
@@ -944,9 +961,10 @@ export class Engine implements Backend {
     const base = this.#base;
     if (!base) return [];
     try {
-      const raw = (base as any).reloadPlugins?.() ?? "[]";
+      const raw = base.reloadPlugins();
       return typeof raw === "string" ? (JSON.parse(raw) as PluginInfo[]) : (raw as PluginInfo[]);
-    } catch {
+    } catch (e) {
+      console.warn("neiro: reloadPlugins 失败:", String(e));
       return [];
     }
   }
@@ -955,14 +973,15 @@ export class Engine implements Backend {
     const base = this.#base;
     if (!base) return { path, folders: [], tracks: [] };
     try {
-      const json = (base as any).listDirectory(path);
+      const json = base.listDirectory(path);
       const parsed = typeof json === "string" ? JSON.parse(json) : json;
       return {
         path: typeof parsed.path === "string" ? parsed.path : path,
         folders: Array.isArray(parsed.folders) ? parsed.folders : [],
         tracks: Array.isArray(parsed.tracks) ? parsed.tracks.map(trackOf) : [],
       };
-    } catch {
+    } catch (e) {
+      console.warn("neiro: listDirectory 失败:", String(e));
       return { path, folders: [], tracks: [] };
     }
   }
