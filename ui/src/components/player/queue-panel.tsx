@@ -38,6 +38,7 @@ function QueueRow(props: {
   durationMs?: number;
   index: number;
   current: boolean;
+  canRemove?: boolean;
   onPlay?: () => void;
   onRemove?: () => void;
 }) {
@@ -71,7 +72,7 @@ function QueueRow(props: {
         </View>
         <Digits class="text-[10px] text-muted-foreground shrink-0">{clock(displayDuration(), true)}</Digits>
       </Button>
-      <If when={!props.current}>
+      <If when={!props.current && props.canRemove !== false}>
         <Button
           accessibilityLabel="移出待播"
           onPress={() => {
@@ -211,8 +212,8 @@ export function QueuePanel() {
                       durationMs={item().durationMs}
                       index={i()}
                       current={false}
+                      canRemove={false}
                       onPlay={playContextFromHere}
-                      onRemove={() => removeUserItem(item().id)}
                     />
                   );
                 }}

@@ -288,7 +288,7 @@ export function policyJson(
   rate: RateKind,
   fixedRate: number,
   share: "exclusive" | "shared",
-  dither: DitherKind = "auto",
+  dither: DitherKind = currentDither(),
   dsd: DsdPolicy = currentDsdPolicy(),
 ): string {
   const ratePart =
@@ -301,15 +301,11 @@ export function applyPolicy(
   rate: RateKind,
   fixedRate: number,
   share: "exclusive" | "shared",
-  dither: DitherKind = "auto",
+  dither: DitherKind = currentDither(),
   dsd: DsdPolicy = currentDsdPolicy(),
 ): void {
   const json = policyJson(rate, fixedRate, share, dither, dsd);
-  try {
-    engine.setPolicy(json);
-  } catch (e) {
-    console.warn("neiro: setPolicy failed:", String(e));
-  }
+  engine.setPolicy(json);
   const saved: StoredPolicy = { rate, fixedRate, share, dither, dsd };
   void Storage.setItem(POLICY_KEY, JSON.stringify(saved)).catch((e) =>
     console.warn("neiro: policy save failed:", String(e)),

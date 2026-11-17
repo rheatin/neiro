@@ -438,27 +438,72 @@ export function playQueue(rows: Track[], firstIndex = 0): void {
     }
   }
 
-  // 首曲已是本地/已缓存。对于其余项：
-  // 若含 remote://，尝试解析已缓存路径；若未缓存则过滤掉（防止 C++ 解码器打开失败）。
-  const validItems: QueueItem[] = [];
-  let adjustedIndex = 0;
-  for (let i = 0; i < rows.length; i++) {
-    const t = rows[i];
-    if (i === idx) {
-      adjustedIndex = validItems.length;
-      validItems.push(trackToQueueItem(t));
-    } else if (t.path.startsWith("remote://")) {
-      const resolved = remoteHooks?.resolveRemotePath?.(t.path);
-      if (resolved) {
-        validItems.push(trackToQueueItem({ ...t, path: resolved }));
-      }
-    } else {
-      validItems.push(trackToQueueItem(t));
-    }
-  }
+  // 首曲已是本地/已缓存。检查首曲之后的待播项是否存在尚未缓存的 remote:// 曲目：
+  const subsequentRows = rows.slice(idx + 1);
+  const hasUncachedRemote = subsequentRows.some(
+    (t) => t.path.startsWith("remote://") && !remoteHooks?.resolveRemotePath?.(t.path),
+  );
 
-  if (validItems.length > 0) {
-    engine.playContext(validItems, adjustedIndex);
+  if (hasUncachedRemote) {
+    // 首曲启动后对后续最多 QUEUE_AHEAD（10 首）按序通过 withRemotePathByPath 串行拉取并调用 engine.playLater 入队
+    engine.playContext([trackToQueueItem(first)], 0);
+    const rest = subsequentRows.slice(0, QUEUE_AHEAD);
+    const step = (i: number) => {
+      if (i >= rest.length) return;
+      const t = rest[i];
+      if (t.path.startsWith("remote://")) {
+        const resolved = remoteHooks?.resolveRemotePath?.(t.path);
+        if (resolved) {
+          try {
+            engine.playLater([trackToQueueItem({ ...t, path: resolved })]);
+          } catch (e) {
+            console.warn("neiro: 远程排队失败:", String(e));
+          }
+          step(i + 1);
+        } else {
+          const handled = remoteHooks?.withRemotePathByPath(t.path, (cachedPath) => {
+            try {
+              engine.playLater([trackToQueueItem({ ...t, path: cachedPath })]);
+            } catch (e) {
+              console.warn("neiro: 远程排队失败:", String(e));
+            }
+            step(i + 1);
+          });
+          if (!handled) {
+            step(i + 1);
+          }
+        }
+      } else {
+        try {
+          engine.playLater([trackToQueueItem(t)]);
+        } catch (e) {
+          console.warn("neiro: 排队失败:", String(e));
+        }
+        step(i + 1);
+      }
+    };
+    step(0);
+  } else {
+    const validItems: QueueItem[] = [];
+    let adjustedIndex = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const t = rows[i];
+      if (i === idx) {
+        adjustedIndex = validItems.length;
+        validItems.push(trackToQueueItem(t));
+      } else if (t.path.startsWith("remote://")) {
+        const resolved = remoteHooks?.resolveRemotePath?.(t.path);
+        if (resolved) {
+          validItems.push(trackToQueueItem({ ...t, path: resolved }));
+        }
+      } else {
+        validItems.push(trackToQueueItem(t));
+      }
+    }
+
+    if (validItems.length > 0) {
+      engine.playContext(validItems, adjustedIndex);
+    }
   }
 }
 

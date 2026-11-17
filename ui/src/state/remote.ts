@@ -5,7 +5,7 @@
 import { cleanup, computed, effect, signal, Storage, untracked } from "nsh";
 import { engine, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
-import { registerRemotePlayer, playTrack, QUEUE_AHEAD } from "./player";
+import { registerRemotePlayer, playTrack, QUEUE_AHEAD, trackToQueueItem } from "./player";
 import { registerRemoteCatalog } from "./catalog";
 import { activeSourceId, registerRemoteActivator, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
 import { shuffle, shuffled } from "./shuffle";
@@ -648,15 +648,21 @@ export function queueRemoteFrom(rows: RemoteTrack[], index: number): void {
   const queuedOther = shuffle() ? shuffled(other) : rows.slice(at + 1);
   const rest = queuedOther.slice(0, QUEUE_AHEAD);
 
-  playRemote(first);
-  const step = (i: number) => {
-    if (i >= rest.length) return;
-    withRemotePath(rest[i], (path) => {
-      engine.enqueue([path]);
-      step(i + 1);
-    });
-  };
-  step(0);
+  withRemotePath(first, (firstPath) => {
+    playTrack(asLocalTrack(first, firstPath));
+    const step = (i: number) => {
+      if (i >= rest.length) return;
+      withRemotePath(rest[i], (path) => {
+        try {
+          engine.playLater([trackToQueueItem(asLocalTrack(rest[i], path))]);
+        } catch (e) {
+          console.warn("neiro: 远程排队失败:", String(e));
+        }
+        step(i + 1);
+      });
+    };
+    step(0);
+  });
 }
 
 function unfetchId(id: string): void {
