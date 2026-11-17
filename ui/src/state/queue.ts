@@ -26,6 +26,35 @@ export const upNext = computed(() => {
 /** 当前这条在队列里的位置（`null`：没有在播的）。 */
 export const queueIndex = computed(() => queue().index);
 
+export const queueSnapshot = computed(() => queue().snapshot);
+export const userQueue = computed(() => queueSnapshot()?.userQueue ?? []);
+export const contextQueue = computed(() => queueSnapshot()?.contextQueue ?? []);
+export const historyQueue = computed(() => queueSnapshot()?.history ?? []);
+
+export function removeUserItem(id: string): void {
+  try {
+    engine.removeQueueItem(id);
+  } catch (error) {
+    reportEngineFailure(error, "移除待播项失败");
+  }
+}
+
+export function clearUserQueue(): void {
+  try {
+    engine.clearUserQueue();
+  } catch (error) {
+    reportEngineFailure(error, "清空插播队列失败");
+  }
+}
+
+export function moveUserItem(from: number, to: number): void {
+  try {
+    engine.moveUserQueueItem(from, to);
+  } catch (error) {
+    reportEngineFailure(error, "移动待播项失败");
+  }
+}
+
 /** 加入待播：把这些路径追加到引擎队列的末尾。已经在队列里的不重复加
  * （引擎的队列是事实，重复项会在播放时表现为同一首播两遍）。 */
 export function addToQueue(paths: string[]): void {

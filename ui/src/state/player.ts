@@ -12,6 +12,8 @@ import {
   positionAt,
   EMPTY_PLAYER,
   type Player,
+  type QueueItem,
+  type RepeatMode,
   type Track,
 } from "../backend/types";
 import { notify } from "./feedback";
@@ -255,6 +257,47 @@ export function pause(): void {
   if (isPlaying()) toggle();
 }
 
+export function trackToQueueItem(t: Track): QueueItem {
+  return {
+    id: t.path,
+    path: t.path,
+    title: t.title,
+    artist: t.artist,
+    durationMs: t.durationMs,
+  };
+}
+
+export const repeatMode = signal<RepeatMode>("off");
+export const shuffleMode = signal<boolean>(false);
+
+export function cycleRepeatMode(): void {
+  const current = repeatMode();
+  const next: RepeatMode = current === "off" ? "all" : current === "all" ? "one" : "off";
+  repeatMode.set(next);
+  engine.setRepeatMode(next);
+}
+
+export function setRepeatMode(mode: RepeatMode): void {
+  repeatMode.set(mode);
+  engine.setRepeatMode(mode);
+}
+
+export function toggleShuffle(): void {
+  const next = !shuffleMode();
+  shuffleMode.set(next);
+  engine.setShuffleMode(next);
+}
+
+export function playNextTrack(track: Track): void {
+  engine.playNext([trackToQueueItem(track)]);
+  notify(`已设为下一首播放：${track.title || "曲目"}`);
+}
+
+export function playLaterTrack(track: Track): void {
+  engine.playLater([trackToQueueItem(track)]);
+  notify(`已设为稍后播放：${track.title || "曲目"}`);
+}
+
 /** Plays one track: the queue becomes it and it starts. What shows the
  * moment it is picked is itself, playing, until the engine names its own
  * state. */
@@ -272,12 +315,7 @@ export function playTrack(track: Track): void {
       at,
     },
     () => {
-      if (track.path.startsWith("remote://")) {
-        if (remoteHooks?.playRemoteByPath(track.path)) {
-          return;
-        }
-      }
-      engine.play(track.path);
+      engine.playContext([trackToQueueItem(track)], 0);
     },
     "播放失败",
   );
@@ -294,8 +332,8 @@ export const QUEUE_AHEAD = 10;
 export function playFromRows(rows: Track[], index: number): void {
   if (rows.length === 0) return;
   const at = Math.min(Math.max(index, 0), rows.length - 1);
-  const pick = rows.slice(at, at + QUEUE_AHEAD + 1);
-  playQueue(pick, 0);
+  const items = rows.map(trackToQueueItem);
+  engine.playContext(items, at);
 }
 
 function enqueueMixed(tracks: Track[]): void {
@@ -328,23 +366,8 @@ function enqueueMixed(tracks: Track[]): void {
 export function playQueue(rows: Track[], firstIndex = 0): void {
   if (rows.length === 0) return;
   const idx = Math.min(Math.max(firstIndex, 0), rows.length - 1);
-  const first = rows[idx];
-  const rest = rows.filter((_, i) => i !== idx);
-  const queue = shuffle() ? shuffled(rest) : rest;
-  const ahead = queue.slice(0, QUEUE_AHEAD);
-
-  if (first.path.startsWith("remote://")) {
-    if (
-      remoteHooks?.withRemotePathByPath(first.path, (firstPath) => {
-        playTrack({ ...first, path: firstPath });
-        enqueueMixed(ahead);
-      })
-    ) {
-      return;
-    }
-  }
-  playTrack(first);
-  enqueueMixed(ahead);
+  const items = rows.map(trackToQueueItem);
+  engine.playContext(items, idx);
 }
 
 export function playQueueAt(index: number): void {
@@ -378,12 +401,10 @@ export function playQueueAt(index: number): void {
 
 export function prev(): void {
   if (!canPrev()) return;
-  const pos = position();
-  const curIdx = queue().index ?? 0;
-  if (pos > 3000 || curIdx <= 0) {
-    seek(0);
-  } else {
-    playQueueAt(curIdx - 1);
+  try {
+    engine.previous();
+  } catch (error) {
+    reportEngineFailure(error, "上一曲失败");
   }
 }
 

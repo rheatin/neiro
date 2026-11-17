@@ -45,6 +45,15 @@ type ListDirectoryFn = unsafe extern "C" fn(base: *mut c_void, path: *const c_ch
 type ListPluginsFn = unsafe extern "C" fn() -> *mut c_char;
 type SetPluginEnabledFn = unsafe extern "C" fn(base: *mut c_void, plugin_id: *const c_char, enabled: std::os::raw::c_int) -> std::os::raw::c_int;
 type ReloadPluginsFn = unsafe extern "C" fn(base: *mut c_void) -> *mut c_char;
+type PlayContextFn = unsafe extern "C" fn(base: *mut c_void, items_json: *const c_char, start_index: usize) -> i32;
+type PlayNextFn = unsafe extern "C" fn(base: *mut c_void, items_json: *const c_char) -> i32;
+type PlayLaterFn = unsafe extern "C" fn(base: *mut c_void, items_json: *const c_char) -> i32;
+type SetRepeatModeFn = unsafe extern "C" fn(base: *mut c_void, mode: i32) -> i32;
+type SetShuffleModeFn = unsafe extern "C" fn(base: *mut c_void, enabled: bool) -> i32;
+type PreviousFn = unsafe extern "C" fn(base: *mut c_void) -> i32;
+type RemoveQueueItemFn = unsafe extern "C" fn(base: *mut c_void, id_json: *const c_char) -> i32;
+type ClearUserQueueFn = unsafe extern "C" fn(base: *mut c_void) -> i32;
+type MoveUserQueueItemFn = unsafe extern "C" fn(base: *mut c_void, from_idx: usize, to_idx: usize) -> i32;
 
 /// A running Base. Dropping it unsubscribes (so no callback ever runs on
 /// freed memory), shuts Base down and releases the DLL.
@@ -60,6 +69,15 @@ pub struct Engine {
     list_plugins: Option<ListPluginsFn>,
     set_plugin_enabled: Option<SetPluginEnabledFn>,
     reload_plugins: Option<ReloadPluginsFn>,
+    play_context: Option<PlayContextFn>,
+    play_next: Option<PlayNextFn>,
+    play_later: Option<PlayLaterFn>,
+    set_repeat_mode: Option<SetRepeatModeFn>,
+    set_shuffle_mode: Option<SetShuffleModeFn>,
+    previous: Option<PreviousFn>,
+    remove_queue_item: Option<RemoveQueueItemFn>,
+    clear_user_queue: Option<ClearUserQueueFn>,
+    move_user_queue_item: Option<MoveUserQueueItemFn>,
     /// The subscription's context; freed in `Drop`, after `unsubscribe`.
     ctx: *mut Ctx,
     _library: Library,
@@ -129,6 +147,15 @@ struct Prepared {
     list_plugins: Option<ListPluginsFn>,
     set_plugin_enabled: Option<SetPluginEnabledFn>,
     reload_plugins: Option<ReloadPluginsFn>,
+    play_context: Option<PlayContextFn>,
+    play_next: Option<PlayNextFn>,
+    play_later: Option<PlayLaterFn>,
+    set_repeat_mode: Option<SetRepeatModeFn>,
+    set_shuffle_mode: Option<SetShuffleModeFn>,
+    previous: Option<PreviousFn>,
+    remove_queue_item: Option<RemoveQueueItemFn>,
+    clear_user_queue: Option<ClearUserQueueFn>,
+    move_user_queue_item: Option<MoveUserQueueItemFn>,
     library: Library,
 }
 
@@ -148,6 +175,15 @@ struct Exports {
     list_plugins: Option<ListPluginsFn>,
     set_plugin_enabled: Option<SetPluginEnabledFn>,
     reload_plugins: Option<ReloadPluginsFn>,
+    play_context: Option<PlayContextFn>,
+    play_next: Option<PlayNextFn>,
+    play_later: Option<PlayLaterFn>,
+    set_repeat_mode: Option<SetRepeatModeFn>,
+    set_shuffle_mode: Option<SetShuffleModeFn>,
+    previous: Option<PreviousFn>,
+    remove_queue_item: Option<RemoveQueueItemFn>,
+    clear_user_queue: Option<ClearUserQueueFn>,
+    move_user_queue_item: Option<MoveUserQueueItemFn>,
 }
 
 impl Engine {
@@ -260,6 +296,15 @@ impl Engine {
             list_plugins: exports.list_plugins,
             set_plugin_enabled: exports.set_plugin_enabled,
             reload_plugins: exports.reload_plugins,
+            play_context: exports.play_context,
+            play_next: exports.play_next,
+            play_later: exports.play_later,
+            set_repeat_mode: exports.set_repeat_mode,
+            set_shuffle_mode: exports.set_shuffle_mode,
+            previous: exports.previous,
+            remove_queue_item: exports.remove_queue_item,
+            clear_user_queue: exports.clear_user_queue,
+            move_user_queue_item: exports.move_user_queue_item,
             library: library_file,
         })
     }
@@ -363,6 +408,124 @@ impl Engine {
         }
         fallback_list_plugins_json()
     }
+
+    pub fn play_context(&self, items_json: &str, start_index: usize) -> Result<(), String> {
+        if let Some(func) = self.play_context {
+            let c_json = CString::new(items_json).map_err(|e| e.to_string())?;
+            let code = unsafe { func(self.base, c_json.as_ptr(), start_index) };
+            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: play_context failed ({code})")) }
+        } else {
+            let items: serde_json::Value = serde_json::from_str(items_json).map_err(|e| e.to_string())?;
+            let cmd = serde_json::json!({
+                "command": "play_context",
+                "items": items,
+                "start_index": start_index
+            });
+            self.command(&cmd.to_string())
+        }
+    }
+
+    pub fn play_next(&self, items_json: &str) -> Result<(), String> {
+        if let Some(func) = self.play_next {
+            let c_json = CString::new(items_json).map_err(|e| e.to_string())?;
+            let code = unsafe { func(self.base, c_json.as_ptr()) };
+            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: play_next failed ({code})")) }
+        } else {
+            let items: serde_json::Value = serde_json::from_str(items_json).map_err(|e| e.to_string())?;
+            let cmd = serde_json::json!({
+                "command": "play_next",
+                "items": items,
+            });
+            self.command(&cmd.to_string())
+        }
+    }
+
+    pub fn play_later(&self, items_json: &str) -> Result<(), String> {
+        if let Some(func) = self.play_later {
+            let c_json = CString::new(items_json).map_err(|e| e.to_string())?;
+            let code = unsafe { func(self.base, c_json.as_ptr()) };
+            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: play_later failed ({code})")) }
+        } else {
+            let items: serde_json::Value = serde_json::from_str(items_json).map_err(|e| e.to_string())?;
+            let cmd = serde_json::json!({
+                "command": "play_later",
+                "items": items,
+            });
+            self.command(&cmd.to_string())
+        }
+    }
+
+    pub fn set_repeat_mode(&self, mode: i32) -> Result<(), String> {
+        if let Some(func) = self.set_repeat_mode {
+            let code = unsafe { func(self.base, mode) };
+            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: set_repeat_mode failed ({code})")) }
+        } else {
+            let mode_str = match mode {
+                1 => "All",
+                2 => "One",
+                _ => "Off",
+            };
+            let cmd = serde_json::json!({
+                "command": "set_repeat_mode",
+                "mode": mode_str,
+            });
+            self.command(&cmd.to_string())
+        }
+    }
+
+    pub fn set_shuffle_mode(&self, enabled: bool) -> Result<(), String> {
+        if let Some(func) = self.set_shuffle_mode {
+            let code = unsafe { func(self.base, enabled) };
+            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: set_shuffle_mode failed ({code})")) }
+        } else {
+            let cmd = serde_json::json!({
+                "command": "set_shuffle_mode",
+                "enabled": enabled,
+            });
+            self.command(&cmd.to_string())
+        }
+    }
+
+    pub fn previous(&self) -> Result<(), String> {
+        if let Some(func) = self.previous {
+            let code = unsafe { func(self.base) };
+            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: previous failed ({code})")) }
+        } else {
+            let cmd = serde_json::json!({ "command": "previous" });
+            self.command(&cmd.to_string())
+        }
+    }
+
+    pub fn remove_queue_item(&self, id: &str) -> Result<(), String> {
+        if let Some(func) = self.remove_queue_item {
+            let c_id = CString::new(id).map_err(|e| e.to_string())?;
+            let code = unsafe { func(self.base, c_id.as_ptr()) };
+            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: remove_queue_item failed ({code})")) }
+        } else {
+            let cmd = serde_json::json!({ "command": "remove_queue_item", "id": id });
+            self.command(&cmd.to_string())
+        }
+    }
+
+    pub fn clear_user_queue(&self) -> Result<(), String> {
+        if let Some(func) = self.clear_user_queue {
+            let code = unsafe { func(self.base) };
+            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: clear_user_queue failed ({code})")) }
+        } else {
+            let cmd = serde_json::json!({ "command": "clear_user_queue" });
+            self.command(&cmd.to_string())
+        }
+    }
+
+    pub fn move_user_queue_item(&self, from: usize, to: usize) -> Result<(), String> {
+        if let Some(func) = self.move_user_queue_item {
+            let code = unsafe { func(self.base, from, to) };
+            if code == 0 { Ok(()) } else { Err(format!("E_ENGINE: move_user_queue_item failed ({code})")) }
+        } else {
+            let cmd = serde_json::json!({ "command": "move_user_queue_item", "from": from, "to": to });
+            self.command(&cmd.to_string())
+        }
+    }
 }
 
 impl Prepared {
@@ -395,6 +558,15 @@ impl Prepared {
                 list_plugins: self.list_plugins,
                 set_plugin_enabled: self.set_plugin_enabled,
                 reload_plugins: self.reload_plugins,
+                play_context: self.play_context,
+                play_next: self.play_next,
+                play_later: self.play_later,
+                set_repeat_mode: self.set_repeat_mode,
+                set_shuffle_mode: self.set_shuffle_mode,
+                previous: self.previous,
+                remove_queue_item: self.remove_queue_item,
+                clear_user_queue: self.clear_user_queue,
+                move_user_queue_item: self.move_user_queue_item,
                 ctx,
                 _library: self.library,
             },
@@ -449,6 +621,42 @@ impl Exports {
             reload_plugins: symbol_optional::<ReloadPluginsFn>(
                 library,
                 b"NAE_BaseReloadPlugins\0",
+            ),
+            play_context: symbol_optional::<PlayContextFn>(
+                library,
+                b"NAE_BasePlayContext\0",
+            ),
+            play_next: symbol_optional::<PlayNextFn>(
+                library,
+                b"NAE_BasePlayNext\0",
+            ),
+            play_later: symbol_optional::<PlayLaterFn>(
+                library,
+                b"NAE_BasePlayLater\0",
+            ),
+            set_repeat_mode: symbol_optional::<SetRepeatModeFn>(
+                library,
+                b"NAE_BaseSetRepeatMode\0",
+            ),
+            set_shuffle_mode: symbol_optional::<SetShuffleModeFn>(
+                library,
+                b"NAE_BaseSetShuffleMode\0",
+            ),
+            previous: symbol_optional::<PreviousFn>(
+                library,
+                b"NAE_BasePrevious\0",
+            ),
+            remove_queue_item: symbol_optional::<RemoveQueueItemFn>(
+                library,
+                b"NAE_BaseRemoveQueueItem\0",
+            ),
+            clear_user_queue: symbol_optional::<ClearUserQueueFn>(
+                library,
+                b"NAE_BaseClearUserQueue\0",
+            ),
+            move_user_queue_item: symbol_optional::<MoveUserQueueItemFn>(
+                library,
+                b"NAE_BaseMoveUserQueueItem\0",
             ),
         })
     }
@@ -939,6 +1147,8 @@ pub struct Snapshot {
     pub render_path: Option<RenderPath>,
     pub queue: Vec<String>,
     pub queue_index: Option<usize>,
+    #[serde(default)]
+    pub queue_snapshot: Option<serde_json::Value>,
     pub analysis: Option<Analysis>,
     pub settings: Option<Settings>,
     /// The engine's resolved path for this track, as a diagnostics JSON of
@@ -1072,6 +1282,9 @@ pub enum WireEvent {
     /// One visualiser frame, at the rate the host asked for.
     VisualFrame {
         frame: VisualFrame,
+    },
+    QueueDirectorChanged {
+        snapshot: serde_json::Value,
     },
     QueueChanged {
         queue: Vec<String>,

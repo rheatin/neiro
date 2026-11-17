@@ -200,9 +200,29 @@ export interface Device {
   supportedSampleRates: number[];
 }
 
+export type RepeatMode = "off" | "all" | "one";
+
+export interface QueueItem {
+  id: string;
+  path: string;
+  title?: string;
+  artist?: string;
+  durationMs: number;
+}
+
+export interface QueueSnapshot {
+  current: QueueItem | null;
+  userQueue: QueueItem[];
+  contextQueue: QueueItem[];
+  history: QueueItem[];
+  repeatMode: RepeatMode;
+  shuffleEnabled: boolean;
+}
+
 export interface Queue {
   queue: string[];
   index: number | null;
+  snapshot?: QueueSnapshot | null;
 }
 
 /** 应用 DSP 参数，按 wire 的原样回读（引擎不发明默认值）。 */

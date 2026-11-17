@@ -15,6 +15,7 @@ export type IconName =
   | "volume" | "volumeLow" | "volumeMute" | "info"
   | "play" | "pause" | "skipBack" | "skipForward"
   | "heart" | "heartFilled" | "plus" | "sparkles" | "server" | "shuffle"
+  | "repeat" | "repeatOnce"
   | "dots" | "queue" | "settings";
 
 // Tabler Icons, outline (1pt in the source files; drawn here at 1.5) and
@@ -38,6 +39,8 @@ const BODY: Record<IconName, string> = {
   // 随机播放（Feather 的 shuffle 几何：两条交叉线加两枚箭头；同为描边
   // 风格，笔画与 Tabler 一致画 1.5）。
   shuffle: '<path d="M16 3h5v5" /><path d="M4 20L21 3" /><path d="M21 16v5h-5" /><path d="M15 15l6 6" /><path d="M4 4l5 5" />',
+  repeat: '<path d="M4 12v-3a3 3 0 0 1 3 -3h13m-3 -3l3 3l-3 3" /><path d="M20 12v3a3 3 0 0 1 -3 3h-13m3 3l-3 -3l3 -3" />',
+  repeatOnce: '<path d="M4 12v-3a3 3 0 0 1 3 -3h13m-3 -3l3 3l-3 3" /><path d="M20 12v3a3 3 0 0 1 -3 3h-13m3 3l-3 -3l3 -3" /><path d="M11 11l1 -1v4" />',
   folderPlus: '<path d="M12 19h-7a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v3.5" /><path d="M16 19h6" /><path d="M19 16v6" />',
   refresh: '<path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4" /><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4" />',
   close: '<path d="M18 6l-12 12" /><path d="M6 6l12 12" />',

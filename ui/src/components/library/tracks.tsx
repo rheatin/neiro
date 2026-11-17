@@ -186,11 +186,15 @@ export function rowActions(track: Track | undefined, close?: () => void): MenuAc
     }
     action();
   };
+  const doPlayNext = () => track && playNextTrack(track);
+  const doPlayLater = () => track && playLaterTrack(track);
   const doQueue = () => addToQueue([path]);
   const doFav = () => toggleFavourite(path);
   const doPlayList = () => openAddToPlaylist(path);
   const doSelect = () => beginSelection(path);
   return [
+    { label: "下一首播放", onSelect: run(doPlayNext) },
+    { label: "最后播放", onSelect: run(doPlayLater) },
     { label: "加入待播", onSelect: run(doQueue) },
     { label: isFavourite(path) ? "取消收藏" : "加入红心", onSelect: run(doFav), separated: true },
     { label: "添加到曲单…", onSelect: run(doPlayList) },
@@ -212,7 +216,7 @@ import { signal, Text, untracked, View } from "nsh";
 import { Button } from "nsh/base";
 
 import { clock, trackArtist, trackTitle, type Track } from "../../backend/types";
-import { isCurrentTrack, isPlaying, playTrack } from "../../state/player";
+import { isCurrentTrack, isPlaying, playLaterTrack, playNextTrack, playTrack } from "../../state/player";
 import { ready } from "../../state/engine";
 import { isFavourite, toggleFavourite } from "../../state/user-catalog";
 import { addToQueue, beginSelection, isSelected, selectionActive, toggleSelected } from "../../state/queue";

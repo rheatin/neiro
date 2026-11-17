@@ -150,6 +150,7 @@ pub struct DeviceInfo {
 pub struct QueueInfo {
     pub queue: Vec<String>,
     pub index: Option<f64>,
+    pub snapshot_json: Option<String>,
 }
 
 /// The applied DSP parameters, read back from the session.
@@ -680,10 +681,22 @@ impl Inner {
                 self.on_settings.post(&info.clone());
                 self.settings = Some(info);
             }
+            WireEvent::QueueDirectorChanged { snapshot } => {
+                let snapshot_json = serde_json::to_string(&snapshot).ok();
+                let info = QueueInfo {
+                    queue: self.queue.as_ref().map(|q| q.queue.clone()).unwrap_or_default(),
+                    index: self.queue.as_ref().and_then(|q| q.index),
+                    snapshot_json,
+                };
+                self.on_queue.post(&info.clone());
+                self.queue = Some(info);
+            }
             WireEvent::QueueChanged { queue, index } => {
+                let snapshot_json = self.queue.as_ref().and_then(|q| q.snapshot_json.clone());
                 let info = QueueInfo {
                     queue,
                     index: index.map(|i| i as f64),
+                    snapshot_json,
                 };
                 self.on_queue.post(&info.clone());
                 self.queue = Some(info);
@@ -985,10 +998,12 @@ impl Inner {
             self.on_devices.post(&listed.clone());
             self.devices = Some(listed);
         }
-        if !snapshot.queue.is_empty() {
+        let snapshot_json = snapshot.queue_snapshot.as_ref().and_then(|s| serde_json::to_string(s).ok());
+        if !snapshot.queue.is_empty() || snapshot_json.is_some() {
             let info = QueueInfo {
                 queue: snapshot.queue.clone(),
                 index: snapshot.queue_index.map(|index| index as f64),
+                snapshot_json,
             };
             self.on_queue.post(&info.clone());
             self.queue = Some(info);
@@ -1989,6 +2004,87 @@ impl Base {
     /// Stops the current track and opens the next queue entry.
     pub fn next(&self) -> Result<(), String> {
         self.command(&serde_json::json!({ "command": "next" }))
+    }
+
+    /// Steps to previous track or seeks to 0.0 based on playback position (>3s seek 0; <=3s pop history).
+    pub fn previous(&self) -> Result<(), String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.previous(),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Apple Music dual-tier queue: plays a full context list starting at start_index.
+    pub fn play_context(&self, items_json: String, start_index: u32) -> Result<(), String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.play_context(&items_json, start_index as usize),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Apple Music dual-tier queue: inserts items to the front of the user queue (Play Next).
+    pub fn play_next(&self, items_json: String) -> Result<(), String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.play_next(&items_json),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Apple Music dual-tier queue: appends items to the back of the user queue (Play Later).
+    pub fn play_later(&self, items_json: String) -> Result<(), String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.play_later(&items_json),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Sets the repeat mode: 0 = Off, 1 = All, 2 = One.
+    pub fn set_repeat_mode(&self, mode: i32) -> Result<(), String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.set_repeat_mode(mode),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Toggles shuffle mode.
+    pub fn set_shuffle_mode(&self, enabled: bool) -> Result<(), String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.set_shuffle_mode(enabled),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Removes an item from the user queue by ID.
+    pub fn remove_queue_item(&self, id: String) -> Result<(), String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.remove_queue_item(&id),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Clears the user-specified Up Next queue.
+    pub fn clear_user_queue(&self) -> Result<(), String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.clear_user_queue(),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
+    }
+
+    /// Reorders an item in the user queue from index to index.
+    pub fn move_user_queue_item(&self, from: u32, to: u32) -> Result<(), String> {
+        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+        match engine.as_ref() {
+            Some(engine) => engine.move_user_queue_item(from as usize, to as usize),
+            None => Err("E_ENGINE: 引擎已释放".to_owned()),
+        }
     }
 
     /// Seeks to `seconds` into the track.

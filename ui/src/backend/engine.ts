@@ -60,6 +60,8 @@ import {
   type ProviderDescriptor,
   type ProviderField,
   type Queue,
+  type QueueItem,
+  type QueueSnapshot,
   type RemoteArtwork,
   type RemoteFetched,
   type RemoteItemsPage,
@@ -68,6 +70,7 @@ import {
   type RemoteStatus,
   type RemoteTrack,
   type RenderPath,
+  type RepeatMode,
   type ScanEvent,
   type SearchResults,
   type Settings,
@@ -264,7 +267,25 @@ function deviceOf(n: NativeDevice): Device {
 }
 
 function queueOf(n: NativeQueue | null | undefined): Queue {
-  return { queue: (n?.queue ?? []).map(text), index: typeof n?.index === "number" ? n.index : null };
+  let snapshot: QueueSnapshot | null = null;
+  if ((n as any)?.snapshotJson) {
+    try {
+      const parsed = JSON.parse((n as any).snapshotJson);
+      snapshot = {
+        current: parsed.current ?? null,
+        userQueue: parsed.user_queue ?? parsed.userQueue ?? [],
+        contextQueue: parsed.context_queue ?? parsed.contextQueue ?? [],
+        history: parsed.history ?? [],
+        repeatMode: (parsed.repeat_mode ?? parsed.repeatMode ?? "off").toLowerCase() as RepeatMode,
+        shuffleEnabled: parsed.shuffle_enabled ?? parsed.shuffleEnabled ?? false,
+      };
+    } catch {}
+  }
+  return {
+    queue: (n?.queue ?? []).map(text),
+    index: typeof n?.index === "number" ? n.index : null,
+    snapshot,
+  };
 }
 
 function settingsOf(n: NativeSettings | null | undefined): Settings | null {
@@ -665,6 +686,43 @@ export class Engine implements Backend {
 
   next(): void {
     this.#command((base) => base.next());
+  }
+
+  previous(): void {
+    this.#command((base) => (base as any).previous());
+  }
+
+  playContext(items: QueueItem[], startIndex = 0): void {
+    this.#command((base) => (base as any).playContext(JSON.stringify(items), startIndex));
+  }
+
+  playNext(items: QueueItem[]): void {
+    this.#command((base) => (base as any).playNext(JSON.stringify(items)));
+  }
+
+  playLater(items: QueueItem[]): void {
+    this.#command((base) => (base as any).playLater(JSON.stringify(items)));
+  }
+
+  setRepeatMode(mode: RepeatMode): void {
+    const num = mode === "all" ? 1 : mode === "one" ? 2 : 0;
+    this.#command((base) => (base as any).setRepeatMode(num));
+  }
+
+  setShuffleMode(enabled: boolean): void {
+    this.#command((base) => (base as any).setShuffleMode(enabled));
+  }
+
+  removeQueueItem(id: string): void {
+    this.#command((base) => (base as any).removeQueueItem(id));
+  }
+
+  clearUserQueue(): void {
+    this.#command((base) => (base as any).clearUserQueue());
+  }
+
+  moveUserQueueItem(from: number, to: number): void {
+    this.#command((base) => (base as any).moveUserQueueItem(from, to));
   }
 
   seek(seconds: number): void {

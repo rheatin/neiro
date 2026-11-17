@@ -10,6 +10,7 @@ import {
   canNext,
   canPrev,
   controlsEnabled,
+  cycleRepeatMode,
   dragSeek,
   dragVolume,
   durationClock,
@@ -21,9 +22,12 @@ import {
   position,
   positionClock,
   positionFill,
+  repeatMode,
   seek,
   setVolume,
+  shuffleMode,
   toggle,
+  toggleShuffle as togglePlayerShuffle,
   volumeLevel,
 } from "../../state/player";
 import { trackForPath } from "../../state/catalog";
@@ -48,25 +52,31 @@ export function TransportControls(props: {
 }) {
   const icon = () => (props.large ? 22 : 18);
   const usable = () => controlsEnabled();
+  const rep = () => repeatMode();
+  const repIcon = () => (rep() === "one" ? "repeatOnce" : "repeat");
+  const repLabel = () => (rep() === "one" ? "单曲循环" : rep() === "all" ? "全部循环" : "顺序播放");
+
   return (
     <View class={`flex-row items-center ${props.large ? "gap-6" : "gap-4"}`} role="toolbar" accessibilityLabel="播放">
       <IconButton
         name="shuffle"
-        label="随机播放"
+        label={shuffleMode() ? "随机播放（已开）" : "随机播放（已关）"}
         hint
         size={icon()}
-        pressed={shuffle()}
-        onPress={() => {
-          if (!shuffleSupported()) {
-            notify("远程曲目需先取流，暂不支持随机播放");
-            return;
-          }
-          toggleShuffle();
-        }}
+        pressed={shuffleMode()}
+        onPress={() => togglePlayerShuffle()}
       />
       <IconButton name="skipBack" label="上一曲" size={icon()} disabled={!usable() || !canPrev()} onPress={prev} />
       <PlayButton quiet={props.quiet} playing={isPlaying()} size={props.large ? 56 : 36} disabled={!ready() || !hasTrack()} onPress={toggle} />
       <IconButton name="skipForward" label="下一曲" size={icon()} disabled={!usable() || !canNext()} onPress={next} />
+      <IconButton
+        name={repIcon()}
+        label={repLabel()}
+        hint
+        size={icon()}
+        pressed={rep() !== "off"}
+        onPress={() => cycleRepeatMode()}
+      />
       {props.trail}
     </View>
   );
