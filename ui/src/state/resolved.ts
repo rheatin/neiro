@@ -9,11 +9,12 @@
 // fallback flags are all in the JSON the engine already sends, and no view
 // read them before.
 
-import { computed, signal } from "nsh";
+import { computed, signal, Storage } from "nsh";
 import { engine } from "../backend/engine";
 import type { RenderPath } from "../backend/types";
 import { trackForPath } from "./catalog";
 import { remoteTrackForPath } from "./remote";
+import { opraActive } from "./opra";
 
 /** The engine's DSD domain. */
 export type DsdMode = "pcm" | "dsd" | "pcm_to_dsd" | null;
@@ -167,6 +168,20 @@ export const resolvedPath = computed<ResolvedPath | null>(() => {
 /** The render path Base reports (the same stream, its own fields). */
 export const renderPath = (): RenderPath | null => engine.renderPath();
 
+/**
+ * Authoritative Single-Owner invariant for bit-perfect audio stream state.
+ * Evaluates both the engine's resolved render path and any host-side DSP layers
+ * (e.g. OPRA headphone calibration, crossfade, host EQ).
+ */
+export function isStreamBitPerfect(): boolean {
+  const rp = engine.renderPath();
+  if (!rp || !rp.bitPerfect) return false;
+  if (opraActive()) return false;
+  if (rp.crossfadeEnabled) return false;
+  if (engine.settings()?.crossfadeEnabled) return false;
+  return true;
+}
+
 /** How a DSD bitstream reaches the device (`null` when not DSD). */
 export const dsdTransport = (): DsdTransport => resolvedPath()?.dsdTransport ?? null;
 
@@ -251,6 +266,16 @@ export type DsdPolicy = "auto" | "dop" | "pcm";
 
 export const currentDsdPolicy = signal<DsdPolicy>("auto");
 
+const POLICY_KEY = "player:output_policy";
+
+export interface StoredPolicy {
+  rate: RateKind;
+  fixedRate: number;
+  share: "exclusive" | "shared";
+  dither?: DitherKind;
+  dsd?: DsdPolicy;
+}
+
 /** The output policy JSON, built from the *current* stream's other half.
  *
  * The engine takes one policy object at a time, so a control that changes only
@@ -269,6 +294,46 @@ export function policyJson(
   const ratePart =
     rate === "fixed" ? `{ "mode": "fixed", "rate_hz": ${Math.round(fixedRate)} }` : `{ "mode": "${rate}" }`;
   return `{ "rate": ${ratePart}, "quality": "very_high", "share": "${share}", "dither": "${dither}", "dsd_mode": "${dsd}" }`;
+}
+
+/** Apply an output policy and persist it to Storage so user preference survives restarts. */
+export function applyPolicy(
+  rate: RateKind,
+  fixedRate: number,
+  share: "exclusive" | "shared",
+  dither: DitherKind = "auto",
+  dsd: DsdPolicy = currentDsdPolicy(),
+): void {
+  const json = policyJson(rate, fixedRate, share, dither, dsd);
+  try {
+    engine.setPolicy(json);
+  } catch (e) {
+    console.warn("neiro: setPolicy failed:", String(e));
+  }
+  const saved: StoredPolicy = { rate, fixedRate, share, dither, dsd };
+  void Storage.setItem(POLICY_KEY, JSON.stringify(saved)).catch((e) =>
+    console.warn("neiro: policy save failed:", String(e)),
+  );
+}
+
+/** Restore user's persisted output policy at startup. */
+export async function restorePolicyAtStartup(): Promise<void> {
+  try {
+    const raw = await Storage.getItem(POLICY_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Partial<StoredPolicy>;
+    if (!parsed || typeof parsed !== "object") return;
+    const rate: RateKind = parsed.rate === "native" || parsed.rate === "fixed" ? parsed.rate : "device";
+    const fixedRate = typeof parsed.fixedRate === "number" ? parsed.fixedRate : 0;
+    const share: "exclusive" | "shared" = parsed.share === "exclusive" ? "exclusive" : "shared";
+    const dither: DitherKind = parsed.dither ?? "auto";
+    const dsd: DsdPolicy = parsed.dsd ?? "auto";
+    currentDsdPolicy.set(dsd);
+    const json = policyJson(rate, fixedRate, share, dither, dsd);
+    engine.setPolicy(json);
+  } catch (e) {
+    console.warn("neiro: restore policy failed:", String(e));
+  }
 }
 
 /** The dither algorithm the stream is actually applying, as the engine

@@ -20,6 +20,7 @@ import { clock, type Track } from "../../../backend/types";
 import {
   formatHz,
   isDsdSource,
+  isStreamBitPerfect,
   lastDiagnostic,
   resolvedPath,
   shareMode,
@@ -80,7 +81,7 @@ function AuditRow(props: { code: number; appCause?: boolean }) {
 /** The cause list: the engine's reason code plus the app's own layers. */
 function Audit() {
   const crossfadeOn = () => Boolean(engine.renderPath()?.crossfadeEnabled || engine.settings()?.crossfadeEnabled);
-  const bitPerfect = () => (engine.renderPath()?.bitPerfect ?? false) && !crossfadeOn() && !opraActive();
+  const bitPerfect = () => isStreamBitPerfect();
   const reason = () => engine.renderPath()?.reason ?? 0;
   const opra = () => opraActive();
   /** No open stream: there is nothing to audit, which is not the same as a

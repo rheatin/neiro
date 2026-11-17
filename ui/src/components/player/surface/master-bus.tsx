@@ -22,7 +22,7 @@ import { notify } from "../../../state/feedback";
 import { playRelay } from "../../../state/foley";
 import { player, setVolume } from "../../../state/player";
 import { opraActive, opraSelected } from "../../../state/opra";
-import { isDsdSource, policyJson, resolvedPath } from "../../../state/resolved";
+import { applyPolicy, isDsdSource, isStreamBitPerfect, policyJson, resolvedPath } from "../../../state/resolved";
 
 /** One verification lamp: a sunk card with the LED over its two-line name,
  * as the reference panel draws it. */
@@ -100,7 +100,7 @@ function exclusiveOf(path: ReturnType<typeof resolvedPath>): boolean {
 /** The whole 03 module. */
 export function MasterBus() {
   const checks = bitPerfectChecks();
-  const bitPerfect = () => (engine.renderPath()?.bitPerfect ?? false) && checks.dspClean();
+  const bitPerfect = () => isStreamBitPerfect();
   /** The blocking causes, as short panel lines: the engine's reason code and
    * the app's own OPRA layer. */
   const causes = (): string[] => {
@@ -182,7 +182,7 @@ export function MasterBus() {
     attempt("关闭 Convolver", () => engine.setConvolver(false, s.convolverIrPath, s.convolverWet, s.convolverDry, s.convolverGainDb, s.convolverNormalize));
     attempt("关闭 Crossfade", () => engine.setCrossfade(false, s.crossfadeDurationMs, s.crossfadeCurve));
     // 2. The endpoint, exclusively, at the source rate.
-    attempt("切独占 / 源速率", () => engine.setPolicy(policyJson("native", 0, "exclusive")));
+    attempt("切独占 / 源速率", () => applyPolicy("native", 0, "exclusive"));
     // 3. Unity gain.
     attempt("音量归 100%", () => setVolume(1));
     if (failures.length === 0) notify("Bit-Perfect 直通已请求：DSP 旁路、独占、音量 100%");

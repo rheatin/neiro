@@ -15,6 +15,7 @@ import { Button } from "nsh/base";
 import { player } from "../../../state/player";
 import { engine, reportEngineFailure } from "../../../backend/engine";
 import {
+  applyPolicy,
   codecLabel,
   currentDither,
   currentDsdPolicy,
@@ -26,6 +27,7 @@ import {
   dsdRateLabel,
   formatHz,
   isDsdSource,
+  isStreamBitPerfect,
   policyJson,
   resolvedPath,
   sourceBits,
@@ -337,8 +339,8 @@ export function SourceStage(props: {
   /** How much the resampler changed the rate, as the factor it multiplied by.
    * `null` when the stream is not being resampled — then the signal takes the
    * arrow with nothing in it, which is the honest picture of a bypass. */
-  /** Bit-perfect, as the engine reports it: the one claim this module makes. */
-  const bitPerfect = () => engine.renderPath()?.bitPerfect === true;
+  /** Bit-perfect, as authoritative single-owner state reports it. */
+  const bitPerfect = () => isStreamBitPerfect();
   /** A pulse is only honest while a stream is actually running. */
   const pulseRunning = () => bitPerfect() && props.playing && path()?.resampling !== true;
 
@@ -504,7 +506,7 @@ export function SourceStage(props: {
                       const share = currentShare();
                       const dither = currentDither();
                       try {
-                        engine.setPolicy(policyJson(rate.kind, rate.fixedRate, share, dither, mode()));
+                        applyPolicy(rate.kind, rate.fixedRate, share, dither, mode());
                       } catch (error) {
                         reportEngineFailure(error, "设置 DSD 策略失败");
                       }

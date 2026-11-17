@@ -14,7 +14,7 @@
 import { Text, token, View } from "nsh";
 import { HARDWARE } from "./hardware";
 import { engine } from "../../backend/engine";
-import { resolvedPath, sourceBits } from "../../state/resolved";
+import { isStreamBitPerfect, resolvedPath, sourceBits } from "../../state/resolved";
 
 /** What the source's numbers are worth, as a listener reads it. */
 export type Grade = "HI-RES+" | "HI-RES" | "CD" | "DSD" | "PCM";
@@ -210,7 +210,7 @@ a   * line to spend turns it off, so two plates never stack. */
     if (!lossless()) return null;
     return gradeOf(p.sourceRate, sourceBits() || 16, false);
   };
-  const bitPerfect = () => engine.renderPath()?.bitPerfect === true;
+  const bitPerfect = () => isStreamBitPerfect();
   return (
     <View class={`flex-row items-center gap-1 ${props.wrap === false ? "flex-nowrap" : "flex-wrap"} ${props.class ?? ""}`}>
       <If when={grade() !== null}>

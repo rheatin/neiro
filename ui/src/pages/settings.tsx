@@ -15,7 +15,7 @@ import { servers, selectSource } from "../state/sources";
 import { cachedRemoteTracks, reconnectServer, removeServerById } from "../state/remote";
 import { EFFECT_NAMES, TOOLBAR_EFFECTS, type ToolbarEffect } from "../components/ui/toolbar-fx";
 import { lightEffect, setLight, type LightChoice } from "../state/visual";
-import { resolvedPath } from "../state/resolved";
+import { isStreamBitPerfect, resolvedPath } from "../state/resolved";
 import { activeShellId, plugins } from "../state/plugins";
 export function SettingsPage() {
   const path = () => engine.renderPath();
@@ -70,10 +70,10 @@ export function SettingsPage() {
                 <View class="flex-row items-center gap-1.5">
                   <View
                     class="h-2 w-2 rounded-full"
-                    style={{ backgroundColor: path()?.bitPerfect ? "#34D399" : "#F59E0B" }}
+                    style={{ backgroundColor: isStreamBitPerfect() ? "#34D399" : "#F59E0B" }}
                   />
-                  <Text class="font-mono text-xs font-bold" style={{ color: path()?.bitPerfect ? "#34D399" : "#F59E0B" }}>
-                    {path()?.bitPerfect ? "BIT-PERFECT" : "DSP ACTIVE"}
+                  <Text class="font-mono text-xs font-bold" style={{ color: isStreamBitPerfect() ? "#34D399" : "#F59E0B" }}>
+                    {isStreamBitPerfect() ? "BIT-PERFECT" : "DSP ACTIVE"}
                   </Text>
                 </View>
               </View>

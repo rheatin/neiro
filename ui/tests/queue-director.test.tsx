@@ -6,12 +6,14 @@ import {
   playNextTrack,
   playTrack,
   prev,
+  registerRemotePlayer,
   repeatMode,
   setRepeatMode,
   shuffleMode,
   toggleShuffle,
   trackToQueueItem,
 } from "../src/state/player";
+import { isStreamBitPerfect } from "../src/state/resolved";
 import { engine } from "../src/backend/engine";
 import type { Track } from "../src/backend/types";
 
@@ -87,6 +89,7 @@ test("QueueDirector UI 状态：Track 转换为标准的 QueueItem 并支持 Pla
   expect(item.title).toBe("Track 1");
   expect(item.artist).toBe("Artist 1");
   expect(item.durationMs).toBe(180000);
+  expect(item.duration_ms).toBe(180000);
 
   let sentNext = false;
   let sentLater = false;
@@ -109,5 +112,40 @@ test("QueueDirector UI 状态：Track 转换为标准的 QueueItem 并支持 Pla
   } finally {
     (engine as any).playNext = originalPlayNext;
     (engine as any).playLater = originalPlayLater;
+  }
+});
+
+test("Single Owner: isStreamBitPerfect 统一判定在无流态下返回 false", () => {
+  expect(isStreamBitPerfect()).toBe(false);
+});
+
+test("Remote 虚拟路径拦截：playTrack 拦截 remote:// 前缀并通过钩子解析本地缓存", () => {
+  let intercepted = false;
+  let playedCachedPath = "";
+  const remoteTrack = createDummyTrack("remote://song123.flac", "Remote 123", "Artist", "Album", 150000);
+
+  registerRemotePlayer({
+    playRemoteByPath: () => true,
+    withRemotePathByPath: (path: string, then: (cached: string) => void) => {
+      if (path.startsWith("remote://")) {
+        intercepted = true;
+        then("/tmp/cache/song123.flac");
+        return true;
+      }
+      return false;
+    },
+  });
+
+  const originalPlayContext = (engine as any).playContext.bind(engine);
+  (engine as any).playContext = (items: any[]) => {
+    playedCachedPath = items[0]?.path ?? "";
+  };
+
+  try {
+    playTrack(remoteTrack);
+    expect(intercepted).toBe(true);
+    expect(playedCachedPath).toBe("/tmp/cache/song123.flac");
+  } finally {
+    (engine as any).playContext = originalPlayContext;
   }
 });

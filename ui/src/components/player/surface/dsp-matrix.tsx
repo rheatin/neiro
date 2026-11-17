@@ -31,7 +31,7 @@ import {
 } from "../../ui/hardware";
 import { engine, reportEngineFailure } from "../../../backend/engine";
 import { notify } from "../../../state/feedback";
-import { currentDither, currentRate, currentShare, dsdPcmFallback, dsdTransport, isDsdSource, policyJson, resolvedPath, type DitherKind } from "../../../state/resolved";
+import { applyPolicy, currentDither, currentRate, currentShare, dsdPcmFallback, dsdTransport, isDsdSource, policyJson, resolvedPath, type DitherKind } from "../../../state/resolved";
 import { playSnap, playTick } from "../../../state/foley";
 import { gaplessEnabled, setGaplessEnabled } from "../../../state/player";
 
@@ -768,9 +768,9 @@ function chooseRate(key: RateKey): void {
   chosenRate.set(key === "off" ? null : key);
   try {
     if (key === "off") {
-      engine.setPolicy(policyJson("native", 0, share));
+      applyPolicy("native", 0, share);
     } else {
-      engine.setPolicy(policyJson("fixed", key, share));
+      applyPolicy("fixed", key, share);
     }
   } catch (error) {
     chosenRate.set(null);
@@ -906,7 +906,7 @@ function setDitherKey(key: DitherKey): void {
   const mode: DitherKind = key === "auto" ? "off" : key === "shaped" ? "noise_shaped" : "tpdf";
   const rate = currentRate();
   try {
-    engine.setPolicy(policyJson(rate.kind, rate.fixedRate, currentShare(), mode));
+    applyPolicy(rate.kind, rate.fixedRate, currentShare(), mode);
   } catch (error) {
     reportEngineFailure(error, "切换抖动算法失败");
   }

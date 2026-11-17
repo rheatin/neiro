@@ -23,7 +23,7 @@ import { Popover } from "nsh/base";
 import { Icon } from "../../ui/icons";
 import { focusRing } from "../../ui/controls";
 import { engine, reportEngineFailure } from "../../../backend/engine";
-import { currentRate, formatHz, policyJson, resolvedPath, shareMode } from "../../../state/resolved";
+import { applyPolicy, currentRate, formatHz, isStreamBitPerfect, policyJson, resolvedPath, shareMode } from "../../../state/resolved";
 import { playTick } from "../../../state/foley";
 import { dragVolume, player, setVolume, volumeLevel } from "../../../state/player";
 
@@ -231,7 +231,7 @@ export function OutputInterface() {
   const devices = () => engine.devices();
   const resolvedId = () => resolvedPath()?.deviceId ?? "";
   const locked = () => streamOpen();
-  const bitPerfect = () => engine.renderPath()?.bitPerfect ?? false;
+  const bitPerfect = () => isStreamBitPerfect();
   /** The backend the engine opened the device with (`NAE_AudioBackend`). */
   const backend = () => resolvedPath()?.backend ?? null;
   /** Running on ASIO right now, as the engine reports it. */
@@ -316,7 +316,7 @@ export function OutputInterface() {
                 // Only the share mode changes; the rate stays what the user chose.
                 const rate = currentRate();
                 try {
-                  engine.setPolicy(policyJson(rate.kind, rate.fixedRate, "exclusive"));
+                  applyPolicy(rate.kind, rate.fixedRate, "exclusive");
                 } catch (error) {
                   reportEngineFailure(error, "切独占失败");
                 }
@@ -333,7 +333,7 @@ export function OutputInterface() {
               onPress={() => {
                 const rate = currentRate();
                 try {
-                  engine.setPolicy(policyJson(rate.kind, rate.fixedRate, "shared"));
+                  applyPolicy(rate.kind, rate.fixedRate, "shared");
                 } catch (error) {
                   reportEngineFailure(error, "切共享失败");
                 }

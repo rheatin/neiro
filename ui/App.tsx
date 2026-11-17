@@ -45,6 +45,8 @@ subscribeLyrics();
 // Words chosen from the online search are remembered across launches.
 void loadAdoptedLyrics();
 
+import { restorePolicyAtStartup } from "./src/state/resolved";
+
 // Enumerate the endpoints once, while nothing is playing: an endpoint list is a
 // fact about the machine that cannot be read while a stream holds a device.
 effect(() => {
@@ -52,6 +54,7 @@ effect(() => {
   untracked(() => {
     enumerateAtStartup();
     refreshPlugins();
+    void restorePolicyAtStartup();
   });
 });
 

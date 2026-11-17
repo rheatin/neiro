@@ -5,7 +5,7 @@
 import { Text, View } from "nsh";
 import { Button } from "nsh/base";
 import { player } from "../state/player";
-import { resolvedPath } from "../state/resolved";
+import { isStreamBitPerfect, resolvedPath } from "../state/resolved";
 import { engine } from "../backend/engine";
 import { Cover } from "../components/ui/cover";
 import { PlayerBar } from "../components/player/player-bar";
@@ -23,7 +23,7 @@ export function StudioMinimalShell() {
   const trackArtist = () => player().artist || "Studio Console";
   const trackAlbum = () => player().album || "Direct Mastering Stream";
 
-  const isBitPerfect = () => engine.renderPath()?.bitPerfect ?? false;
+  const isBitPerfect = () => isStreamBitPerfect();
   const sampleRate = () => {
     const sr = resolvedPath()?.sampleRate ?? 0;
     return sr > 0 ? `${(sr / 1000).toFixed(1)} kHz` : "PCM";

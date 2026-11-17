@@ -5,7 +5,7 @@
 // events, and shows a control's change at once; the engine's word beats it
 // once it catches up.
 
-import { Animated, cleanup, computed, type CompositeAnimation, createAnimatedValue, effect, signal, untracked } from "nsh";
+import { Animated, cleanup, computed, type CompositeAnimation, createAnimatedValue, effect, signal, Storage, untracked } from "nsh";
 import { engine, reportEngineFailure } from "../backend/engine";
 import {
   clock,
@@ -18,12 +18,12 @@ import {
 } from "../backend/types";
 import { notify } from "./feedback";
 import { activeSource } from "./sources";
-import { shuffle, shuffleSupported, shuffled } from "./shuffle";
 import { trackForPath } from "./catalog";
 
 let remoteHooks: {
   playRemoteByPath: (path: string) => boolean;
   withRemotePathByPath: (path: string, then: (fetched: string) => void) => boolean;
+  resolveRemotePath?: (path: string) => string | null;
 } | null = null;
 export function registerRemotePlayer(hooks: NonNullable<typeof remoteHooks>): void {
   remoteHooks = hooks;
@@ -264,36 +264,112 @@ export function trackToQueueItem(t: Track): QueueItem {
     title: t.title,
     artist: t.artist,
     durationMs: t.durationMs,
+    duration_ms: t.durationMs,
   };
 }
+
+const SHUFFLE_KEY = "player:shuffle";
+const REPEAT_KEY = "player:repeat";
 
 export const repeatMode = signal<RepeatMode>("off");
 export const shuffleMode = signal<boolean>(false);
 
+// 启动读回持久化的 repeat 和 shuffle 设置，并在连接后同步给引擎
+void (async () => {
+  try {
+    const savedShuffle = await Storage.getItem(SHUFFLE_KEY);
+    if (savedShuffle !== null) {
+      shuffleMode.set(savedShuffle === "1");
+    }
+    const savedRepeat = await Storage.getItem(REPEAT_KEY);
+    if (savedRepeat === "off" || savedRepeat === "all" || savedRepeat === "one") {
+      repeatMode.set(savedRepeat);
+    }
+  } catch (error) {
+    console.warn("neiro: 播放模式持久化读取失败:", String(error));
+  }
+})();
+
+// 当引擎就绪时，将持久化的模式同步给引擎
+let syncedInitialModes = false;
+effect(() => {
+  if (engine.health().status !== "ready" || syncedInitialModes) return;
+  syncedInitialModes = true;
+  untracked(() => {
+    try {
+      if (shuffleMode()) engine.setShuffleMode(true);
+      if (repeatMode() !== "off") engine.setRepeatMode(repeatMode());
+    } catch (e) {
+      console.warn("neiro: 初始化同步 shuffle/repeat 失败:", String(e));
+    }
+  });
+});
+
+// 当引擎上报 snapshot 时，单一事实源自动同步回信号
+effect(() => {
+  const snap = engine.queue().snapshot;
+  if (!snap) return;
+  untracked(() => {
+    if (snap.repeatMode && snap.repeatMode !== repeatMode()) {
+      repeatMode.set(snap.repeatMode);
+    }
+    if (snap.shuffleEnabled !== undefined && snap.shuffleEnabled !== shuffleMode()) {
+      shuffleMode.set(snap.shuffleEnabled);
+    }
+  });
+});
+
 export function cycleRepeatMode(): void {
   const current = repeatMode();
   const next: RepeatMode = current === "off" ? "all" : current === "all" ? "one" : "off";
-  repeatMode.set(next);
-  engine.setRepeatMode(next);
+  setRepeatMode(next);
 }
 
 export function setRepeatMode(mode: RepeatMode): void {
   repeatMode.set(mode);
-  engine.setRepeatMode(mode);
+  void Storage.setItem(REPEAT_KEY, mode).catch((e) => console.warn("neiro: repeat 没有记住:", String(e)));
+  try {
+    engine.setRepeatMode(mode);
+  } catch (e) {
+    reportEngineFailure(e, "设置循环模式失败");
+  }
 }
 
 export function toggleShuffle(): void {
   const next = !shuffleMode();
   shuffleMode.set(next);
-  engine.setShuffleMode(next);
+  void Storage.setItem(SHUFFLE_KEY, next ? "1" : "0").catch((e) => console.warn("neiro: shuffle 没有记住:", String(e)));
+  try {
+    engine.setShuffleMode(next);
+  } catch (e) {
+    reportEngineFailure(e, "设置随机播放失败");
+  }
 }
 
 export function playNextTrack(track: Track): void {
+  if (track.path.startsWith("remote://")) {
+    if (
+      remoteHooks?.withRemotePathByPath(track.path, (cachedPath) => {
+        playNextTrack({ ...track, path: cachedPath });
+      })
+    ) {
+      return;
+    }
+  }
   engine.playNext([trackToQueueItem(track)]);
   notify(`已设为下一首播放：${track.title || "曲目"}`);
 }
 
 export function playLaterTrack(track: Track): void {
+  if (track.path.startsWith("remote://")) {
+    if (
+      remoteHooks?.withRemotePathByPath(track.path, (cachedPath) => {
+        playLaterTrack({ ...track, path: cachedPath });
+      })
+    ) {
+      return;
+    }
+  }
   engine.playLater([trackToQueueItem(track)]);
   notify(`已设为稍后播放：${track.title || "曲目"}`);
 }
@@ -302,6 +378,15 @@ export function playLaterTrack(track: Track): void {
  * moment it is picked is itself, playing, until the engine names its own
  * state. */
 export function playTrack(track: Track): void {
+  if (track.path.startsWith("remote://")) {
+    if (
+      remoteHooks?.withRemotePathByPath(track.path, (cachedPath) => {
+        playTrack({ ...track, path: cachedPath });
+      })
+    ) {
+      return;
+    }
+  }
   const at = Date.now();
   send(
     {
@@ -331,34 +416,7 @@ export const QUEUE_AHEAD = 10;
  * 列。换列表就换一批——队列属于"我现在在听的这张列表"。 */
 export function playFromRows(rows: Track[], index: number): void {
   if (rows.length === 0) return;
-  const at = Math.min(Math.max(index, 0), rows.length - 1);
-  const items = rows.map(trackToQueueItem);
-  engine.playContext(items, at);
-}
-
-function enqueueMixed(tracks: Track[]): void {
-  if (tracks.length === 0) return;
-  const [head, ...tail] = tracks;
-  if (head.path.startsWith("remote://")) {
-    if (
-      remoteHooks?.withRemotePathByPath(head.path, (cachedPath) => {
-        try {
-          engine.enqueue([cachedPath]);
-        } catch (e) {
-          reportEngineFailure(e, "入队失败");
-        }
-        enqueueMixed(tail);
-      })
-    ) {
-      return;
-    }
-  }
-  try {
-    engine.enqueue([head.path]);
-  } catch (e) {
-    reportEngineFailure(e, "入队失败");
-  }
-  enqueueMixed(tail);
+  playQueue(rows, index);
 }
 
 /** 播放全部：play(点击那首/第一首) + enqueue(其余)。shuffle 开 → 其余
@@ -366,8 +424,42 @@ function enqueueMixed(tracks: Track[]): void {
 export function playQueue(rows: Track[], firstIndex = 0): void {
   if (rows.length === 0) return;
   const idx = Math.min(Math.max(firstIndex, 0), rows.length - 1);
-  const items = rows.map(trackToQueueItem);
-  engine.playContext(items, idx);
+  const first = rows[idx];
+
+  if (first.path.startsWith("remote://")) {
+    if (
+      remoteHooks?.withRemotePathByPath(first.path, (cachedFirstPath) => {
+        const updated = [...rows];
+        updated[idx] = { ...first, path: cachedFirstPath };
+        playQueue(updated, idx);
+      })
+    ) {
+      return;
+    }
+  }
+
+  // 首曲已是本地/已缓存。对于其余项：
+  // 若含 remote://，尝试解析已缓存路径；若未缓存则过滤掉（防止 C++ 解码器打开失败）。
+  const validItems: QueueItem[] = [];
+  let adjustedIndex = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const t = rows[i];
+    if (i === idx) {
+      adjustedIndex = validItems.length;
+      validItems.push(trackToQueueItem(t));
+    } else if (t.path.startsWith("remote://")) {
+      const resolved = remoteHooks?.resolveRemotePath?.(t.path);
+      if (resolved) {
+        validItems.push(trackToQueueItem({ ...t, path: resolved }));
+      }
+    } else {
+      validItems.push(trackToQueueItem(t));
+    }
+  }
+
+  if (validItems.length > 0) {
+    engine.playContext(validItems, adjustedIndex);
+  }
 }
 
 export function playQueueAt(index: number): void {
