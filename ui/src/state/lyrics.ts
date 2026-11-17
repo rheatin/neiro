@@ -151,9 +151,21 @@ let fallbackTried = false;
  * that is playing; a second press on the panel reopens the last answer. */
 export const lyricsSearchOpen = signal(false);
 
+export function stopLyricsSearch(): void {
+  if (searchStop !== null) {
+    try {
+      searchStop();
+    } catch {}
+    searchStop = null;
+  }
+}
+
 export function setLyricsSearchOpen(open: boolean): void {
   lyricsSearchOpen.set(open);
-  if (!open) return;
+  if (!open) {
+    stopLyricsSearch();
+    return;
+  }
   // The previous track's answer is not this track's: opening the sheet starts
   // a new search and shows nothing of the old one while it runs.
   lyricsSearch.set({ status: "searching" });

@@ -205,6 +205,7 @@ function settle(key: string, uri: string): void {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) break;
     cache.delete(oldest);
+    asked.delete(oldest);
   }
   untracked(() => version.update((n) => n + 1));
 }

@@ -191,8 +191,8 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave }) {
     return sourceArtists().filter((a) => a.artist.toLowerCase().includes(term));
   };
 
-  return (
-    <Scroll class="flex-1" contentClass="pb-28">
+  const renderHeader = (showTrackHeader = false) => (
+    <View>
       {/* 1) Source Management Header */}
       <View class="px-6 pt-2 pb-4 gap-2" role="header">
         <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
@@ -271,35 +271,59 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave }) {
           </Button>
         </View>
       </View>
-
-      {/* Tab views */}
-      <If when={activeTab() === "tracks"}>
+      <If when={showTrackHeader}>
         <View class="px-3">
           <TrackHeader showAlbum={wideTracks()} />
-          <Each of={filteredTracks()}>
-            {(track: () => Track, index: () => number) => (
-              <TrackRow
-                track={track()}
-                number={index()}
-                showAlbum={wideTracks()}
-                wave={props.wave}
-                onPlay={() => playFromRows(filteredTracks(), index())}
-              />
-            )}
-          </Each>
         </View>
       </If>
-      <If when={activeTab() === "albums"}>
-        <View class="px-6">
-          <CardGrid items={filteredAlbums().map(albumItemOf)} />
-        </View>
-      </If>
-      <If when={activeTab() === "artists"}>
-        <View class="px-6">
-          <CardGrid items={filteredArtists().map(artistItemOf)} />
-        </View>
-      </If>
-    </Scroll>
+    </View>
+  );
+
+  return (
+    <If
+      when={activeTab() === "tracks"}
+      else={
+        <Scroll class="flex-1" contentClass="pb-28">
+          {renderHeader(false)}
+          <If when={activeTab() === "albums"}>
+            <View class="px-6">
+              <CardGrid items={filteredAlbums().map(albumItemOf)} />
+            </View>
+          </If>
+          <If when={activeTab() === "artists"}>
+            <View class="px-6">
+              <CardGrid items={filteredArtists().map(artistItemOf)} />
+            </View>
+          </If>
+        </Scroll>
+      }
+    >
+      <List
+        each={filteredTracks()}
+        keyExtractor={(t) => t.path}
+        estimatedItemSize={48}
+        class="flex-1"
+        contentClass="pb-28"
+        empty={() => (
+          <View class="py-12 items-center">
+            <Text class="text-sm text-muted-foreground">没有曲目</Text>
+          </View>
+        )}
+        header={() => renderHeader(true)}
+      >
+        {(track, index) => (
+          <View class="px-3">
+            <TrackRow
+              track={track()}
+              number={index()}
+              showAlbum={wideTracks()}
+              wave={props.wave}
+              onPlay={() => playFromRows(filteredTracks(), index())}
+            />
+          </View>
+        )}
+      </List>
+    </If>
   );
 }
 

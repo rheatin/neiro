@@ -347,7 +347,10 @@ function tracksEqual(a: RemoteTrack[], b: RemoteTrack[]): boolean {
   return true;
 }
 
+let listEpoch = 0;
+
 function handleListed(tracks: RemoteTrack[]): void {
+  const currentEpoch = listEpoch;
   // 丢弃上一台服务器在切换前已经在路上的旧分页结果。
   const currentStatusUrl = engine.remoteStatus().baseUrl;
   if (fetchingBaseUrl && currentStatusUrl && currentStatusUrl !== fetchingBaseUrl) {
@@ -381,6 +384,7 @@ function handleListed(tracks: RemoteTrack[]): void {
       }).then(() => loadRemote(true));
       return;
     }
+    if (currentEpoch !== listEpoch) return;
     // A listing with songs is the proof the session works; an empty one has
     // now been answered by a fresh sign-in, and asking again would be the
     // same question on a loop.
@@ -398,17 +402,20 @@ function handleListed(tracks: RemoteTrack[]): void {
     finishServerCache(targetServerId);
     return;
   }
+  if (currentEpoch !== listEpoch) return;
   if (freshList !== null) freshList.push(...tracks);
   if (tracks.length >= REMOTE_PAGE) {
     try {
       engine.listRemote(freshList !== null ? freshList.length : remoteTracks().length, REMOTE_PAGE);
     } catch (error) {
+      if (currentEpoch !== listEpoch) return;
       console.warn("neiro: 下一页远程列表没有发出去:", String(error));
       remoteFetching.set(false);
       finishServerCache(targetServerId);
     }
   } else {
     // The listing is whole: one swap, so the page reads one listing.
+    if (currentEpoch !== listEpoch) return;
     if (freshList !== null) {
       emptyHandled = false;
       if (!tracksEqual(remoteTracks(), freshList)) {
@@ -447,6 +454,7 @@ export function loadRemote(force = false): void {
   // Only a request that is still in flight blocks a new one. A flag left set
   // by a request that never answered used to make the page empty forever.
   if (!force && remoteFetching() && remoteLoadingState() === "loading") return;
+  const thisEpoch = ++listEpoch;
   const srv =
     activeRemoteServer() ??
     servers().find((s) => s.id === activeEngineServerId) ??
@@ -469,6 +477,7 @@ export function loadRemote(force = false): void {
   try {
     engine.listRemote(0, REMOTE_PAGE);
   } catch (error) {
+    if (thisEpoch !== listEpoch) return;
     reportEngineFailure(error, "远程列表失败");
     remoteFetching.set(false);
     remoteLoadingState.set("error");
@@ -661,8 +670,8 @@ function unfetchId(id: string): void {
 /** What to do once a row's file is in the cache: play it, or hand its path
  * to an action that needs one (收藏, 加入曲单). A remote row has no local
  * path until the engine fetched it, so those actions wait for the download
- * instead of being refused. */
-const fetchedActions = new Map<string, (path: string) => void>();
+ * instead of being refused. Multiple concurrent callers queue their callbacks. */
+const fetchedActions = new Map<string, Array<(path: string) => void>>();
 
 engine.subscribeRemoteFetched(({ track, path }) => {
   untracked(() => {
@@ -674,10 +683,19 @@ engine.subscribeRemoteFetched(({ track, path }) => {
       return;
     }
     fetchedPaths.set(track.id, path);
-    const action = fetchedActions.get(track.id);
+    const actions = fetchedActions.get(track.id);
     fetchedActions.delete(track.id);
-    if (action) action(path);
-    else playTrack(asLocalTrack(track, path));
+    if (actions && actions.length > 0) {
+      for (const act of actions) {
+        try {
+          act(path);
+        } catch (e) {
+          console.warn("neiro: withRemotePath callback failed:", String(e));
+        }
+      }
+    } else {
+      playTrack(asLocalTrack(track, path));
+    }
   });
 });
 
@@ -693,11 +711,20 @@ export function cachedRemotePath(track: RemoteTrack): string | null {
 }
 
 /** Fetches a remote row and runs `then` with the cached path (no play).
- * A second request for the same row while it downloads is dropped. */
+ * If already cached, invokes `then` synchronously. Multiple callers for the same
+ * row during download are queued and all invoked when the file arrives. */
 export function withRemotePath(track: RemoteTrack, then: (path: string) => void): void {
+  const cached = cachedRemotePath(track);
+  if (cached) {
+    then(cached);
+    return;
+  }
+  const current = fetchedActions.get(track.id) ?? [];
+  current.push(then);
+  fetchedActions.set(track.id, current);
+
   if (fetchingId(track.id)) return;
   fetchingIds.update((set) => new Set(set).add(track.id));
-  fetchedActions.set(track.id, then);
   try {
     engine.fetchRemote(track.id);
   } catch (error) {
@@ -742,5 +769,9 @@ registerRemotePlayer({
     if (!rt) return false;
     withRemotePath(rt, then);
     return true;
+  },
+  resolveRemotePath: (path) => {
+    const rt = remoteTrackForCachePath(path);
+    return rt ? cachedRemotePath(rt) : null;
   },
 });

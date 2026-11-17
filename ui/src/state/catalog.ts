@@ -220,6 +220,25 @@ export const tracksState = signal<TracksListState>("idle");
 export const tracksComplete = (): boolean => tracksState() === "complete";
 
 let loadingTracks = false;
+let tracksWatchdog: ReturnType<typeof setTimeout> | null = null;
+
+function clearTracksWatchdog(): void {
+  if (tracksWatchdog !== null) {
+    clearTimeout(tracksWatchdog);
+    tracksWatchdog = null;
+  }
+}
+
+function resetTracksWatchdog(): void {
+  clearTracksWatchdog();
+  tracksWatchdog = setTimeout(() => {
+    if (loadingTracks && tracksState() === "loading") {
+      console.warn("neiro: 曲库加载超时 (15s)，重置状态允许重试");
+      loadingTracks = false;
+      tracksState.set(allTracks().length > 0 ? "complete" : "error");
+    }
+  }, 15_000);
+}
 
 /** Loads the track index, one page at a time (the list shows rows as pages
  * land). Nothing happens while a load runs, and the loaded index stays. */
@@ -234,15 +253,18 @@ export function ensureTracks(): void {
 
 /** Asks again after an error (重试), or after a scan (a fresh epoch). */
 export function retryTracks(): void {
+  clearTracksWatchdog();
   loadingTracks = false;
   tracksState.set("idle");
   ensureTracks();
 }
 
 function requestPage(offset: number): void {
+  resetTracksWatchdog();
   try {
     engine.listTracks(offset, TRACK_PAGE);
   } catch (error) {
+    clearTracksWatchdog();
     console.warn("neiro: list_tracks 没发出去:", String(error));
     if (offset === 0) tracksState.set("error");
     else tracksState.set("complete");
@@ -261,6 +283,7 @@ effect(() => {
     allTracks.set([...allTracks(), ...page.tracks]);
     tracksTotal.set(page.total);
     if (allTracks().length >= page.total) {
+      clearTracksWatchdog();
       tracksState.set("complete");
       loadingTracks = false;
     } else {
