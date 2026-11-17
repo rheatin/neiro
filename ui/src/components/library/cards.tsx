@@ -47,6 +47,10 @@ export function itemFirstTrack(item: LibraryItem): Track | undefined {
   return path ? trackForPath(path) : undefined;
 }
 
+function cardKey(i: LibraryItem): string {
+  return i.kind === "album" ? `album:${i.album}\u0000${i.albumArtist}` : `artist:${i.artist}`;
+}
+
 /** One card: cover, name, what it is; the gold disc on hover. */
 export function Card(props: {
   item: LibraryItem;
@@ -64,7 +68,7 @@ export function Card(props: {
   const { style: rise, cover: coverIn } = untracked(() =>
     listItemEntrance({
       wave: props.wave,
-      key: () => `${props.item.kind}:${props.item.name}`,
+      key: () => cardKey(props.item),
       index: () => props.index ?? 0,
       axis: "translateY",
       turns: WAVE.cards,
@@ -150,7 +154,7 @@ export function CardRow(props: { title?: string; items: LibraryItem[]; class?: s
       <List
         horizontal
         each={props.items}
-        keyExtractor={(i: LibraryItem) => `${i.kind}:${i.name}`}
+        keyExtractor={cardKey}
         estimatedItemSize={144}
         snapToInterval={144}
         snapToAlignment="start"
@@ -182,7 +186,7 @@ export function CardGrid(props: { items: LibraryItem[]; class?: string; wave?: L
       style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${CARD_WIDTH}px, 1fr))` }}
       onLayout={(e) => room.set(e.bounds.size.width)}
     >
-      <Each of={props.items} key={(i) => `${i.kind}:${i.name}`}>
+      <Each of={props.items} key={cardKey}>
         {(item, index) => <Card item={item()} index={index()} wave={wave} width={cardWidth()} fill />}
       </Each>
     </View>

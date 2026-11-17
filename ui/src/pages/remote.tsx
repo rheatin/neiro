@@ -417,40 +417,43 @@ export function RemotePlaylistPage(props: { id: string; name: string }) {
       }
     });
   });
-  const page = engine.remoteItems();
-  const rows: RemoteTrack[] = page && page.id === props.id ? page.tracks : [];
-  const first = rows[0];
+  const page = () => engine.remoteItems();
+  const rows = (): RemoteTrack[] => {
+    const p = page();
+    return p && p.id === props.id ? p.tracks : [];
+  };
+  const first = () => rows()[0];
 
   return (
     <AppPage title={props.name || "播放列表"} testID={`page-remote-playlist-${props.id}`}>
       <Scroll class="flex-1" contentClass="pb-28">
         <View class="px-6 pt-4 pb-4 flex-row items-center gap-5" role="header">
-          <If when={first}>
-            <RemoteCover id={first.id} coverArt={first.coverArt} size={112} class="shadow-md" />
+          <If when={first()}>
+            <RemoteCover id={first()!.id} coverArt={first()!.coverArt} size={112} class="shadow-md" />
           </If>
           <View class="flex-1 min-w-0 gap-1.5">
             <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">播放列表</Text>
             <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
               {props.name || "—"}
             </Text>
-            <If when={rows.length > 0}>
-              <Text class="text-xs text-muted-foreground">{rows.length} 首 · {totalDuration(rows)}</Text>
+            <If when={rows().length > 0}>
+              <Text class="text-xs text-muted-foreground">{rows().length} 首 · {totalDuration(rows())}</Text>
               <View class="pt-2 flex-row items-center gap-3">
-                <PlayButton playing={false} size={40} onPress={() => queueRemoteFrom(rows, 0)} />
+                <PlayButton playing={false} size={40} onPress={() => queueRemoteFrom(rows(), 0)} />
               </View>
             </If>
           </View>
         </View>
-        <If when={rows.length > 0} else={<RowsSkeleton rows={6} />}>
+        <If when={rows().length > 0} else={<RowsSkeleton rows={6} />}>
           <View class="px-3">
             <TrackHeader showAlbum={wideTracks()} />
-            <Each of={rows}>
+            <Each of={rows()} key={(t) => t.id}>
               {(track, i) => (
                 <RemoteTrackRow
                   track={track()}
                   number={i()}
                   showAlbum={wideTracks()}
-                  onPlay={() => queueRemoteFrom(rows, i())}
+                  onPlay={() => queueRemoteFrom(rows(), i())}
                 />
               )}
             </Each>
@@ -465,18 +468,21 @@ export function RemotePlaylistPage(props: { id: string; name: string }) {
 
 /** 远程专辑页：专辑名 + 歌手副行 + 组内曲目行。行点 `playRemote`。 */
 export function RemoteAlbumPage(props: { serverId: string; album: string; artist: string }) {
-  const source = remoteTracks().length > 0 ? remoteTracks() : cachedRemoteTracks(props.serverId);
-  const exact = source.filter(
-    (track) => (track.album || "") === props.album && (track.artist || "") === props.artist,
-  );
-  const rows = exact.length > 0 ? exact : source.filter((track) => (track.album || "") === props.album);
-  const first = rows[0];
+  const rows = (): RemoteTrack[] => {
+    const r = remoteTracks();
+    const source = r.length > 0 ? r : cachedRemoteTracks(props.serverId);
+    const exact = source.filter(
+      (track) => (track.album || "") === props.album && (track.artist || "") === props.artist,
+    );
+    return exact.length > 0 ? exact : source.filter((track) => (track.album || "") === props.album);
+  };
+  const first = () => rows()[0];
   return (
     <AppPage title={props.album} testID="page-remote-album">
       <Scroll class="flex-1" contentClass="pb-28">
         <View class="px-6 pt-4 pb-4 flex-row items-center gap-5" role="header">
-          <If when={first}>
-            <RemoteCover id={first.id} coverArt={first.coverArt} size={112} class="shadow-md" />
+          <If when={first()}>
+            <RemoteCover id={first()!.id} coverArt={first()!.coverArt} size={112} class="shadow-md" />
           </If>
           <View class="flex-1 min-w-0 gap-1.5">
             <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">远程专辑</Text>
@@ -484,30 +490,30 @@ export function RemoteAlbumPage(props: { serverId: string; album: string; artist
               {props.album || "—"}
             </Text>
             <Text class="text-sm text-muted-foreground">
-              {props.artist || first?.artist || "未知歌手"} · {rows.length} 首 · {totalDuration(rows)}
+              {props.artist || first()?.artist || "未知歌手"} · {rows().length} 首 · {totalDuration(rows())}
             </Text>
-            <If when={rows.length > 0}>
+            <If when={rows().length > 0}>
               <View class="pt-2 flex-row items-center gap-3">
-                <PlayButton playing={false} size={40} onPress={() => queueRemoteFrom(rows, 0)} />
+                <PlayButton playing={false} size={40} onPress={() => queueRemoteFrom(rows(), 0)} />
               </View>
             </If>
           </View>
         </View>
         <If
-          when={rows.length > 0}
+          when={rows().length > 0}
           else={
             <EmptyState title="专辑没有曲目" detail="服务器列表刷新后再试；用首页的来源 Tab 回到这张专辑。" />
           }
         >
           <View class="px-3">
             <TrackHeader showAlbum={wideTracks()} />
-            <Each of={rows}>
+            <Each of={rows()} key={(t) => t.id}>
               {(track, i) => (
                 <RemoteTrackRow
                   track={track()}
                   number={i()}
                   showAlbum={wideTracks()}
-                  onPlay={() => queueRemoteFrom(rows, i())}
+                  onPlay={() => queueRemoteFrom(rows(), i())}
                 />
               )}
             </Each>
@@ -520,15 +526,18 @@ export function RemoteAlbumPage(props: { serverId: string; album: string; artist
 
 /** 远程歌手页：歌手名 + 其曲目行。 */
 export function RemoteArtistPage(props: { serverId: string; artist: string }) {
-  const source = remoteTracks().length > 0 ? remoteTracks() : cachedRemoteTracks(props.serverId);
-  const rows = source.filter((track) => (track.artist || "") === props.artist);
-  const first = rows[0];
+  const rows = (): RemoteTrack[] => {
+    const r = remoteTracks();
+    const source = r.length > 0 ? r : cachedRemoteTracks(props.serverId);
+    return source.filter((track) => (track.artist || "") === props.artist);
+  };
+  const first = () => rows()[0];
   return (
     <AppPage title={props.artist} testID="page-remote-artist">
       <Scroll class="flex-1" contentClass="pb-28">
         <View class="px-6 pt-4 pb-4 flex-row items-center gap-5" role="header">
-          <If when={first}>
-            <RemoteCover id={first.id} coverArt={first.coverArt} size={112} round class="shadow-md" />
+          <If when={first()}>
+            <RemoteCover id={first()!.id} coverArt={first()!.coverArt} size={112} round class="shadow-md" />
           </If>
           <View class="flex-1 min-w-0 gap-1.5">
             <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">远程歌手</Text>
@@ -536,30 +545,30 @@ export function RemoteArtistPage(props: { serverId: string; artist: string }) {
               {props.artist || "—"}
             </Text>
             <Text class="text-sm text-muted-foreground">
-              {rows.length} 首 · {totalDuration(rows)}
+              {rows().length} 首 · {totalDuration(rows())}
             </Text>
-            <If when={rows.length > 0}>
+            <If when={rows().length > 0}>
               <View class="pt-2 flex-row items-center gap-3">
-                <PlayButton playing={false} size={40} onPress={() => queueRemoteFrom(rows, 0)} />
+                <PlayButton playing={false} size={40} onPress={() => queueRemoteFrom(rows(), 0)} />
               </View>
             </If>
           </View>
         </View>
         <If
-          when={rows.length > 0}
+          when={rows().length > 0}
           else={
             <EmptyState title="歌手没有曲目" detail="服务器列表刷新后再试；用首页的来源 Tab 回到这位歌手。" />
           }
         >
           <View class="px-3">
             <TrackHeader showAlbum={wideTracks()} />
-            <Each of={rows}>
+            <Each of={rows()} key={(t) => t.id}>
               {(track, i) => (
                 <RemoteTrackRow
                   track={track()}
                   number={i()}
                   showAlbum={wideTracks()}
-                  onPlay={() => queueRemoteFrom(rows, i())}
+                  onPlay={() => queueRemoteFrom(rows(), i())}
                 />
               )}
             </Each>
