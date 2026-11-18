@@ -51,7 +51,7 @@ import { TrackHeader } from "../components/library/tracks";
 import { wideTracks } from "../components/layout";
 import { RemoteCardsRow, type RemoteCardItem } from "../components/library/remote-cards";
 import { shuffled } from "../state/shuffle";
-import { selectSource, LOCAL_ALL_ID } from "../state/sources";
+import { selectSource, ALL_ID } from "../state/sources";
 
 const CONTAINER_LABEL = (container: string): string => (container ? container.toUpperCase() : "").slice(0, 5);
 
@@ -225,7 +225,7 @@ export function RemotePage() {
                 variant="outline"
                 onPress={() => {
                   void removeServerById(srv()!.id);
-                  selectSource(LOCAL_ALL_ID);
+                  selectSource(ALL_ID);
                   switchTo(HOME);
                 }}
               />

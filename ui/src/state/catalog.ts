@@ -10,14 +10,32 @@ import { albumKey, type Album, type Artist, type Track } from "../backend/types"
 import { open } from "../nav";
 
 const remoteTracksAccessor = signal<{ get: () => Track[] }>({ get: () => [] });
+const remoteLoadingAccessor = signal<{ state: () => "idle" | "loading" | "error" }>({
+  state: () => "idle",
+});
+let sourceKindFn: (() => "all" | "local" | "remote") | null = null;
 let remotePathResolver: ((path: string) => Track | undefined) | null = null;
 export function registerRemoteCatalog(
   getTracks: () => Track[],
   resolvePath: (path: string) => Track | undefined,
+  getLoadingState?: () => "idle" | "loading" | "error",
 ): void {
   remoteTracksAccessor.set({ get: getTracks });
+  if (getLoadingState) remoteLoadingAccessor.set({ state: getLoadingState });
   remotePathResolver = resolvePath;
 }
+
+/** 来源类型由 sources.ts 注册（避免 catalog ↔ sources 循环依赖）。 */
+export function registerSourceKind(fn: () => "all" | "local" | "remote"): void {
+  sourceKindFn = fn;
+}
+
+function currentSourceKind(): "all" | "local" | "remote" {
+  return sourceKindFn?.() ?? "all";
+}
+
+/** 当前已连接/已加载的那台远程服务器映射成的曲库 Track 列表。 */
+export const activeRemoteTracks: Accessor<Track[]> = computed(() => remoteTracksAccessor().get());
 
 registerTrackLookup((path) => trackForPath(path));
 
@@ -183,7 +201,7 @@ function underRoots(path: string): boolean {
   return untracked(roots).some((root) => underRoot(normalized, root));
 }
 
-/** 在**指定**根之下（null = 不过滤 = 全部本地）。首页按来源 Tab 取。 */
+/** 在**指定**根之下（null = 不按本地根过滤）。首页按来源 Tab 取。 */
 function underGivenRoot(path: string, root: string | null): boolean {
   if (!rootsLoaded() || root === null) return true;
   return underRoot(normalizePath(path), root);
@@ -198,7 +216,15 @@ export const visibleTracks: Accessor<Track[]> = computed(() =>
   rootsLoaded() ? allTracks().filter((t) => underRoots(t.path)) : allTracks(),
 );
 
-/** 首页来源 Tab 的本地根（由 sources.ts 注册；null = 全部本地）。 */
+/** 「全部」= 本地曲库 + 当前已连接/已加载的远程列表（不拼所有服务器缓存）。 */
+export const allLibraryTracks: Accessor<Track[]> = computed(() => {
+  if (currentSourceKind() !== "all") return visibleTracks();
+  const merged = new Map<string, Track>();
+  for (const track of [...visibleTracks(), ...activeRemoteTracks()]) merged.set(track.path, track);
+  return [...merged.values()];
+});
+
+/** 首页来源 Tab 的本地根（由 sources.ts 注册；null = 不按本地根过滤）。 */
 const homeRoot = signal<string | null>(null);
 export function setHomeRoot(root: string | null): void {
   homeRoot.set(root);
@@ -210,9 +236,14 @@ export const scopedRoot = (): string | null => homeRoot();
 /** 首页来源 Tab 的可见层：按 activeSource 的本地根过滤。 */
 export const homeTracks: Accessor<Track[]> = computed(() => {
   const root = homeRoot();
+  if (currentSourceKind() === "all") return allLibraryTracks();
   if (root === null) return visibleTracks();
   return allTracks().filter((t) => underGivenRoot(t.path, root));
 });
+
+/** 「全部」模式下远程列表的加载状态；未注册远程目录时 idle。 */
+export const activeRemoteState: Accessor<"idle" | "loading" | "error"> = () =>
+  remoteLoadingAccessor().state();
 
 export const tracksTotal = signal(0);
 export const tracksState = signal<TracksListState>("idle");
@@ -473,7 +504,7 @@ function wantedQueryOfSearch(): string {
 const groups = computed(() => {
   const albumMap = new Map<string, Track[]>();
   const artistMap = new Map<string, Track[]>();
-  for (const track of visibleTracks()) {
+  for (const track of allLibraryTracks()) {
     const normArtist = track.albumArtist || track.artist || "";
     const normAlbumKey = albumKey({ album: track.album, albumArtist: normArtist });
     const normBucket = albumMap.get(normAlbumKey);
@@ -492,7 +523,7 @@ const groups = computed(() => {
     if (artistBucket) artistBucket.push(track);
     else artistMap.set(name, [track]);
   }
-  return { albumMap, artistMap, pathMap: new Map(visibleTracks().map((track) => [track.path, track] as [string, Track])) };
+  return { albumMap, artistMap, pathMap: new Map(allLibraryTracks().map((track) => [track.path, track] as [string, Track])) };
 });
 
 /** The tracks of one album, in index order ([] while the index is not

@@ -15,6 +15,7 @@ import {
   homeAlbums,
   homeArtists,
   homeTracks,
+  activeRemoteState,
   removeRoot,
   retryTracks,
   scopedRoot,
@@ -28,7 +29,7 @@ import { EmptyState, ErrorState, RowsSkeleton } from "../components/ui/feedback"
 import { ActionButton, focusRing } from "../components/ui/controls";
 import { createListWave, enter, type ListWave } from "../components/ui/motion";
 import { currentRoute, rootOpens, switchTo, HOME } from "../nav";
-import { activeSource, LOCAL_ALL_ID, selectSource } from "../state/sources";
+import { activeSource, ALL_ID, selectSource } from "../state/sources";
 import { queueRemoteFrom, remoteLoadingState, remoteTracks, retryRemote } from "../state/remote";
 import { RemoteTrackRow } from "./remote";
 import { barSize, wideTracks } from "../components/layout";
@@ -185,9 +186,27 @@ export function TracksPage() {
                   <View class="pt-2">
                     <TracksHead
                       count={list().length}
-                      total={scopedRoot() === null ? Math.max(tracksTotal(), rawList().length) : rawList().length}
-                      state={scopedRoot() === null ? (rawList().length > 0 && state() === "idle" ? "complete" : state()) : "complete"}
+                      total={
+                        activeSource().kind === "all"
+                          ? rawList().length
+                          : scopedRoot() === null
+                            ? Math.max(tracksTotal(), rawList().length)
+                            : rawList().length
+                      }
+                      state={
+                        scopedRoot() === null
+                          ? rawList().length > 0 && state() === "idle"
+                            ? "complete"
+                            : state()
+                          : "complete"
+                      }
                     />
+                    <If when={activeSource().kind === "all" && activeRemoteState() === "loading"}>
+                      <Text class="px-6 pb-2 text-xs text-muted-foreground">远程库读取中…</Text>
+                    </If>
+                    <If when={activeSource().kind === "all" && activeRemoteState() === "error"}>
+                      <Text class="px-6 pb-2 text-xs text-muted-foreground">远程库未连上</Text>
+                    </If>
                     <TrackToolbar
                       onPlayAll={() => playFromRows(list(), 0)}
                       onShuffle={() => playQueue(shuffled(list()), 0)}
@@ -337,7 +356,7 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave }) {
             variant="outline"
             onPress={() => {
               removeRoot(root);
-              selectSource(LOCAL_ALL_ID);
+              selectSource(ALL_ID);
               switchTo(HOME);
             }}
           />
