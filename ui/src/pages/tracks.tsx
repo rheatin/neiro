@@ -143,7 +143,7 @@ export function TracksPage() {
   // The rows' wave, played as the page is entered (rows scrolled to come
   // in on their own).
   const wave = createListWave({ isTop: () => currentRoute().name === "tracks", reenter: rootOpens });
-  const state = tracksState();
+  const state = () => tracksState();
   const rawList = () => homeTracks();
   const list = () => sortAndFilterTracks(rawList());
   const showAlbum = wideTracks();
@@ -176,13 +176,13 @@ export function TracksPage() {
                 each={list()}
                 keyExtractor={(t) => t.path}
                 estimatedItemSize={48}
-                empty={() => <EmptyTracks state={state} />}
+                empty={() => <EmptyTracks state={state()} />}
                 header={() => (
                   <View class="pt-2">
                     <TracksHead
                       count={list().length}
                       total={scopedRoot() === null ? Math.max(tracksTotal(), rawList().length) : rawList().length}
-                      state={scopedRoot() === null ? (rawList().length > 0 && state === "idle" ? "complete" : state) : "complete"}
+                      state={scopedRoot() === null ? (rawList().length > 0 && state() === "idle" ? "complete" : state()) : "complete"}
                     />
                     <TrackToolbar
                       onPlayAll={() => playFromRows(list(), 0)}
@@ -192,7 +192,7 @@ export function TracksPage() {
                   </View>
                 )}
                 footer={() => (
-                  <If when={state === "loading" && list().length > 0}>
+                  <If when={state() === "loading" && list().length > 0}>
                     <View class="py-6 items-center">
                       <Text class="text-xs text-muted-foreground">正在读曲库…</Text>
                     </View>

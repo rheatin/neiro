@@ -6,6 +6,8 @@ import { effect, signal, Storage } from "nsh";
 import type { Album, Artist, RemoteTrack, Track } from "../backend/types";
 import { isFavourite } from "./user-catalog";
 import { isLossless } from "../components/ui/format-badges";
+import { cachedRemotePath } from "./remote";
+import { trackForPath } from "./catalog";
 
 // ---- 曲目偏好 ---------------------------------------------------------------
 
@@ -68,7 +70,6 @@ export const artistFilterQuery = signal<string>("");
 
 export function cycleArtistSort(field: ArtistSortField): void {
   if (artistSortField() === field) {
-    trackSortOrder.update((o) => (o === "asc" ? "desc" : "asc"));
     artistSortOrder.update((o) => (o === "asc" ? "desc" : "asc"));
   } else {
     artistSortField.set(field);
@@ -149,13 +150,6 @@ export function isDsdTrack(t: { path?: string; sampleRate?: number }): boolean {
   return p.endsWith(".dsf") || p.endsWith(".dff") || p.endsWith(".iso") || (t.sampleRate ?? 0) >= 2_822_400;
 }
 
-export function isHiResTrack(t: { path?: string; sampleRate?: number; bits?: number }): boolean {
-  if (isDsdTrack(t)) return false;
-  const rate = t.sampleRate ?? 0;
-  const bits = t.bits ?? 0;
-  return (bits >= 24 && rate >= 88_200) || rate >= 176_400;
-}
-
 export function isLosslessAudio(t: { path?: string; bits?: number }): boolean {
   const p = (t.path ?? "").toLowerCase();
   if (isLossless(p)) return true;
@@ -171,6 +165,13 @@ export function isLosslessAudio(t: { path?: string; bits?: number }): boolean {
     p.endsWith(".aif") ||
     p.endsWith(".aiff")
   );
+}
+
+export function isHiResTrack(t: { path?: string; sampleRate?: number; bits?: number }): boolean {
+  if (!isLosslessAudio(t) || isDsdTrack(t)) return false;
+  const rate = t.sampleRate ?? 0;
+  const bits = t.bits ?? 0;
+  return bits >= 24 && rate >= 88_200;
 }
 
 export function sortAndFilterTracks(
@@ -279,10 +280,18 @@ export function sortAndFilterRemoteTracks(
 
   if (pill !== "all") {
     switch (pill) {
-      case "hires":
+      case "hires": {
+        list = list.filter((t) => {
+          const cp = cachedRemotePath(t);
+          if (!cp) return false;
+          const localT = trackForPath(cp);
+          return localT ? isHiResTrack(localT) : false;
+        });
+        break;
+      }
       case "lossless": {
-        const lossy = ["mp3", "aac", "m4a", "ogg", "opus", "wma"];
-        list = list.filter((t) => !lossy.includes((t.container ?? "").toLowerCase()));
+        const lossless = ["flac", "wav", "wave", "ape", "wv", "aiff", "aif", "dsf", "dff", "alac"];
+        list = list.filter((t) => lossless.includes((t.container ?? "").toLowerCase()));
         break;
       }
       case "dsd": {
@@ -291,7 +300,10 @@ export function sortAndFilterRemoteTracks(
         break;
       }
       case "favourite":
-        list = list.filter((t) => isFavourite(`remote://${t.id}`));
+        list = list.filter((t) => {
+          const cp = cachedRemotePath(t);
+          return cp ? isFavourite(cp) : false;
+        });
         break;
     }
   }

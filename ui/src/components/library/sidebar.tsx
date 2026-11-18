@@ -14,6 +14,7 @@ import { removeRoot, roots, scopedRoot, setHomeRoot } from "../../state/catalog"
 import type { Playlist } from "../../backend/types";
 import { activeRemoteServer, isRemoteConfigured, removeServerById } from "../../state/remote";
 import { allSources, LOCAL_ALL_ID, selectSource, servers } from "../../state/sources";
+import { isRemoteKindEnabled } from "../../state/plugins";
 import { openSourceDialog } from "../ui/server-dialog";
 import { Hint, focusRing, LAYER } from "../ui/controls";
 import { iconMotion, Icon, type IconName } from "../ui/icons";
@@ -168,7 +169,7 @@ function LibraryPanel(props: { compact: boolean }) {
 
 function SourcesPanel(props: { compact?: boolean }) {
   const compact = () => props.compact === true;
-  const list = () => servers();
+  const list = () => servers().filter((s) => isRemoteKindEnabled(s.kind));
   const activeId = () => activeRemoteServer()?.id;
   const active = (id: string) => () => currentRoot().name === "remote" && isRemoteConfigured() && activeId() === id;
   return (

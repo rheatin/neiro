@@ -277,7 +277,7 @@ function PluginDialogContent() {
         contentClass="w-full"
         style={{ height: 420 }}
       >
-        <View style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+        <View class="grid" style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
           <Each of={filtered()}>
             {(plugin) => <PluginCard plugin={plugin()} />}
           </Each>
@@ -326,7 +326,7 @@ function PluginDialogContent() {
 
 function PluginCard(props: { plugin: PluginInfo }) {
   const p = () => props.plugin;
-  const isEnabled = () => p().enabled;
+  const isEnabled = () => Boolean(p().enabled);
 
   const tierLabel = () => {
     switch (p().tier) {
@@ -356,13 +356,17 @@ function PluginCard(props: { plugin: PluginInfo }) {
 
   return (
     <View
-      class="flex-col justify-between rounded-xl border border-border bg-secondary/50 p-3.5 transition hover:border-foreground/20 hover:bg-secondary/70"
+      class={`flex-col justify-between rounded-xl border p-3.5 transition ${
+        isEnabled()
+          ? "border-border bg-secondary/50 hover:border-foreground/20 hover:bg-secondary/70"
+          : "opacity-55 border-border/40 bg-card/30"
+      }`}
       accessibilityLabel={`插件 ${p().name}`}
     >
       <View class="flex-row items-start gap-3">
         {/* 36x36 Icon Block */}
         <View class="h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/80 bg-card/80 shadow-2xs">
-          <Icon name={pluginIcon(p())} size={18} color="primary" />
+          <Icon name={pluginIcon(p())} size={18} color={isEnabled() ? "primary" : "muted-foreground"} />
         </View>
 
         {/* Content Info */}

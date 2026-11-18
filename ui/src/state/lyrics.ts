@@ -239,7 +239,7 @@ export function startLyricsSearch(query?: LyricsQuery): void {
     lyricsSearch.set({ status: "done", candidates: [] });
     return;
   }
-  const providersJson = JSON.stringify(enabled);
+  const providersJson = JSON.stringify(enabled.map((p) => p.id));
 
   if (searchStop === null) {
     searchStop = engine.subscribeLyricsFound((candidates) => {

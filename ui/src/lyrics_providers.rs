@@ -639,7 +639,7 @@ pub fn search_all_lyrics(
             None => true,
             Some(list) => {
                 if list.is_empty() {
-                    true
+                    false
                 } else {
                     list.iter().any(|p| p == id)
                 }

@@ -1033,6 +1033,10 @@ export class Engine implements Backend {
   recordPlay(path: string, atMs: number): void {
     this.#command((base) => base.recordPlay(path, atMs));
   }
+
+  setPlayerForTest(p: Partial<Player>): void {
+    playerSig.update((prev) => ({ ...prev, ...p }));
+  }
 }
 
 /** The engine the stores share: made once (the slot keeps a hot update from

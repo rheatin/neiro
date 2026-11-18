@@ -16,7 +16,7 @@ import { cachedRemoteTracks, reconnectServer, removeServerById } from "../state/
 import { EFFECT_NAMES, TOOLBAR_EFFECTS, type ToolbarEffect } from "../components/ui/toolbar-fx";
 import { lightEffect, setLight, type LightChoice } from "../state/visual";
 import { isStreamBitPerfect, resolvedPath } from "../state/resolved";
-import { activeShellId, plugins } from "../state/plugins";
+import { activeShellId, isRemoteKindEnabled, plugins } from "../state/plugins";
 export function SettingsPage() {
   const path = () => engine.renderPath();
   const res = () => resolvedPath();
@@ -210,27 +210,41 @@ export function SettingsPage() {
                   <Each of={serverList()}>
                     {(srv) => {
                       const count = () => cachedRemoteTracks(srv().id).length;
+                      const enabled = () => isRemoteKindEnabled(srv().kind);
                       return (
-                        <View class="flex-row items-center justify-between rounded-(--radius) bg-secondary/50 px-3 py-2">
+                        <View class={`flex-row items-center justify-between rounded-(--radius) bg-secondary/50 px-3 py-2 ${enabled() ? "" : "opacity-60"}`}>
                           <View class="min-w-0 flex-1 pr-3">
-                            <Text class="text-sm font-medium text-foreground truncate">{srv().label}</Text>
+                            <View class="flex-row items-center gap-1.5">
+                              <Text class="text-sm font-medium text-foreground truncate">{srv().label}</Text>
+                              <If when={!enabled()}>
+                                <View class="rounded px-1.5 py-0.5 bg-amber-500/15">
+                                  <Text class="text-[10px] font-bold text-amber-500">插件已停用</Text>
+                                </View>
+                              </If>
+                            </View>
                             <Text class="text-[11px] font-mono text-muted-foreground truncate">
                               {srv().kind.toUpperCase()} · {srv().baseUrl} · 缓存 {count()} 首
                             </Text>
                           </View>
                           <View class="flex-row items-center gap-1.5 shrink-0">
                             <Button
+                              disabled={!enabled()}
                               onPress={() => {
+                                if (!enabled()) return;
                                 selectSource(`remote:${srv().id}`);
                                 switchTo(REMOTE);
                               }}
-                              class={`h-7 items-center justify-center rounded-(--radius) bg-secondary px-3 hover:bg-row-hover active:scale-95 ${focusRing}`}
+                              class={`h-7 items-center justify-center rounded-(--radius) bg-secondary px-3 hover:bg-row-hover active:scale-95 ${focusRing} ${enabled() ? "" : "opacity-40"}`}
                             >
                               <Text class="text-center text-xs font-medium leading-none text-foreground">进入管理</Text>
                             </Button>
                             <Button
-                              onPress={() => void reconnectServer(srv().id)}
-                              class={`h-7 items-center justify-center rounded-(--radius) bg-secondary px-3 hover:bg-row-hover active:scale-95 ${focusRing}`}
+                              disabled={!enabled()}
+                              onPress={() => {
+                                if (!enabled()) return;
+                                void reconnectServer(srv().id);
+                              }}
+                              class={`h-7 items-center justify-center rounded-(--radius) bg-secondary px-3 hover:bg-row-hover active:scale-95 ${focusRing} ${enabled() ? "" : "opacity-40"}`}
                             >
                               <Text class="text-center text-xs font-medium leading-none text-foreground">增量同步</Text>
                             </Button>

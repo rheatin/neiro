@@ -179,8 +179,20 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
 
     busy.set(true);
     let targetKind = selectedKind();
-    if (targetKind === "jellyfin" && jellyfinAuthMode() === "token") {
-      targetKind = "jellyfin_token";
+    const cleanParams: Record<string, string> = { ...vals };
+    let tokenVal: string | undefined = vals.token?.trim();
+    let passwordVal: string | undefined = vals.password?.trim();
+
+    if (targetKind === "jellyfin") {
+      if (jellyfinAuthMode() === "password") {
+        targetKind = "jellyfin";
+        tokenVal = undefined;
+        delete cleanParams.token;
+      } else {
+        targetKind = "jellyfin_token";
+        passwordVal = undefined;
+        delete cleanParams.password;
+      }
     }
 
     const server: RemoteServer = {
@@ -189,9 +201,9 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       kind: targetKind,
       baseUrl: url,
       user: userName,
-      ...(vals.token ? { token: vals.token.trim() } : {}),
-      ...(vals.password ? { password: vals.password.trim() } : {}),
-      params: vals,
+      ...(tokenVal ? { token: tokenVal } : {}),
+      ...(passwordVal ? { password: passwordVal } : {}),
+      params: cleanParams,
     };
 
     void (async () => {

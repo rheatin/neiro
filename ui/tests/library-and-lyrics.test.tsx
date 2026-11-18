@@ -1,5 +1,5 @@
 import { expect, test } from "nsh/test";
-import type { Album, Artist, Track } from "../src/backend/types";
+import { EMPTY_PLAYER, type Album, type Artist, type Track } from "../src/backend/types";
 import {
   albumDensity,
   albumSortField,
@@ -22,7 +22,10 @@ import {
   matchScore,
   rankedCandidates,
   similarity,
+  startLyricsSearch,
 } from "../src/state/lyrics";
+import { engine } from "../src/backend/engine";
+import { playTrack } from "../src/state/player";
 
 const SAMPLE_TRACKS: Track[] = [
   {
@@ -209,4 +212,40 @@ test("多源在线歌词匹配度算法与提供商集合验证", () => {
   const providers = enabledLyricsProviders();
   expect(providers.length).toBe(4);
   expect(enabledLyricsCount()).toBe(4);
+});
+
+test("startLyricsSearch 传给 engine.searchLyrics 的第 5 个参数确实是 string[] JSON", () => {
+  let capturedArgs: [string, string, string, number | null, string | null | undefined] | null = null;
+  const originalSearch = engine.searchLyrics;
+
+  engine.searchLyrics = (artist: string, title: string, album: string, durationS: number | null, providersJson?: string | null) => {
+    capturedArgs = [artist, title, album, durationS, providersJson];
+  };
+
+  engine.setPlayerForTest({
+    state: "playing",
+    path: SAMPLE_TRACKS[0].path,
+    title: SAMPLE_TRACKS[0].title,
+    artist: SAMPLE_TRACKS[0].artist,
+    album: SAMPLE_TRACKS[0].album,
+    durationMs: SAMPLE_TRACKS[0].durationMs,
+  });
+
+  try {
+    startLyricsSearch({ artist: "周杰伦", title: "晴天", album: "叶惠美", durationS: 269 });
+
+    expect(capturedArgs).not.toBeNull();
+    const providersJson = capturedArgs![4];
+    expect(typeof providersJson).toBe("string");
+    const parsed = JSON.parse(providersJson!);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBe(4);
+    for (const item of parsed) {
+      expect(typeof item).toBe("string");
+      expect(item.startsWith("builtin.lyrics.")).toBe(true);
+    }
+  } finally {
+    engine.searchLyrics = originalSearch;
+    engine.setPlayerForTest({ path: null, state: "stopped" });
+  }
 });

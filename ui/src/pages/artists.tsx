@@ -17,14 +17,15 @@ import {
   visibleArtists,
 } from "../state/catalog";
 import { activeSource } from "../state/sources";
-import { remoteArtistGroups, remoteLoadingState, remoteTracks, retryRemote } from "../state/remote";
+import { activeRemoteServer, queueRemoteFrom, remoteArtistGroups, remoteLoadingState, remoteTracks, retryRemote } from "../state/remote";
+import { open } from "../nav";
 import { RemoteCardsRow } from "../components/library/remote-cards";
 import { AppPage } from "../components/page";
 import { CardGrid } from "../components/library/cards";
 import { CardsSkeleton, EmptyState, ErrorState } from "../components/ui/feedback";
 import { ActionButton, focusRing } from "../components/ui/controls";
 import { enter } from "../components/ui/motion";
-import { Cover } from "../components/ui/cover";
+import { Cover, RemoteCover } from "../components/ui/cover";
 import { Icon } from "../components/ui/icons";
 import { playQueue } from "../state/player";
 import type { Artist } from "../backend/types";
@@ -77,6 +78,7 @@ export function ArtistsPage() {
       sub: `${group.tracks.length} 首`,
       count: group.tracks.length,
       track: group.tracks[0],
+      tracks: group.tracks,
     }));
   };
 
@@ -269,15 +271,38 @@ export function ArtistsPage() {
                 >
                   {(group) => {
                     const g = () => group();
+                    const onPlayRemote = () => {
+                      if (g().tracks.length > 0) queueRemoteFrom(g().tracks, 0);
+                    };
                     return (
-                      <View class="flex-row items-center justify-between rounded-xl border border-border/40 bg-secondary/30 p-2.5">
-                        <View class="flex-row items-center gap-3 min-w-0 flex-1">
-                          <Cover path="" round fallback="user" size={40} />
+                      <View class="group flex-row items-center justify-between rounded-xl border border-border/40 bg-secondary/30 p-2.5 transition hover:border-foreground/20 hover:bg-row-hover">
+                        <Button
+                          accessibilityLabel={`远程歌手 ${g().name}，${g().sub}`}
+                          onPress={() => {
+                            open({
+                              name: "remoteArtist",
+                              serverId: activeRemoteServer()?.id ?? "",
+                              artist: g().name,
+                            });
+                          }}
+                          class={`flex-row items-center gap-3 min-w-0 flex-1 text-left ${focusRing}`}
+                        >
+                          <RemoteCover id={g().track.id} coverArt={g().track.coverArt} size={40} round />
                           <View class="min-w-0 flex-1 gap-0.5">
                             <Text class="truncate text-sm font-bold text-foreground">{g().name}</Text>
                             <Text class="text-xs text-muted-foreground">{g().sub}</Text>
                           </View>
-                        </View>
+                        </Button>
+
+                        <Button
+                          onPress={onPlayRemote}
+                          accessibilityLabel={`播放 ${g().name} 全部远程曲目`}
+                          class={`shrink-0 items-center justify-center rounded-full bg-foreground/10 px-3 py-1.5 opacity-0 transition duration-150 ease-out group-hover:opacity-100 hover:bg-foreground hover:text-background active:scale-95 ${focusRing}`}
+                        >
+                          <Text class="text-xs font-bold text-foreground hover:text-background">
+                            ▶ 播放
+                          </Text>
+                        </Button>
                       </View>
                     );
                   }}
@@ -301,12 +326,12 @@ function ArtistRow(props: { artist: Artist }) {
   };
 
   return (
-    <Button
-      accessibilityLabel={`歌手 ${a().artist}，${a().albumCount} 张专辑，${a().trackCount} 首曲目`}
-      onPress={() => openItem(item())}
-      class={`group flex-row items-center justify-between rounded-xl border border-border/40 bg-secondary/30 p-2.5 transition hover:border-foreground/20 hover:bg-row-hover ${focusRing}`}
-    >
-      <View class="flex-row items-center gap-3 min-w-0 flex-1">
+    <View class="group flex-row items-center justify-between rounded-xl border border-border/40 bg-secondary/30 p-2.5 transition hover:border-foreground/20 hover:bg-row-hover">
+      <Button
+        accessibilityLabel={`歌手 ${a().artist}，${a().albumCount} 张专辑，${a().trackCount} 首曲目`}
+        onPress={() => openItem(item())}
+        class={`flex-row items-center gap-3 min-w-0 flex-1 text-left ${focusRing}`}
+      >
         <Cover path={coverTrack()} round fallback="user" size={40} />
         <View class="min-w-0 flex-1 gap-0.5">
           <Text class="truncate text-sm font-bold text-foreground">
@@ -316,17 +341,17 @@ function ArtistRow(props: { artist: Artist }) {
             {a().albumCount} 张专辑 · {a().trackCount} 首曲目
           </Text>
         </View>
-      </View>
+      </Button>
 
       <Button
         onPress={() => onPlayAll()}
         accessibilityLabel={`播放 ${a().artist} 全部曲目`}
         class={`shrink-0 items-center justify-center rounded-full bg-foreground/10 px-3 py-1.5 opacity-0 transition duration-150 ease-out group-hover:opacity-100 hover:bg-foreground hover:text-background active:scale-95 ${focusRing}`}
       >
-        <Text class="text-xs font-bold text-foreground group-hover:text-background">
+        <Text class="text-xs font-bold text-foreground hover:text-background">
           ▶ 播放
         </Text>
       </Button>
-    </Button>
+    </View>
   );
 }
