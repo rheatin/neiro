@@ -566,6 +566,12 @@ fn remote_cache_dir() -> String {
         .into_owned()
 }
 
+/// A cache root for tests and the private helpers that must not hard-code
+/// the app data path. Production passes the real directories.
+fn remote_cache_dir_in(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("Neiro").join("remote")
+}
+
 // ---- Local cover cache -----------------------------------------------------
 //
 // Embedded pictures are read out of the file (and decoded by Base) every time
@@ -582,6 +588,156 @@ fn local_cover_cache_dir() -> std::path::PathBuf {
         .parent()
         .expect("the library always has a directory")
         .join("artwork-local")
+}
+
+/// The local cover cache under an explicit root (tests).
+fn local_cover_cache_dir_in(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("Neiro").join("artwork-local")
+}
+
+/// One cache bucket's size and file count. Directories and links are not
+/// files: they are never counted or followed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CacheBucket {
+    bytes: u64,
+    files: u64,
+}
+
+impl CacheBucket {
+    fn walk(dir: &std::path::Path, recursive: bool) -> Self {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Self::default();
+        };
+        let mut total = Self::default();
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else { continue };
+            if file_type.is_dir() {
+                if recursive {
+                    total = total + Self::walk(&entry.path(), true);
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else { continue };
+            total.bytes += metadata.len();
+            total.files += 1;
+        }
+        total
+    }
+
+    /// Deletes the files of this bucket only, returning the failures left
+    /// behind (a playing file may be open; the next clean can take it).
+    fn clear(dir: &std::path::Path, recursive: bool) -> Self {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Self::default();
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else { continue };
+            if file_type.is_file() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        if recursive {
+            let _ = Self::walk_subdirs(dir, recursive);
+        }
+        Self::walk(dir, recursive)
+    }
+
+    fn walk_subdirs(dir: &std::path::Path, recursive: bool) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)?.flatten() {
+            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                Self::clear(&entry.path(), recursive);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Add for CacheBucket {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            bytes: self.bytes + rhs.bytes,
+            files: self.files + rhs.files,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct CacheStats {
+    remote_audio_bytes: u64,
+    remote_audio_files: u64,
+    remote_artwork_bytes: u64,
+    remote_artwork_files: u64,
+    remote_catalog_bytes: u64,
+    remote_catalog_files: u64,
+    local_artwork_bytes: u64,
+    local_artwork_files: u64,
+}
+
+/// The four buckets, under one app-data root. `audio` is Base's flat remote
+/// directory; the other two are named subdirectories.
+fn cache_stats_in(root: &std::path::Path) -> CacheStats {
+    let remote = remote_cache_dir_in(root);
+    let audio = CacheBucket::walk(&remote, false);
+    let artwork = CacheBucket::walk(&remote.join("artwork"), true);
+    let catalog = CacheBucket::walk(&remote.join("catalog"), true);
+    let local = CacheBucket::walk(&local_cover_cache_dir_in(root), false);
+    CacheStats {
+        remote_audio_bytes: audio.bytes,
+        remote_audio_files: audio.files,
+        remote_artwork_bytes: artwork.bytes,
+        remote_artwork_files: artwork.files,
+        remote_catalog_bytes: catalog.bytes,
+        remote_catalog_files: catalog.files,
+        local_artwork_bytes: local.bytes,
+        local_artwork_files: local.files,
+    }
+}
+
+fn parse_cache_kind(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "remote-audio" => Ok("remote-audio"),
+        "remote-artwork" => Ok("remote-artwork"),
+        "remote-catalog" => Ok("remote-catalog"),
+        "local-artwork" => Ok("local-artwork"),
+        "all" => Ok("all"),
+        _ => Err(format!("E_CACHE: 未知缓存类型 {kind}")),
+    }
+}
+
+/// Clears one known bucket under `root`, keeping its directory alive. "All"
+/// means all four buckets. The returned stats are the caller's truth.
+fn clear_cache_in(root: &std::path::Path, kind: &str) -> Result<String, String> {
+    parse_cache_kind(kind)?;
+    let remote = remote_cache_dir_in(root);
+    let artwork_dir = remote.join("artwork");
+    let catalog_dir = remote.join("catalog");
+    let local_dir = local_cover_cache_dir_in(root);
+    match kind {
+        "remote-audio" => { CacheBucket::clear(&remote, false); }
+        "remote-artwork" => { CacheBucket::clear(&artwork_dir, true); }
+        "remote-catalog" => { CacheBucket::clear(&catalog_dir, true); }
+        "local-artwork" => { CacheBucket::clear(&local_dir, false); }
+        _ => {
+            let _ = CacheBucket::clear(&remote, false);
+            let _ = CacheBucket::clear(&artwork_dir, true);
+            let _ = CacheBucket::clear(&catalog_dir, true);
+            let _ = CacheBucket::clear(&local_dir, false);
+        }
+    }
+    for dir in [remote.join("artwork"), remote.join("catalog"), local_dir] {
+        let shown = dir.display().to_string();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            if !dir.is_dir() {
+                return Err(format!("E_CACHE: 无法保留缓存目录 {shown}：{e}"));
+            }
+        }
+    }
+    let stats = cache_stats_in(root);
+    serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
 }
 
 /// The cache's ceiling. A 300 KB cover is ~1750 files at this budget; the
@@ -2121,6 +2277,20 @@ impl Base {
         cover_cache_write(&local_cover_cache_dir(), &path, &uri)
     }
 
+    /// The cache buckets' size and count, as a JSON object the interface
+    /// formats for people.
+    pub fn cache_stats(&self) -> Result<String, String> {
+        let root = data_root();
+        let stats = cache_stats_in(&root);
+        serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
+    }
+
+    /// Deletes one cache bucket's files (`all` = every bucket), keeps the
+    /// directories, and answers the stats as they are after the clean.
+    pub fn clear_cache(&self, kind: String) -> Result<String, String> {
+        clear_cache_in(&data_root(), &kind)
+    }
+
     // ---- playback: each is a queued command; the state changes as an event -
 
     /// Replaces the queue with this one track and starts it.
@@ -2527,6 +2697,90 @@ impl Base {
 /// than a panic in a listener's path.
 fn lock(inner: &Arc<Mutex<Inner>>) -> std::sync::MutexGuard<'_, Inner> {
     inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod cache_bucket_tests {
+    use super::*;
+
+    static CACHE_TEST_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    fn cache_tree() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "neiro-cache-test-{}-{}-{}",
+            std::process::id(),
+            CACHE_TEST_SEQ.fetch_add(1, Ordering::SeqCst),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let remote = remote_cache_dir_in(&root);
+        std::fs::create_dir_all(remote.join("artwork")).unwrap();
+        std::fs::create_dir_all(remote.join("catalog/nested")).unwrap();
+        std::fs::create_dir_all(local_cover_cache_dir_in(&root)).unwrap();
+        std::fs::write(remote.join("song.flac"), b"audio").unwrap();
+        std::fs::write(remote.join("artwork/cover.jpg"), b"cover").unwrap();
+        std::fs::write(remote.join("catalog/index.json"), b"catalog").unwrap();
+        std::fs::write(remote.join("catalog/nested/page.json"), b"page").unwrap();
+        std::fs::write(local_cover_cache_dir_in(&root).join("cover.txt"), b"local").unwrap();
+        let unrelated = root.join("Neiro").join("unrelated");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(unrelated.join("keep.txt"), b"keep").unwrap();
+        root
+    }
+
+    #[test]
+    fn stats_walks_the_known_buckets_only() {
+        let root = cache_tree();
+        let stats = cache_stats_in(&root);
+        assert_eq!(stats.remote_audio_files, 1);
+        assert_eq!(stats.remote_audio_bytes, 5);
+        assert_eq!(stats.remote_artwork_files, 1);
+        assert_eq!(stats.remote_artwork_bytes, 5);
+        assert_eq!(stats.remote_catalog_files, 2);
+        assert_eq!(stats.remote_catalog_bytes, 11);
+        assert_eq!(stats.local_artwork_files, 1);
+        assert_eq!(stats.local_artwork_bytes, 5);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clear_removes_files_and_keeps_directories() {
+        let root = cache_tree();
+        // The runtime may add its own local cover entries while the Rust
+        // suite runs; this test only owns the remote catalog bucket.
+        let json = clear_cache_in(&root, "remote-catalog").unwrap();
+        assert_eq!(
+            remote_cache_dir_in(&root).join("song.flac").exists(),
+            true,
+            "clearing catalog must keep remote audio"
+        );
+        assert_eq!(remote_cache_dir_in(&root).join("catalog").exists(), true);
+        assert_eq!(remote_cache_dir_in(&root).join("catalog/nested").exists(), true);
+        assert_eq!(remote_cache_dir_in(&root).join("catalog/index.json").exists(), false);
+        assert_eq!(remote_cache_dir_in(&root).join("catalog/nested/page.json").exists(), false);
+        let stats: CacheStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(stats.remote_catalog_files, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clear_all_does_not_touch_unrelated_files_or_links() {
+        let root = cache_tree();
+        let link = remote_cache_dir_in(&root).join("linked.flac");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(remote_cache_dir_in(&root).join("song.flac"), &link).unwrap();
+        clear_cache_in(&root, "all").unwrap();
+        assert_eq!(remote_cache_dir_in(&root).join("song.flac").exists(), false);
+        assert_eq!(remote_cache_dir_in(&root).join("catalog").exists(), true);
+        assert_eq!(remote_cache_dir_in(&root).join("artwork").exists(), true);
+        assert_eq!(local_cover_cache_dir_in(&root).exists(), true);
+        assert_eq!(root.join("Neiro/unrelated/keep.txt").exists(), true);
+        #[cfg(unix)]
+        assert_eq!(link.symlink_metadata().unwrap().file_type().is_symlink(), true);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]
