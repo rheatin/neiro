@@ -1,7 +1,8 @@
 // Plugin state store, scoped permission gate, and hot-swappable shell registry.
 
-import { signal, Storage } from "nsh";
+import { effect, signal, Storage } from "nsh";
 import { engine } from "../backend/engine";
+import { ready } from "./engine";
 import type { PluginInfo, ProviderDescriptor } from "../backend/types";
 
 const ACTIVE_SHELL_KEY = "neiro:active-shell-id";
@@ -302,6 +303,36 @@ export function rescanPlugins(): void {
   }
 }
 
+type PluginToggleHook = (id: string, enabled: boolean) => void;
+const toggleHooks: PluginToggleHook[] = [];
+export function registerPluginToggleHook(hook: PluginToggleHook): void {
+  toggleHooks.push(hook);
+}
+
+export function syncPluginStatesToEngine(): void {
+  const syncable = [
+    "jellyfin",
+    "jellyfin_token",
+    "navidrome",
+    "webdav",
+    "builtin.visualizer.signal-chain",
+    STUDIO_MINIMAL_SHELL_ID,
+  ];
+  for (const id of syncable) {
+    const enabled = isPluginEnabled(id);
+    try {
+      engine.setPluginEnabled(id, enabled);
+    } catch {}
+  }
+}
+
+// Automatically sync whenever engine becomes ready
+effect(() => {
+  if (ready()) {
+    syncPluginStatesToEngine();
+  }
+});
+
 export function togglePlugin(id: string, enabled: boolean): void {
   if (LOCKED_PLUGIN_IDS.has(id)) {
     return;
@@ -331,7 +362,17 @@ export function togglePlugin(id: string, enabled: boolean): void {
       }
     } catch {}
 
+    syncPluginStatesToEngine();
+
     refreshPlugins();
+
+    for (const hook of toggleHooks) {
+      try {
+        hook(id, enabled);
+      } catch (e) {
+        console.warn("neiro: plugin toggle hook error:", e);
+      }
+    }
 
     // If active shell was disabled, automatically fall back to default industrial rack
     if (!enabled && activeShellId() === id) {
@@ -365,6 +406,7 @@ void Promise.all([
       }
     } catch {}
   }
+  syncPluginStatesToEngine();
   if (savedShell && savedShell.trim() !== "") {
     const trimmed = savedShell.trim();
     if (isPluginEnabled(trimmed)) {

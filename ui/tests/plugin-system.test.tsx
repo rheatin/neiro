@@ -9,9 +9,11 @@ import {
   PermissionDeniedError,
   plugins,
   refreshPlugins,
+  registerPluginToggleHook,
   switchShell,
   togglePlugin,
 } from "../src/state/plugins";
+import { BODY, colorOf, type IconName } from "../src/components/ui/icons";
 import type { PluginInfo } from "../src/backend/types";
 
 test("权限沙箱检查：无 tags.write 权限调用 writeTags 抛出 PermissionDeniedError", async () => {
@@ -186,3 +188,47 @@ test("UI 渲染与交互验证：Grid插件矩阵、Jellyfin归一双模式与�
   await app.waitFor("text:API KEY / TOKEN", { timeout: 5000 });
   expect(app.shows("text:API KEY / TOKEN")).toBe(true);
 }, 60_000);
+
+test("矢量图标与颜色纯净性断言：BODY 中 100% 仅使用 path 标签，colorOf 规范化 8 位 Hex", () => {
+  const disallowedTags = ["<rect", "<line", "<circle", "<polygon", "<polyline", "<ellipse"];
+  const iconNames = Object.keys(BODY) as IconName[];
+  expect(iconNames.length).toBe(52);
+
+  for (const name of iconNames) {
+    const svgBody = BODY[name];
+    expect(svgBody.length > 0).toBe(true);
+    for (const tag of disallowedTags) {
+      if (svgBody.includes(tag)) {
+        throw new Error(`Icon "${name}" contains forbidden tag "${tag}": ${svgBody}`);
+      }
+    }
+    // Must contain <path
+    expect(svgBody.includes("<path ")).toBe(true);
+  }
+
+  // colorOf tests
+  expect(colorOf({ name: "home", hex: "#e2a53fff" })).toBe("#e2a53f");
+  expect(colorOf({ name: "home", hex: "#E2A53FFF" })).toBe("#E2A53F");
+  expect(colorOf({ name: "home", hex: "#ffffff" })).toBe("#ffffff");
+  expect(colorOf({ name: "home", hex: "#123456" })).toBe("#123456");
+});
+
+test("Jellyfin 禁用与重连联动机制：禁用切回本地，启用触发引擎对齐与重连 Hook", async () => {
+  let toggledEvent: { id: string; enabled: boolean } | null = null;
+  registerPluginToggleHook((id, enabled) => {
+    toggledEvent = { id, enabled };
+  });
+
+  // Toggle off jellyfin
+  togglePlugin("jellyfin", false);
+  expect(isPluginEnabled("jellyfin")).toBe(false);
+  expect(isPluginEnabled("jellyfin_token")).toBe(false);
+  expect(toggledEvent).toEqual({ id: "jellyfin", enabled: false });
+
+  // Toggle back on
+  togglePlugin("jellyfin", true);
+  expect(isPluginEnabled("jellyfin")).toBe(true);
+  expect(isPluginEnabled("jellyfin_token")).toBe(true);
+  expect(toggledEvent).toEqual({ id: "jellyfin", enabled: true });
+});
+

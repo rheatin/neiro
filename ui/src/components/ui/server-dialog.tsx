@@ -7,13 +7,15 @@ import { Button, Input } from "nsh/base";
 import type { ProviderDescriptor } from "../../backend/types";
 import {
   activeRemoteServer,
+  isRemoteConfigured,
+  reconnectServer,
   removeServerById,
 } from "../../state/remote";
 import { selectSource, servers, upsertServer, type RemoteServer } from "../../state/sources";
-import { isRemoteConfigured } from "../../state/remote";
 import { setServerDialogOpen, serverDialogOpen } from "../../state/overlays";
 import { isRemoteKindEnabled, refreshPlugins, remoteProviders } from "../../state/plugins";
 import { reportEngineFailure } from "../../backend/engine";
+import { switchTo, REMOTE } from "../../nav";
 import { ActionButton, TextLink, focusRing } from "./controls";
 import { AppDialog } from "./overlays";
 import { Icon } from "./icons";
@@ -48,12 +50,15 @@ export function ServerDialog() {
       open={serverDialogOpen()}
       onOpenChange={(next) => {
         if (next) refreshPlugins();
+        if (!next) editing.set(undefined);
         setServerDialogOpen(next);
       }}
       maxWidthClass="max-w-lg"
       testID="server-dialog"
     >
-      <ServerDialogContent />
+      <If when={serverDialogOpen()}>
+        <ServerDialogContent />
+      </If>
     </AppDialog>
   );
 }
@@ -86,7 +91,10 @@ function ServerList(props: { onNew: () => void; onEdit: (server: RemoteServer) =
         </Text>
         <Button
           accessibilityLabel="关闭"
-          onPress={() => setServerDialogOpen(false)}
+          onPress={() => {
+            editing.set(undefined);
+            setServerDialogOpen(false);
+          }}
           class={`items-center justify-center rounded-(--radius) p-1 hover:bg-muted active:opacity-60 ${focusRing}`}
         >
           <Icon name="close" size={16} color="muted-foreground" />
@@ -210,7 +218,10 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       try {
         await upsertServer(server);
         selectSource(`remote:${server.id}`);
+        await reconnectServer(server.id);
         setServerDialogOpen(false);
+        editing.set(undefined);
+        switchTo(REMOTE);
       } catch (error) {
         reportEngineFailure(error, "连接失败");
       } finally {

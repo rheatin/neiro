@@ -52,6 +52,16 @@ export { fetchingId as isFetchingRemote };
 
 // ---- 会话：凭据只进 Storage，重启后自动 setRemoteXxx 重连 -------------------
 
+/** 每个已拉过服务器的曲目列表（内存缓存；切回该来源时立即上屏，随后
+ * id 重新注册的重拉在后台进行）。 */
+const serverCache = new Map<string, RemoteTrack[]>();
+const cacheVersion = signal(0);
+let activeEngineServerId = "";
+let fetchingServerId = "";
+let fetchingBaseUrl = "";
+let emptyHandled = false;
+let lastSyncAt = 0;
+
 function applyRemote(cfg: RemoteConfig): void {
   const params: Record<string, string> = {
     base_url: cfg.baseUrl,
@@ -76,7 +86,7 @@ export async function saveRemoteConfig(cfg: RemoteConfig): Promise<void> {
   );
 }
 
-export async function disconnectRemote(): Promise<void> {
+export async function disconnectRemote(clearCache: boolean = false): Promise<void> {
   config.set(null);
   await Storage.removeItem(CONFIG_KEY).then(undefined, (error) =>
     console.warn("neiro: 远程配置没有删除:", String(error)),
@@ -86,12 +96,22 @@ export async function disconnectRemote(): Promise<void> {
   } catch (error) {
     reportEngineFailure(error, "断开远程失败");
   }
-  serverCache.clear();
-  cacheVersion.update((v) => v + 1);
+  activeEngineServerId = "";
+  fetchingServerId = "";
+  fetchingBaseUrl = "";
+  lastSyncAt = 0;
+  emptyHandled = false;
+  remoteError.set("");
+  remoteFetching.set(false);
+  if (clearCache) {
+    serverCache.clear();
+    cacheVersion.update((v) => v + 1);
+  }
   untracked(() => {
     activeSourceId.set("local:all");
     remoteTracks.set([]);
     setRemoteQuery("");
+    remoteLoadingState.set("idle");
   });
 }
 
@@ -178,14 +198,6 @@ effect(() => {
 
 // ---- 多服务器：花名册来自 sources.ts；激活 = 配置 + 重拉 -------------------
 
-/** 每个已拉过服务器的曲目列表（内存缓存；切回该来源时立即上屏，随后
- * id 重新注册的重拉在后台进行）。 */
-const serverCache = new Map<string, RemoteTrack[]>();
-const cacheVersion = signal(0);
-let activeEngineServerId = "";
-let fetchingServerId = "";
-let fetchingBaseUrl = "";
-
 export function cachedRemoteTracks(serverId: string): RemoteTrack[] {
   cacheVersion();
   return serverCache.get(serverId) ?? [];
@@ -216,11 +228,11 @@ export const activeRemoteServer = computed<RemoteServer | null>(() => {
 /** Re-sends the server's credentials to the engine and lists again: what a
  * listener wants from 重新连接, without editing anything. */
 export async function reconnectServer(serverId: string): Promise<void> {
-  await activateServer(serverId);
+  await activateServer(serverId, true);
   if (remoteTracks().length === 0) loadRemote(true);
 }
 
-export async function activateServer(serverId: string): Promise<void> {
+export async function activateServer(serverId: string, force: boolean = false): Promise<void> {
   const server = servers().find((s) => s.id === serverId);
   if (!server) {
     // 花名册里没有（被删了）：回到本地来源，清空远程视图。
@@ -248,7 +260,12 @@ export async function activateServer(serverId: string): Promise<void> {
 
   const status = engine.remoteStatus();
   const sameServer =
-    status.configured && status.baseUrl === server.baseUrl && remoteConfig()?.kind === server.kind &&
+    !force &&
+    remoteTracks().length > 0 &&
+    remoteError() === "" &&
+    status.configured &&
+    status.baseUrl === server.baseUrl &&
+    remoteConfig()?.kind === server.kind &&
     remoteConfig()?.user === (server.user ?? "");
   if (!sameServer) {
     try {
@@ -317,11 +334,6 @@ const REMOTE_PAGE = 200;
  * swap happens when the last page lands, so a re-listing never blanks the
  * page and never mixes two listings. */
 let freshList: RemoteTrack[] | null = null;
-/** One re-sign-in per session after an empty answer: a token left over from an
- * earlier sign-in can belong to another account on the same server, and its
- * listing is empty rather than refused. */
-let emptyHandled = false;
-let lastSyncAt = 0;
 
 /** How long a listing is trusted before the page refreshes it again. */
 const SYNC_TTL_MS = 5 * 60 * 1000;

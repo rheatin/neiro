@@ -9,7 +9,7 @@
 import { computed, effect, signal, Storage } from "nsh";
 import type { RemoteKind } from "../backend/types";
 import { addRoot, roots, rootsLoaded, scopedRoot, setHomeRoot } from "./catalog";
-import { isRemoteKindEnabled } from "./plugins";
+import { isRemoteKindEnabled, registerPluginToggleHook } from "./plugins";
 import { notify } from "./feedback";
 
 export type SourceKind = "local" | "remote";
@@ -85,6 +85,17 @@ effect(() => {
       selectSource(LOCAL_ALL_ID);
       remoteDisconnector?.();
       notify("远程插件已停用，已断开连接");
+    }
+  }
+});
+
+/** 协议重新启用时，若存在该协议的服务器，自动重连并激活该来源 */
+registerPluginToggleHook((id, enabled) => {
+  if (enabled && (id === "jellyfin" || id === "navidrome" || id === "webdav")) {
+    const matching = servers().find((s) => s.kind === id || (id === "jellyfin" && s.kind === "jellyfin_token"));
+    if (matching) {
+      selectSource(`remote:${matching.id}`);
+      notify(`已重新启用 ${matching.label}，正在连接…`);
     }
   }
 });
