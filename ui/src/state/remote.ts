@@ -7,6 +7,7 @@ import { engine, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
 import { registerRemotePlayer, playTrack, QUEUE_AHEAD, trackToQueueItem } from "./player";
 import { registerRemoteCatalog } from "./catalog";
+import { ALL_ID } from "./sources";
 import { activeSourceId, registerRemoteActivator, registerRemoteDisconnector, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
 import { shuffle, shuffled } from "./shuffle";
 
@@ -209,7 +210,7 @@ export async function disconnectRemote(clearCache: boolean = false): Promise<voi
     cacheVersion.update((v) => v + 1);
   }
   untracked(() => {
-    activeSourceId.set("local:all");
+    activeSourceId.set(ALL_ID);
     remoteTracks.set([]);
     setRemoteQuery("");
     remoteLoadingState.set("idle");
@@ -342,7 +343,7 @@ export async function activateServer(serverId: string, force: boolean = false): 
     fetchingBaseUrl = "";
     freshList = null;
     remoteFetching.set(false);
-    activeSourceId.set("local:all");
+    activeSourceId.set(ALL_ID);
     remoteTracks.set([]);
     remoteLoadingState.set("idle");
     return;
@@ -871,11 +872,12 @@ effect(() => {
 });
 
 registerRemoteCatalog(
-  () => allRemoteTracks().map(remoteAsTrack),
+  () => remoteTracks().map(remoteAsTrack),
   (path) => {
     const rt = remoteTrackForCachePath(path);
     return rt ? asLocalTrack(rt, path) : undefined;
   },
+  () => remoteLoadingState(),
 );
 
 registerRemotePlayer({

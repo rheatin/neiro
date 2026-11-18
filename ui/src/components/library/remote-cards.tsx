@@ -4,9 +4,11 @@
 import { Image, List, Text, View } from "nsh";
 import { Button } from "nsh/base";
 import type { RemoteTrack } from "../../backend/types";
+import { queueRemoteFrom } from "../../state/remote";
 import { open } from "../../nav";
 import { remoteCoverOf } from "../../state/artwork";
-import { activeRemoteServer } from "../../state/remote";
+import { RemoteCover } from "../ui/cover";
+import { activeRemoteServer, type RemoteAlbumGroup } from "../../state/remote";
 import { focusRing } from "../ui/controls";
 import type { ListWave } from "../ui/motion";
 import { Icon } from "../ui/icons";
@@ -18,6 +20,7 @@ export interface RemoteCardItem {
   sub: string;
   track: RemoteTrack;
   count: number;
+  tracks?: RemoteTrack[];
 }
 
 export function RemoteCardsRow(props: {
@@ -27,10 +30,9 @@ export function RemoteCardsRow(props: {
   /** A page that owns the whole screen lays its cards out as a filling grid;
    * a home-page section keeps them in a row. */
   grid?: boolean;
-  compact?: boolean;
 }) {
   if (props.grid) {
-    const minW = props.compact ? 112 : 160;
+    const minW = 160;
     return (
       <View class="grid" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${minW}px, 1fr))` }}>
         <Each of={props.items} key={(item) => item.key}>
@@ -101,5 +103,41 @@ export function RemoteGroupCard(props: {
         <Text class="line-clamp-2 text-xs text-muted-foreground">{item().sub}</Text>
       </View>
     </Button>
+  );
+}
+
+export function RemoteAlbumRow(props: { item: RemoteCardItem }) {
+  const item = () => props.item;
+  return (
+    <View class="group flex-row items-center justify-between rounded-xl border border-border/40 bg-secondary/30 p-2.5 transition hover:border-foreground/20 hover:bg-row-hover">
+      <Button
+        accessibilityLabel={`专辑 ${item().name}，${item().sub}`}
+        onPress={() =>
+          open({
+            name: "remoteAlbum",
+            serverId: activeRemoteServer()?.id ?? "",
+            album: item().name,
+            artist: item().track.artist || "",
+          })
+        }
+        class={`flex-row items-center gap-3 min-w-0 flex-1 text-left ${focusRing}`}
+      >
+        <RemoteCover id={item().track.id} coverArt={item().track.coverArt} size={40} />
+        <View class="min-w-0 flex-1 gap-0.5">
+          <Text class="truncate text-sm font-bold text-foreground">{item().name || "未知专辑"}</Text>
+          <Text class="truncate text-xs text-muted-foreground">
+            {item().track.artist || "未知歌手"} · {item().count} 首
+          </Text>
+        </View>
+      </Button>
+      <Button
+        onPress={() => queueRemoteFrom(item().tracks ?? [item().track], 0)}
+        accessibilityLabel={`播放 ${item().name} 全部曲目`}
+        class={`shrink-0 flex-row items-center gap-1 rounded-full bg-foreground/10 px-2.5 py-1.5 opacity-0 transition duration-150 ease-out group-hover:opacity-100 hover:bg-foreground hover:text-background active:scale-95 ${focusRing}`}
+      >
+        <Icon name="play" size={11} color="foreground" />
+        <Text class="text-xs font-bold text-foreground group-hover:text-background">播放</Text>
+      </Button>
+    </View>
   );
 }

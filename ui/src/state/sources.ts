@@ -1,4 +1,5 @@
-// 来源模型（首页"来源"Tab）：本地（全部 + 每个根目录）与每个已配置的远
+// 来源模型（首页"来源"Tab）：全部、本地（全部 + 每个根目录）与每个已配置
+// 的远
 // 程服务器。Base 同一时间只连一个远程（`set_remote*` 替换），所以远程
 // 来源的切换 = `activateServer(id)`（配置 + 重拉）；本地来源用 catalog 的
 // 根过滤层，无需任何引擎动作。
@@ -8,11 +9,11 @@
 
 import { computed, effect, signal, Storage } from "nsh";
 import type { RemoteKind } from "../backend/types";
-import { addRoot, roots, rootsLoaded, scopedRoot, setHomeRoot } from "./catalog";
+import { addRoot, registerSourceKind, roots, rootsLoaded, scopedRoot, setHomeRoot } from "./catalog";
 import { isRemoteKindEnabled, registerPluginToggleHook } from "./plugins";
 import { notify } from "./feedback";
 
-export type SourceKind = "local" | "remote";
+export type SourceKind = "all" | "local" | "remote";
 
 export interface RemoteServer {
   id: string;
@@ -26,15 +27,20 @@ export interface RemoteServer {
 }
 
 export interface Source {
-  id: string; // "local:all" | `local:${root}` | `remote:${serverId}`
+  id: string; // "all" | "local:all" | `local:${root}` | `remote:${serverId}`
   kind: SourceKind;
   label: string;
   root?: string;
   serverId?: string;
 }
 
+/** 「全部」= 本地曲库 + 当前已连接/已加载的远程列表；不拼 serverCache，
+ * 因为 Base 同一时间只连一台远程。 */
+export const ALL_ID = "all";
+export const ALL: Source = { id: ALL_ID, kind: "all", label: "全部" };
+
 export const LOCAL_ALL_ID = "local:all";
-export const LOCAL_ALL: Source = { id: LOCAL_ALL_ID, kind: "local", label: "全部本地" };
+export const LOCAL_ALL: Source = { id: LOCAL_ALL_ID, kind: "local", label: "本地" };
 
 const SERVERS_KEY = "remote:servers";
 const ACTIVE_KEY = "source:active";
@@ -54,7 +60,7 @@ function serverSource(server: RemoteServer): Source {
 
 /** 本地来源：全部 + 每个根目录（根目录 basename 作 label）。 */
 export const localSources = computed<Source[]>(() => {
-  const list: Source[] = [LOCAL_ALL];
+  const list: Source[] = [ALL, LOCAL_ALL];
   if (rootsLoaded()) {
     for (const root of roots()) {
       const base = root.replace(/\\/g, "/").split("/").pop() || root;
@@ -72,17 +78,17 @@ export const remoteSources = computed<Source[]>(() =>
 /** 全部来源（本地在前）。 */
 export const allSources = (): Source[] => [...localSources(), ...remoteSources()];
 
-/** 当前激活来源（tracked；未持久化前 = 全部本地）。 */
-export const activeSourceId = signal<string>(LOCAL_ALL_ID);
+/** 当前激活来源（tracked；未持久化前 = 全部）。 */
+export const activeSourceId = signal<string>(ALL_ID);
 
-/** 协议被禁用时若当前正激活该协议来源，自动断开并退回全部本地 */
+/** 协议被禁用时若当前正激活该协议来源，自动断开并退回「全部」 */
 effect(() => {
   const currentId = activeSourceId();
   if (currentId.startsWith("remote:")) {
     const sId = currentId.slice("remote:".length);
     const s = servers().find((srv) => srv.id === sId);
     if (s && !isRemoteKindEnabled(s.kind)) {
-      selectSource(LOCAL_ALL_ID);
+      selectSource(ALL_ID);
       remoteDisconnector?.();
       notify("远程插件已停用，已断开连接");
     }
@@ -102,8 +108,10 @@ registerPluginToggleHook((id, enabled) => {
 
 export const activeSource = (): Source => {
   const id = activeSourceId();
-  return allSources().find((s) => s.id === id) ?? LOCAL_ALL;
+  return allSources().find((s) => s.id === id) ?? ALL;
 };
+
+registerSourceKind(() => activeSource().kind);
 
 /** 服务器花名册的增改删（凭据只进 Storage）。 */
 export async function upsertServer(server: RemoteServer): Promise<void> {
@@ -201,7 +209,9 @@ effect(() => {
       servers.set(list);
       serversLoaded.set(true);
       // 2) 激活来源：读 `source:active`；指向远程 → 恢复该服务器。
-      const activeId = (await Storage.getItem(ACTIVE_KEY)) ?? LOCAL_ALL_ID;
+      const storedId = (await Storage.getItem(ACTIVE_KEY)) ?? ALL_ID;
+      // 旧默认 `local:all` 的语义就是“全部”；一次性迁移到新的 ALL_ID。
+      const activeId = storedId === LOCAL_ALL_ID ? ALL_ID : storedId;
       activeSourceId.set(activeId);
       if (activeId.startsWith("local:") && activeId !== LOCAL_ALL_ID) {
         setHomeRoot(activeId.slice("local:".length));
