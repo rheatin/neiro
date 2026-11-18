@@ -104,7 +104,7 @@ export function ArtistsPage() {
                     }
                   }}
                   accessibilityLabel={`按 ${opt().label} 排序`}
-                  class={`rounded-full px-2.5 py-1 text-xs transition ${
+                  class={`flex-row items-center gap-1 rounded-full px-2.5 py-1 text-xs transition ${
                     selected()
                       ? "bg-foreground text-background font-bold shadow-2xs"
                       : "bg-secondary text-muted-foreground hover:text-foreground"
@@ -112,8 +112,14 @@ export function ArtistsPage() {
                 >
                   <Text class={`text-xs ${selected() ? "text-background font-bold" : "text-muted-foreground"}`}>
                     {opt().label}
-                    {selected() ? (artistSortOrder() === "asc" ? " ↑" : " ↓") : ""}
                   </Text>
+                  <If when={selected()}>
+                    <Icon
+                      name={artistSortOrder() === "asc" ? "sortAsc" : "sortDesc"}
+                      size={11}
+                      color={selected() ? "background" : "foreground"}
+                    />
+                  </If>
                 </Button>
               );
             }}
@@ -297,10 +303,11 @@ export function ArtistsPage() {
                         <Button
                           onPress={onPlayRemote}
                           accessibilityLabel={`播放 ${g().name} 全部远程曲目`}
-                          class={`shrink-0 items-center justify-center rounded-full bg-foreground/10 px-3 py-1.5 opacity-0 transition duration-150 ease-out group-hover:opacity-100 hover:bg-foreground hover:text-background active:scale-95 ${focusRing}`}
+                          class={`shrink-0 flex-row items-center gap-1 rounded-full bg-foreground/10 px-2.5 py-1.5 opacity-0 transition duration-150 ease-out group-hover:opacity-100 hover:bg-foreground hover:text-background active:scale-95 ${focusRing}`}
                         >
-                          <Text class="text-xs font-bold text-foreground hover:text-background">
-                            ▶ 播放
+                          <Icon name="play" size={11} color="foreground" />
+                          <Text class="text-xs font-bold text-foreground group-hover:text-background">
+                            播放
                           </Text>
                         </Button>
                       </View>
@@ -346,10 +353,11 @@ function ArtistRow(props: { artist: Artist }) {
       <Button
         onPress={() => onPlayAll()}
         accessibilityLabel={`播放 ${a().artist} 全部曲目`}
-        class={`shrink-0 items-center justify-center rounded-full bg-foreground/10 px-3 py-1.5 opacity-0 transition duration-150 ease-out group-hover:opacity-100 hover:bg-foreground hover:text-background active:scale-95 ${focusRing}`}
+        class={`shrink-0 flex-row items-center gap-1 rounded-full bg-foreground/10 px-2.5 py-1.5 opacity-0 transition duration-150 ease-out group-hover:opacity-100 hover:bg-foreground hover:text-background active:scale-95 ${focusRing}`}
       >
-        <Text class="text-xs font-bold text-foreground hover:text-background">
-          ▶ 播放
+        <Icon name="play" size={11} color="foreground" />
+        <Text class="text-xs font-bold text-foreground group-hover:text-background">
+          播放
         </Text>
       </Button>
     </View>

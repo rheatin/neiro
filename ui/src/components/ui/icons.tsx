@@ -18,11 +18,13 @@ export type IconName =
   | "repeat" | "repeatOnce"
   | "dots" | "queue" | "settings"
   | "layout" | "wave" | "cloud" | "fileText" | "cpu" | "sliders"
-  | "grid" | "list" | "sortAsc" | "sortDesc" | "layers";
+  | "grid" | "list" | "sortAsc" | "sortDesc" | "layers"
+  | "puzzle" | "jellyfin" | "radio" | "cut" | "globe" | "headphones" | "mic";
 
 // Tabler Icons, outline (1pt in the source files; drawn here at 1.5) and
 // filled for the transport. Each string is the inside of a 24×24 SVG.
-const BODY: Record<IconName, string> = {
+// NOTE: NSH's native rasterizer strictly requires pure <path> elements!
+export const BODY: Record<IconName, string> = {
   home: '<path d="M5 12l-2 0l9 -9l9 9l-2 0" /><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7" /><path d="M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6" />',
   search: '<path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0" /><path d="M21 21l-6 -6" />',
   music: '<path d="M3 17a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" /><path d="M13 17a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" /><path d="M9 17v-13h10v13" /><path d="M9 8h10" />',
@@ -38,8 +40,6 @@ const BODY: Record<IconName, string> = {
   server: '<path d="M3 4a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-4z" /><path d="M3 16a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-4z" /><path d="M7 7l0 .01" /><path d="M7 19l0 .01" />',
   settings:
     '<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z" /><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" />',
-  // 随机播放（Feather 的 shuffle 几何：两条交叉线加两枚箭头；同为描边
-  // 风格，笔画与 Tabler 一致画 1.5）。
   shuffle: '<path d="M16 3h5v5" /><path d="M4 20L21 3" /><path d="M21 16v5h-5" /><path d="M15 15l6 6" /><path d="M4 4l5 5" />',
   repeat: '<path d="M4 12v-3a3 3 0 0 1 3 -3h13m-3 -3l3 3l-3 3" /><path d="M20 12v3a3 3 0 0 1 -3 3h-13m3 3l-3 -3l3 -3" />',
   repeatOnce: '<path d="M4 12v-3a3 3 0 0 1 3 -3h13m-3 -3l3 3l-3 3" /><path d="M20 12v3a3 3 0 0 1 -3 3h-13m3 3l-3 -3l3 -3" /><path d="M11 11l1 -1v4" />',
@@ -56,23 +56,28 @@ const BODY: Record<IconName, string> = {
   pause: '<path d="M9 4h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h2a2 2 0 0 0 2 -2v-12a2 2 0 0 0 -2 -2z" /><path d="M17 4h-2a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h2a2 2 0 0 0 2 -2v-12a2 2 0 0 0 -2 -2z" />',
   skipBack: '<path d="M19.496 4.136l-12 7a1 1 0 0 0 0 1.728l12 7a1 1 0 0 0 1.504 -.864v-14a1 1 0 0 0 -1.504 -.864z" /><path d="M4 4a1 1 0 0 1 .993 .883l.007 .117v14a1 1 0 0 1 -1.993 .117l-.007 -.117v-14a1 1 0 0 1 1 -1z" />',
   skipForward: '<path d="M2 5v14c0 .86 1.012 1.318 1.659 .753l8 -7a1 1 0 0 0 0 -1.506l-8 -7c-.647 -.565 -1.659 -.106 -1.659 .753z" /><path d="M13 5v14c0 .86 1.012 1.318 1.659 .753l8 -7a1 1 0 0 0 0 -1.506l-8 -7c-.647 -.565 -1.659 -.106 -1.659 .753z" />',
-  // Tabler heart（同一 path，描边 / 填充两用）。
   heart: '<path d="M6.979 3.074a6 6 0 0 1 4.988 1.425l.037 .033l.034 -.03a6 6 0 0 1 4.733 -1.44l.246 .036a6 6 0 0 1 3.364 10.008l-.18 .185l-.048 .041l-7.45 7.379a1 1 0 0 1 -1.313 .082l-.094 -.082l-7.493 -7.422a6 6 0 0 1 3.176 -10.215z" />',
   heartFilled: '<path d="M6.979 3.074a6 6 0 0 1 4.988 1.425l.037 .033l.034 -.03a6 6 0 0 1 4.733 -1.44l.246 .036a6 6 0 0 1 3.364 10.008l-.18 .185l-.048 .041l-7.45 7.379a1 1 0 0 1 -1.313 .082l-.094 -.082l-7.493 -7.422a6 6 0 0 1 3.176 -10.215z" />',
   plus: '<path d="M12 5l0 14" /><path d="M5 12l14 0" />',
-  // Tabler sparkles（light 菜单的 ✦）。
   sparkles: '<path d="M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 6 6z" />',
-  layout: '<rect x="4" y="4" width="16" height="16" rx="2" /><line x1="4" y1="10" x2="20" y2="10" /><line x1="10" y1="10" x2="10" y2="20" />',
+  puzzle: '<path d="M4 7h3a1 1 0 0 0 1 -1v-1a2 2 0 0 1 4 0v1a1 1 0 0 0 1 1h3a1 1 0 0 1 1 1v3a1 1 0 0 0 1 1h1a2 2 0 0 1 0 4h-1a1 1 0 0 0 -1 1v3a1 1 0 0 1 -1 1h-3a1 1 0 0 1 -1 -1v-1a2 2 0 0 0 -4 0v1a1 1 0 0 1 -1 1h-3a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1h1a2 2 0 0 0 0 -4h-1a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1" />',
+  layout: '<path d="M4 6a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z" /><path d="M4 10h16" /><path d="M10 10v10" />',
   wave: '<path d="M4 12h2l2 -6l3 12l3 -8l2 5l2 -3h2" />',
   cloud: '<path d="M6.657 18c-2.572 0 -4.657 -2.007 -4.657 -4.483c0 -2.31 1.78 -4.212 4.062 -4.444c.485 -2.872 3.125 -5.073 6.281 -5.073c3.481 0 6.326 2.67 6.617 6.07c2.253 .248 4.04 2.155 4.04 4.45c0 2.476 -2.085 4.48 -4.657 4.48h-11.686z" />',
-  fileText: '<path d="M14 3v4a1 1 0 0 0 1 1h4" /><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z" /><line x1="9" y1="9" x2="10" y2="9" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="15" y2="17" />',
-  cpu: '<rect x="4" y="4" width="16" height="16" rx="1" /><path d="M9 9h6v6h-6z" /><path d="M3 10h1" /><path d="M3 14h1" /><path d="M10 3v1" /><path d="M14 3v1" /><path d="M20 10h1" /><path d="M20 14h1" /><path d="M10 20v1" /><path d="M14 20v1" />',
-  sliders: '<line x1="4" y1="10" x2="4" y2="20" /><line x1="4" y1="4" x2="4" y2="7" /><circle cx="4" cy="8" r="2" /><line x1="12" y1="17" x2="12" y2="20" /><line x1="12" y1="4" x2="12" y2="14" /><circle cx="12" cy="16" r="2" /><line x1="20" y1="13" x2="20" y2="20" /><line x1="20" y1="4" x2="20" y2="10" /><circle cx="20" cy="12" r="2" />',
-  grid: '<rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" />',
-  list: '<line x1="9" y1="6" x2="20" y2="6" /><line x1="9" y1="12" x2="20" y2="12" /><line x1="9" y1="18" x2="20" y2="18" /><line x1="5" y1="6" x2="5" y2="6.01" /><line x1="5" y1="12" x2="5" y2="12.01" /><line x1="5" y1="18" x2="5" y2="18.01" />',
-  sortAsc: '<path d="M4 6l7 0" /><path d="M4 12l7 0" /><path d="M4 18l9 0" /><path d="M15 9l3 -3l3 3" /><path d="M18 6l0 12" />',
-  sortDesc: '<path d="M4 6l9 0" /><path d="M4 12l7 0" /><path d="M4 18l7 0" /><path d="M15 15l3 3l3 -3" /><path d="M18 6l0 12" />',
-  layers: '<polygon points="12 2 2 7 12 12 22 7 12 2" /><polyline points="2 17 12 22 22 17" /><polyline points="2 12 12 17 22 12" />',
+  fileText: '<path d="M14 3v4a1 1 0 0 0 1 1h4" /><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z" /><path d="M9 9h1" /><path d="M9 13h6" /><path d="M9 17h6" />',
+  cpu: '<path d="M5 5h14a1 1 0 0 1 1 1v12a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1v-12a1 1 0 0 1 1 -1z" /><path d="M9 9h6v6h-6z" /><path d="M3 10h2" /><path d="M3 14h2" /><path d="M10 3v2" /><path d="M14 3v2" /><path d="M19 10h2" /><path d="M19 14h2" /><path d="M10 19v2" /><path d="M14 19v2" />',
+  sliders: '<path d="M2 10a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M4 4v4" /><path d="M4 12v8" /><path d="M10 16a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M12 4v10" /><path d="M12 18v2" /><path d="M18 7a2 2 0 1 0 4 0a2 2 0 1 0 -4 0" /><path d="M20 4v1" /><path d="M20 9v11" />',
+  grid: '<path d="M4 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z" /><path d="M14 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z" /><path d="M4 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z" /><path d="M14 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z" />',
+  list: '<path d="M9 6h11" /><path d="M9 12h11" /><path d="M9 18h11" /><path d="M5 6v.01" /><path d="M5 12v.01" /><path d="M5 18v.01" />',
+  sortAsc: '<path d="M4 6h7" /><path d="M4 12h7" /><path d="M4 18h9" /><path d="M15 9l3 -3l3 3" /><path d="M18 6v12" />',
+  sortDesc: '<path d="M4 6h9" /><path d="M4 12h7" /><path d="M4 18h7" /><path d="M15 15l3 3l3 -3" /><path d="M18 6v12" />',
+  layers: '<path d="M12 2l10 5l-10 5l-10 -5z" /><path d="M2 17l10 5l10 -5" /><path d="M2 12l10 5l10 -5" />',
+  jellyfin: '<path d="M11.13 2.5a1 1 0 0 1 1.74 0l8.5 15.2a1 1 0 0 1 -.87 1.49h-17a1 1 0 0 1 -.87 -1.49l8.5 -15.2z" /><path d="M11.4 8.5a.7 .7 0 0 1 1.2 0l4.2 7.5a.7 .7 0 0 1 -.6 1.05h-8.4a.7 .7 0 0 1 -.6 -1.05l4.2 -7.5z" />',
+  radio: '<path d="M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0" /><path d="M18.36 5.64a9 9 0 0 1 0 12.73" /><path d="M5.64 5.64a9 9 0 0 0 0 12.73" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M8.46 8.46a5 5 0 0 0 0 7.07" />',
+  cut: '<path d="M4 17a3 3 0 1 0 6 0a3 3 0 1 0 -6 0" /><path d="M14 17a3 3 0 1 0 6 0a3 3 0 1 0 -6 0" /><path d="M9.15 14.85l10.85 -10.85" /><path d="M6 4l8.11 8.11" /><path d="M16.15 14.85l3.85 3.85" />',
+  globe: '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0" /><path d="M3.6 9h16.8" /><path d="M3.6 15h16.8" /><path d="M11.5 3a17 17 0 0 0 0 18" /><path d="M12.5 3a17 17 0 0 1 0 18" />',
+  headphones: '<path d="M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2z" /><path d="M15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2z" /><path d="M4 15v-3a8 8 0 0 1 16 0v3" />',
+  mic: '<path d="M9 5a3 3 0 0 1 6 0v5a3 3 0 0 1 -6 0z" /><path d="M5 10a7 7 0 0 0 14 0" /><path d="M8 21h8" /><path d="M12 17v4" />',
 };
 
 /** The glyphs that draw themselves filled (the transport), the rest stroked. */
@@ -134,9 +139,10 @@ export interface IconProps {
 
 /** The colour an icon draws in: `hex`, or its token's value now (reading the
  * appearance, so it follows light and dark). */
-function colorOf(props: IconProps): string {
+export function colorOf(props: IconProps): string {
   colorScheme();
-  return props.hex || String(token((props.color ?? "foreground") as never));
+  const raw = props.hex || String(token((props.color ?? "foreground") as never));
+  return raw.replace(/^#([0-9a-f]{6})[0-9a-f]{2}$/i, "#$1");
 }
 
 /** The named glyph, in a theme token's color. */

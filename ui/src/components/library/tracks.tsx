@@ -241,9 +241,11 @@ export function TrackHeader(props: { showAlbum: boolean; interactive?: boolean }
   const renderIndicator = (field: TrackSortField) => {
     if (currentField() !== field) return null;
     return (
-      <Text class="font-mono text-[10px] font-bold text-primary">
-        {currentOrder() === "asc" ? " ↑" : " ↓"}
-      </Text>
+      <Icon
+        name={currentOrder() === "asc" ? "sortAsc" : "sortDesc"}
+        size={11}
+        color="primary"
+      />
     );
   };
 

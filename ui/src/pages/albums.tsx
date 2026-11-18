@@ -106,7 +106,7 @@ export function AlbumsPage() {
                     }
                   }}
                   accessibilityLabel={`按 ${opt().label} 排序`}
-                  class={`rounded-full px-2.5 py-1 text-xs transition ${
+                  class={`flex-row items-center gap-1 rounded-full px-2.5 py-1 text-xs transition ${
                     selected()
                       ? "bg-foreground text-background font-bold shadow-2xs"
                       : "bg-secondary text-muted-foreground hover:text-foreground"
@@ -114,8 +114,14 @@ export function AlbumsPage() {
                 >
                   <Text class={`text-xs ${selected() ? "text-background font-bold" : "text-muted-foreground"}`}>
                     {opt().label}
-                    {selected() && albumSortField() !== "default" ? (albumSortOrder() === "asc" ? " ↑" : " ↓") : ""}
                   </Text>
+                  <If when={selected() && albumSortField() !== "default"}>
+                    <Icon
+                      name={albumSortOrder() === "asc" ? "sortAsc" : "sortDesc"}
+                      size={11}
+                      color={selected() ? "background" : "foreground"}
+                    />
+                  </If>
                 </Button>
               );
             }}

@@ -75,14 +75,21 @@ function isShellSelected(shellId: string): boolean {
 }
 
 function pluginIcon(p: PluginInfo): IconName {
-  if (p.category === "ui.shell") return "layout";
-  if (p.category === "ui.visualizer") return "wave";
-  if (p.category === "source.connector") return "cloud";
-  if (p.category === "lyrics.provider") return "fileText";
-  if (p.id.includes("cue")) return "fileText";
+  if (p.id === "jellyfin") return "jellyfin";
+  if (p.id === "navidrome") return "radio";
+  if (p.id === "webdav") return "server";
+  if (p.id.includes("cue")) return "cut";
   if (p.id.includes("sacd")) return "disc";
   if (p.id.includes("dsd")) return "cpu";
   if (p.id.includes("soxr") || p.category === "playback.dsp") return "sliders";
+  if (p.id.includes("netease")) return "music";
+  if (p.id.includes("qqmusic")) return "headphones";
+  if (p.id.includes("kugou")) return "mic";
+  if (p.id.includes("lrcapi")) return "globe";
+  if (p.category === "lyrics.provider") return "fileText";
+  if (p.category === "ui.shell") return "layout";
+  if (p.category === "ui.visualizer") return "wave";
+  if (p.category === "source.connector") return "cloud";
   return "layers";
 }
 
@@ -155,7 +162,7 @@ function PluginDialogContent() {
       {/* Title Header */}
       <View class="flex-row items-center justify-between border-b border-border pb-3">
         <View class="flex-row items-center gap-2.5">
-          <Icon name="settings" size={18} color="primary" />
+          <Icon name="puzzle" size={18} color="primary" />
           <Text role="header" class="text-lg font-bold text-foreground">
             插件与界面壳层管理器
           </Text>
@@ -198,7 +205,7 @@ function PluginDialogContent() {
                     if (enabled()) switchShell(shell().id);
                   }}
                   accessibilityLabel={`切换至 ${shell().name}`}
-                  class={`flex-1 flex-col items-start gap-1.5 rounded-lg border p-3 text-left transition duration-150 ${
+                  class={`flex-1 flex-row items-center gap-3 rounded-lg border p-3 text-left transition duration-150 ${
                     !enabled()
                       ? "opacity-45 border-border bg-card/30"
                       : active()
@@ -206,36 +213,49 @@ function PluginDialogContent() {
                       : "border-border bg-card/60 hover:bg-card"
                   } ${focusRing}`}
                 >
-                  <View class="w-full flex-row items-center justify-between gap-2">
-                    <Text
-                      class={`text-sm font-bold ${
-                        !enabled()
-                          ? "text-muted-foreground"
-                          : active()
-                          ? "text-primary"
-                          : "text-foreground"
-                      }`}
-                    >
-                      {shell().name}
-                    </Text>
-                    <If when={!enabled()}>
-                      <View class="rounded bg-muted px-1.5 py-0.5">
-                        <Text class="text-[11px] font-bold text-muted-foreground">
-                          已禁用
-                        </Text>
-                      </View>
-                    </If>
-                    <If when={enabled() && active()}>
-                      <View class="rounded bg-primary/15 px-1.5 py-0.5">
-                        <Text class="text-[11px] font-bold text-primary">
-                          当前使用
-                        </Text>
-                      </View>
-                    </If>
+                  <View
+                    class={`h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/80 ${
+                      active() ? "bg-primary/15" : "bg-card/80"
+                    }`}
+                  >
+                    <Icon
+                      name={pluginIcon(shell())}
+                      size={18}
+                      color={active() ? "primary" : "muted-foreground"}
+                    />
                   </View>
-                  <Text class="line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-                    {shell().description}
-                  </Text>
+                  <View class="min-w-0 flex-1 flex-col gap-1">
+                    <View class="w-full flex-row items-center justify-between gap-2">
+                      <Text
+                        class={`text-sm font-bold ${
+                          !enabled()
+                            ? "text-muted-foreground"
+                            : active()
+                            ? "text-primary"
+                            : "text-foreground"
+                        }`}
+                      >
+                        {shell().name}
+                      </Text>
+                      <If when={!enabled()}>
+                        <View class="rounded bg-muted px-1.5 py-0.5">
+                          <Text class="text-[11px] font-bold text-muted-foreground">
+                            已禁用
+                          </Text>
+                        </View>
+                      </If>
+                      <If when={enabled() && active()}>
+                        <View class="rounded bg-primary/15 px-1.5 py-0.5">
+                          <Text class="text-[11px] font-bold text-primary">
+                            当前使用
+                          </Text>
+                        </View>
+                      </If>
+                    </View>
+                    <Text class="line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+                      {shell().description}
+                    </Text>
+                  </View>
                 </Button>
               );
             }}
@@ -364,9 +384,9 @@ function PluginCard(props: { plugin: PluginInfo }) {
       accessibilityLabel={`插件 ${p().name}`}
     >
       <View class="flex-row items-start gap-3">
-        {/* 36x36 Icon Block */}
-        <View class="h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/80 bg-card/80 shadow-2xs">
-          <Icon name={pluginIcon(p())} size={18} color={isEnabled() ? "primary" : "muted-foreground"} />
+        {/* 40x40 Icon Block */}
+        <View class="h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-border/80 bg-card/80 shadow-2xs">
+          <Icon name={pluginIcon(p())} size={20} color={isEnabled() ? "primary" : "muted-foreground"} />
         </View>
 
         {/* Content Info */}

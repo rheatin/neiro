@@ -52,12 +52,12 @@ function TrackToolbar(props: {
   onShuffle: () => void;
 }) {
   const currentPill = () => trackFilterPill();
-  const PILLS: { key: TrackFilterPill; label: string }[] = [
+  const PILLS: { key: TrackFilterPill; label: string; icon?: "heart" }[] = [
     { key: "all", label: "全部" },
     { key: "hires", label: "Hi-Res" },
     { key: "dsd", label: "DSD" },
     { key: "lossless", label: "无损" },
-    { key: "favourite", label: "♥ 喜欢" },
+    { key: "favourite", label: "已喜欢", icon: "heart" },
   ];
 
   const selecting = () => selectionActive();
@@ -67,10 +67,11 @@ function TrackToolbar(props: {
       {/* Action Buttons & Filter Pills Row */}
       <View class="flex-row flex-wrap items-center justify-between gap-2">
         <View class="flex-row items-center gap-1.5">
-          <ActionButton label="▶ 播放全部" onPress={props.onPlayAll} />
-          <ActionButton label="🔀 随机播放" variant="outline" onPress={props.onShuffle} />
+          <ActionButton label="播放全部" icon="play" onPress={props.onPlayAll} />
+          <ActionButton label="随机播放" icon="shuffle" variant="outline" onPress={props.onShuffle} />
           <ActionButton
-            label={selecting() ? "完成管理" : "☑ 批量管理"}
+            label={selecting() ? "完成管理" : "批量管理"}
+            icon="check"
             variant={selecting() ? "primary" : "outline"}
             onPress={() => {
               if (selecting()) endSelection();
@@ -89,12 +90,15 @@ function TrackToolbar(props: {
                   selected={selected()}
                   onPress={() => trackFilterPill.set(pill().key)}
                   accessibilityLabel={`过滤 ${pill().label}`}
-                  class={`rounded-full px-2.5 py-1 text-xs transition ${
+                  class={`flex-row items-center gap-1 rounded-full px-2.5 py-1 text-xs transition ${
                     selected()
                       ? "bg-background text-foreground font-bold shadow-2xs"
                       : "text-muted-foreground hover:text-foreground"
                   } ${focusRing}`}
                 >
+                  <If when={pill().icon}>
+                    <Icon name={pill().icon!} size={11} color={selected() ? "foreground" : "muted-foreground"} />
+                  </If>
                   <Text
                     class={`text-xs ${
                       selected() ? "font-bold text-foreground" : "text-muted-foreground"

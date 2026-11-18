@@ -325,17 +325,23 @@ export function SettingsPage() {
           <View class="gap-3">
             <SectionTitle>插件与界面壳层</SectionTitle>
             <View class="flex-row items-center justify-between rounded-(--radius-panel) border border-border bg-card p-4">
-              <View class="gap-0.5 min-w-0 flex-1 pr-4">
-                <Text class="text-sm font-bold text-foreground">三层插件与整套界面热插拔</Text>
-                <Text class="text-xs text-muted-foreground">
-                  已加载 {plugins().length} 个插件 · 当前界面壳层：{activeShellId() === "builtin.shell.studio-minimal" ? "Studio Minimal Deck" : "Industrial Rack (Default)"}
-                </Text>
+              <View class="flex-row items-center gap-3 min-w-0 flex-1 pr-4">
+                <View class="h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                  <Icon name="puzzle" size={20} color="primary" />
+                </View>
+                <View class="gap-0.5 min-w-0 flex-1">
+                  <Text class="text-sm font-bold text-foreground">三层插件与整套界面热插拔</Text>
+                  <Text class="text-xs text-muted-foreground">
+                    已加载 {plugins().length} 个插件 · 当前界面壳层：{activeShellId() === "builtin.shell.studio-minimal" ? "Studio Minimal Deck" : "Industrial Rack (Default)"}
+                  </Text>
+                </View>
               </View>
               <Button
                 accessibilityLabel="管理插件与界面壳层"
                 onPress={() => setPluginDialogOpen(true)}
-                class={`h-8 items-center justify-center rounded-full border border-primary bg-primary/10 px-4 active:scale-95 ${focusRing}`}
+                class={`h-8 flex-row items-center gap-1.5 rounded-full border border-primary bg-primary/10 px-4 active:scale-95 ${focusRing}`}
               >
+                <Icon name="puzzle" size={13} color="primary" />
                 <Text class="text-center text-xs font-semibold leading-none text-primary">
                   打开插件管理器
                 </Text>
