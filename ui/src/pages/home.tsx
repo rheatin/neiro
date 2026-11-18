@@ -106,10 +106,11 @@ export function HomePage() {
           {greeting()}
         </Text>
         <SourceTabs />
-        <If
-          when={activeSource().kind === "remote"}
-          else={
-            <View>
+        <If when={activeSource().kind === "remote"}>
+          <RemoteHomeSections wave={wave} />
+        </If>
+        <If when={activeSource().kind !== "remote"}>
+          <View>
               <CardsSection
                 title="专辑"
                 emptyTitle={activeSource().root ? "这个文件夹还没有专辑" : "专辑是空的"}
@@ -129,22 +130,21 @@ export function HomePage() {
                 retry={retryArtists}
                 wave={wave.child(waveDelay(1, 4))}
               />
-              <If when={!activeSource().root}>
+              <If when={activeSource().kind === "local" && !activeSource().root}>
                 <RemotePreview />
+              </If>
+              <If when={activeSource().kind === "local" || activeSource().kind === "all"}>
                 <MostPlayedPreview />
               </If>
               <TracksPreview wave={wave.child(waveDelay(2, 4))} />
             </View>
-          }
-        >
-          <RemoteHomeSections wave={wave} />
         </If>
       </Scroll>
     </AppPage>
   );
 }
 
-/** 首页的来源 Tab：全部本地 / 每个文件夹 / 每个远程服务器，横向 chips，
+/** 首页的来源 Tab：全部 / 本地 / 每个文件夹 / 每个远程服务器，横向 chips，
  * 多了可滚；尾随 + 文件夹 / + 服务器。 */
 function SourceTabs() {
   const list = () => allSources();
@@ -166,7 +166,11 @@ function SourceTabs() {
                     active() ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-row-hover"
                   } ${focusRing}`}
                 >
-                  <Icon name={src().kind === "remote" ? "server" : "folder"} size={14} color={active() ? "foreground" : "muted-foreground"} />
+                  <Icon
+                    name={src().kind === "all" ? "layers" : src().kind === "remote" ? "server" : "folder"}
+                    size={14}
+                    color={active() ? "foreground" : "muted-foreground"}
+                  />
                   <Text class={`text-xs font-medium ${active() ? "text-foreground" : "text-muted-foreground"}`}>
                     {src().label}
                   </Text>
