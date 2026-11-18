@@ -118,7 +118,7 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
             onSelect: () => setLyricOffset(0),
             disabled: lyricOffset() === 0,
           },
-        ])
+        ], "sheet")
       }
     >
       <If

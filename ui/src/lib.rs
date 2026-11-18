@@ -10,6 +10,7 @@
 //! here, in the fields of [`Inner`]; the TSX mirrors it in signals and
 //! changes it only through these methods.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use nsh_core::element::CallbackArgs;
@@ -20,7 +21,7 @@ use serde::Deserialize;
 pub mod engine;
 pub mod lyrics_providers;
 
-use crate::engine::{Engine, RenderPath, Snapshot, WireEvent};
+use crate::engine::{Analysis, Engine, RenderPath, Snapshot, WireEvent};
 
 /// The crate's UI set (`nsh.json` `"rust"`): what `App.tsx` imports from
 /// `neiro/native`.
@@ -425,6 +426,10 @@ impl<T: CallbackArgs + Clone + 'static> Listeners<T> {
 #[derive(Default)]
 struct Inner {
     player: Option<PlayerState>,
+    /// Tags that arrived for a track before it became the current one: the
+    /// engine analyses the next track while the previous still plays, so
+    /// `analysis_ready` can precede the `track_changed` that names it.
+    pending_analysis: Option<(String, Analysis)>,
     render_path: Option<RenderPathInfo>,
     devices: Option<Vec<DeviceInfo>>,
     queue: Option<QueueInfo>,
@@ -561,6 +566,305 @@ fn remote_cache_dir() -> String {
         .into_owned()
 }
 
+/// A cache root for tests and the private helpers that must not hard-code
+/// the app data path. Production passes the real directories.
+fn remote_cache_dir_in(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("Neiro").join("remote")
+}
+
+// ---- Local cover cache -----------------------------------------------------
+//
+// Embedded pictures are read out of the file (and decoded by Base) every time
+// the interface shows them; over SMB that is a network read per cover per
+// launch, and the artist and album cards show the same file's picture again.
+// This keeps the `data:` URI the interface already paints on disk, keyed by
+// the source file's identity, so a restart (or a scroll back) is a local read.
+// The remote pipeline needs nothing here: Base already caches server covers
+// under `remote/artwork/`.
+
+/// One text file per cover, holding the `data:` URI (or `none`).
+fn local_cover_cache_dir() -> std::path::PathBuf {
+    library_path()
+        .parent()
+        .expect("the library always has a directory")
+        .join("artwork-local")
+}
+
+/// The local cover cache under an explicit root (tests).
+fn local_cover_cache_dir_in(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("Neiro").join("artwork-local")
+}
+
+/// One cache bucket's size and file count. Directories and links are not
+/// files: they are never counted or followed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CacheBucket {
+    bytes: u64,
+    files: u64,
+}
+
+impl CacheBucket {
+    fn walk(dir: &std::path::Path, recursive: bool) -> Self {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Self::default();
+        };
+        let mut total = Self::default();
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else { continue };
+            if file_type.is_dir() {
+                if recursive {
+                    total = total + Self::walk(&entry.path(), true);
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else { continue };
+            total.bytes += metadata.len();
+            total.files += 1;
+        }
+        total
+    }
+
+    /// Deletes the files of this bucket only, returning the failures left
+    /// behind (a playing file may be open; the next clean can take it).
+    fn clear(dir: &std::path::Path, recursive: bool) -> Self {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Self::default();
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else { continue };
+            if file_type.is_file() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        if recursive {
+            let _ = Self::walk_subdirs(dir, recursive);
+        }
+        Self::walk(dir, recursive)
+    }
+
+    fn walk_subdirs(dir: &std::path::Path, recursive: bool) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)?.flatten() {
+            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                Self::clear(&entry.path(), recursive);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Add for CacheBucket {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        Self {
+            bytes: self.bytes + rhs.bytes,
+            files: self.files + rhs.files,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct CacheStats {
+    remote_audio_bytes: u64,
+    remote_audio_files: u64,
+    remote_artwork_bytes: u64,
+    remote_artwork_files: u64,
+    remote_catalog_bytes: u64,
+    remote_catalog_files: u64,
+    local_artwork_bytes: u64,
+    local_artwork_files: u64,
+}
+
+/// The four buckets, under one app-data root. `audio` is Base's flat remote
+/// directory; the other two are named subdirectories.
+fn cache_stats_in(root: &std::path::Path) -> CacheStats {
+    let remote = remote_cache_dir_in(root);
+    let audio = CacheBucket::walk(&remote, false);
+    let artwork = CacheBucket::walk(&remote.join("artwork"), true);
+    let catalog = CacheBucket::walk(&remote.join("catalog"), true);
+    let local = CacheBucket::walk(&local_cover_cache_dir_in(root), false);
+    CacheStats {
+        remote_audio_bytes: audio.bytes,
+        remote_audio_files: audio.files,
+        remote_artwork_bytes: artwork.bytes,
+        remote_artwork_files: artwork.files,
+        remote_catalog_bytes: catalog.bytes,
+        remote_catalog_files: catalog.files,
+        local_artwork_bytes: local.bytes,
+        local_artwork_files: local.files,
+    }
+}
+
+fn parse_cache_kind(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "remote-audio" => Ok("remote-audio"),
+        "remote-artwork" => Ok("remote-artwork"),
+        "remote-catalog" => Ok("remote-catalog"),
+        "local-artwork" => Ok("local-artwork"),
+        "all" => Ok("all"),
+        _ => Err(format!("E_CACHE: 未知缓存类型 {kind}")),
+    }
+}
+
+/// Clears one known bucket under `root`, keeping its directory alive. "All"
+/// means all four buckets. The returned stats are the caller's truth.
+fn clear_cache_in(root: &std::path::Path, kind: &str) -> Result<String, String> {
+    parse_cache_kind(kind)?;
+    let remote = remote_cache_dir_in(root);
+    let artwork_dir = remote.join("artwork");
+    let catalog_dir = remote.join("catalog");
+    let local_dir = local_cover_cache_dir_in(root);
+    match kind {
+        "remote-audio" => { CacheBucket::clear(&remote, false); }
+        "remote-artwork" => { CacheBucket::clear(&artwork_dir, true); }
+        "remote-catalog" => { CacheBucket::clear(&catalog_dir, true); }
+        "local-artwork" => { CacheBucket::clear(&local_dir, false); }
+        _ => {
+            let _ = CacheBucket::clear(&remote, false);
+            let _ = CacheBucket::clear(&artwork_dir, true);
+            let _ = CacheBucket::clear(&catalog_dir, true);
+            let _ = CacheBucket::clear(&local_dir, false);
+        }
+    }
+    for dir in [remote.join("artwork"), remote.join("catalog"), local_dir] {
+        let shown = dir.display().to_string();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            if !dir.is_dir() {
+                return Err(format!("E_CACHE: 无法保留缓存目录 {shown}：{e}"));
+            }
+        }
+    }
+    let stats = cache_stats_in(root);
+    serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
+}
+
+/// The cache's ceiling. A 300 KB cover is ~1750 files at this budget; the
+/// oldest go first when it is crossed.
+const COVER_CACHE_BUDGET: u64 = 512 * 1024 * 1024;
+
+/// Puts since the last trim: the first put of a session trims, then every
+/// 128th, so the directory walk is not paid on every cover.
+static COVER_PUTS: AtomicUsize = AtomicUsize::new(0);
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// The cache key for `path`: a hash of the path, its size and its mtime, so
+/// a replaced picture (new bytes, new mtime) is read again rather than served
+/// stale. `None` when the file cannot be stat'ed: a key without a real
+/// identity would go stale, so that answer is not cached.
+fn cover_cache_key(path: &str) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_nanos())
+        .unwrap_or(0);
+    let mut seed = String::with_capacity(path.len() + 40);
+    seed.push_str(path);
+    seed.push('\0');
+    seed.push_str(&modified.to_string());
+    seed.push('\0');
+    seed.push_str(&metadata.len().to_string());
+    Some(format!("{:016x}", fnv1a64(seed.as_bytes())))
+}
+
+/// Trims the cache to its budget, oldest first, dropping 10% past the ceiling
+/// so the next put does not walk the directory again.
+fn prune_local_cover_cache(dir: &std::path::Path) {
+    prune_local_cover_cache_to(dir, COVER_CACHE_BUDGET);
+}
+
+fn prune_local_cover_cache_to(dir: &std::path::Path, budget: u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+        total = total.saturating_add(metadata.len());
+        files.push((entry.path(), metadata.len(), modified));
+    }
+    if total <= budget {
+        return;
+    }
+    files.sort_by(|left, right| left.2.cmp(&right.2));
+    let mut to_free = total - budget + budget / 10;
+    for (path, len, _) in files {
+        if to_free == 0 {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            to_free = to_free.saturating_sub(len);
+        }
+    }
+}
+
+/// Reads `path`'s cached answer from `dir`: the `data:` URI, `"none"`, or
+/// `""` when the file has no entry.
+fn cover_cache_read(dir: &std::path::Path, path: &str) -> String {
+    let Some(key) = cover_cache_key(path) else {
+        return String::new();
+    };
+    std::fs::read_to_string(dir.join(format!("{key}.txt"))).unwrap_or_default()
+}
+
+/// Writes `path`'s answer into `dir`. Files that cannot be stat'ed are not
+/// cached: a key without a real identity would serve stale bytes.
+fn cover_cache_write(dir: &std::path::Path, path: &str, uri: &str) -> Result<(), String> {
+    let Some(key) = cover_cache_key(path) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(dir).map_err(|e| format!("E_CACHE: {e}"))?;
+    // Written aside and renamed, so a crash mid-write never leaves a
+    // truncated URI for a later run to paint.
+    let file = dir.join(format!("{key}.txt"));
+    let temp = dir.join(format!(".{key}.tmp"));
+    std::fs::write(&temp, uri.as_bytes()).map_err(|e| format!("E_CACHE: {e}"))?;
+    std::fs::rename(&temp, &file).map_err(|e| format!("E_CACHE: {e}"))?;
+    if COVER_PUTS.fetch_add(1, Ordering::Relaxed) % 128 == 0 {
+        prune_local_cover_cache(dir);
+    }
+    Ok(())
+}
+
+/// Empties the tags that describe the previous track: a new path must not
+/// inherit them while its own analysis is on the way.
+fn clear_track_tags(player: &mut PlayerState) {
+    player.title.clear();
+    player.artist.clear();
+    player.album.clear();
+    player.bitrate_kbps = None;
+    player.codec.clear();
+    player.codec_profile.clear();
+}
+
+/// Writes one `analysis_ready` into the player.
+fn apply_analysis(player: &mut PlayerState, analysis: &Analysis) {
+    player.title = analysis.title.clone();
+    player.artist = analysis.artist.clone();
+    player.album = analysis.album.clone();
+    player.bitrate_kbps = Some(analysis.bitrate_kbps as f64);
+    player.codec = analysis.codec.clone();
+    player.codec_profile = analysis.codec_profile.clone();
+}
+
 impl Inner {
     fn deliver(&mut self, line: &str) {
         let event = match engine::parse(line) {
@@ -572,26 +876,55 @@ impl Inner {
         match event {
             WireEvent::State(snapshot) => self.absorb(snapshot),
             WireEvent::TrackChanged { path, render_path } => {
-                if let Some(player) = self.player.as_mut() {
+                let changed = self
+                    .player
+                    .as_ref()
+                    .and_then(|player| player.path.as_deref())
+                    != Some(path.as_str());
+                let pending = if changed { self.pending_analysis.take() } else { None };
+                let player = self.player.get_or_insert_with(PlayerState::default);
+                if changed {
                     // A new stream: the previous track's tags are wrong now.
-                    if player.path.as_deref() != Some(path.as_str()) {
-                        player.title = String::new();
-                        player.artist = String::new();
-                        player.album = String::new();
-                        player.bitrate_kbps = None;
-                        player.codec = String::new();
-                    player.codec_profile = String::new();
+                    clear_track_tags(player);
+                    if let Some((pending_path, analysis)) = pending {
+                        if pending_path == path {
+                            // Its analysis arrived while the previous track
+                            // still played; use it instead of waiting for a
+                            // second `analysis_ready` that may never come.
+                            apply_analysis(player, &analysis);
+                        }
                     }
-                    player.path = Some(path);
                     player.track_serial += 1.0;
                 }
+                player.path = Some(path);
                 self.set_render_path(render_path);
+                // The interface hears the new path (and its cleared tags)
+                // now: waiting for the next position left the previous
+                // title on screen beside the new cover.
+                if let Some(player) = self.player.as_ref() {
+                    self.on_player.post(player);
+                }
             }
             WireEvent::Position { path, position, duration } => {
+                let changed = self
+                    .player
+                    .as_ref()
+                    .and_then(|player| player.path.as_deref())
+                    != Some(path.as_str());
+                let pending = if changed { self.pending_analysis.take() } else { None };
                 let player = self.player.get_or_insert_with(PlayerState::default);
-                if player.path.as_deref() != Some(path.as_str()) {
-                    player.path = Some(path);
+                if changed {
+                    // The first word of a new track can be its position, not
+                    // its `track_changed`: the old tags must not survive it.
+                    clear_track_tags(player);
+                    if let Some((pending_path, analysis)) = pending {
+                        if pending_path == path {
+                            apply_analysis(player, &analysis);
+                        }
+                    }
+                    player.track_serial += 1.0;
                 }
+                player.path = Some(path);
                 player.position_ms = position * 1000.0;
                 player.duration_ms = duration * 1000.0;
                 player.at = now_ms();
@@ -638,15 +971,20 @@ impl Inner {
                 self.on_resolved.post(&text);
             }
             WireEvent::AnalysisReady { path, analysis, .. } => {
-                let player = self.player.get_or_insert_with(PlayerState::default);
-                if player.path.as_deref() == Some(path.as_str()) {
-                    player.title = analysis.title.clone();
-                    player.artist = analysis.artist.clone();
-                    player.album = analysis.album.clone();
-                    player.bitrate_kbps = Some(analysis.bitrate_kbps as f64);
-                    player.codec = analysis.codec.clone();
-                    player.codec_profile = analysis.codec_profile.clone();
+                let current = self
+                    .player
+                    .as_ref()
+                    .and_then(|player| player.path.as_deref())
+                    == Some(path.as_str());
+                if current {
+                    let player = self.player.get_or_insert_with(PlayerState::default);
+                    apply_analysis(player, &analysis);
                     self.on_player.post(player);
+                } else {
+                    // A preloaded track is analysed before it takes over:
+                    // keep the tags for the `track_changed` that names it,
+                    // instead of dropping the only word of its title.
+                    self.pending_analysis = Some((path, analysis));
                 }
             }
             WireEvent::TagsRead { path, fields } => {
@@ -889,26 +1227,70 @@ impl Inner {
     /// Paints from one whole snapshot: the state a late subscriber needs.
     fn absorb(&mut self, snapshot: Snapshot) {
         let analysis = snapshot.analysis.clone().unwrap_or_default();
+        // A snapshot names the stream it belongs to; its `analysis`, though,
+        // can still be the previous stream's while the new one is being
+        // analysed. When the path did not change and tags are already known,
+        // keep them: the snapshot is not the tag-update channel
+        // (`analysis_ready` is), and taking a stale analysis here put the
+        // previous song's title on the new cover.
+        let previous = self.player.clone();
+        let same_path = previous
+            .as_ref()
+            .and_then(|player| player.path.as_deref())
+            == snapshot.path.as_deref();
+        let prior = previous
+            .as_ref()
+            .filter(|player| same_path && !player.title.is_empty());
+        let title = prior
+            .map(|player| player.title.clone())
+            .unwrap_or_else(|| analysis.title.clone());
+        let artist = prior
+            .map(|player| player.artist.clone())
+            .unwrap_or_else(|| analysis.artist.clone());
+        let album = prior
+            .map(|player| player.album.clone())
+            .unwrap_or_else(|| analysis.album.clone());
+        let bitrate = prior.map(|player| player.bitrate_kbps).unwrap_or_else(|| {
+            snapshot
+                .analysis
+                .as_ref()
+                .map(|a| a.bitrate_kbps as f64)
+        });
+        let codec = prior
+            .map(|player| player.codec.clone())
+            .unwrap_or_else(|| analysis.codec.clone());
+        let codec_profile = prior
+            .map(|player| player.codec_profile.clone())
+            .unwrap_or_else(|| analysis.codec_profile.clone());
         let resolved_json = snapshot
             .resolved
             .as_ref()
             .map(|resolved| serde_json::to_string(resolved).expect("serializable JSON"));
-        let player = PlayerState {
+        let mut player = PlayerState {
             state: snapshot.state.clone(),
             path: snapshot.path.clone(),
-            title: analysis.title.clone(),
-            artist: analysis.artist.clone(),
-            album: analysis.album.clone(),
+            title,
+            artist,
+            album,
             position_ms: snapshot.position * 1000.0,
             duration_ms: snapshot.duration * 1000.0,
             at: now_ms(),
             volume: snapshot.render_path.as_ref().map(|path| path.volume),
-            bitrate_kbps: snapshot.analysis.as_ref().map(|a| a.bitrate_kbps as f64),
-            codec: analysis.codec.clone(),
-            codec_profile: analysis.codec_profile.clone(),
+            bitrate_kbps: bitrate,
+            codec,
+            codec_profile,
             track_serial: snapshot.track_serial as f64,
             resolved_json: resolved_json.clone(),
         };
+        // A preloaded analysis that arrived before this snapshot is newer
+        // than the snapshot's own: keep its title instead of reverting it.
+        if let Some((pending_path, pending)) = self.pending_analysis.take() {
+            if snapshot.path.as_deref() == Some(pending_path.as_str()) {
+                apply_analysis(&mut player, &pending);
+            } else {
+                self.pending_analysis = Some((pending_path, pending));
+            }
+        }
         self.on_player.post(&player.clone());
         self.player = Some(player);
         if let Some(text) = resolved_json.clone() {
@@ -1880,6 +2262,35 @@ impl Base {
         }))
     }
 
+    /// The cover a previous run cached for `path`: the `data:` URI the
+    /// interface paints, or `"none"` when that run read the file and it
+    /// carries no picture. `""` means this file has no entry (not cached
+    /// yet, or its identity changed).
+    pub fn cover_cache_get(&self, path: String) -> Result<String, String> {
+        Ok(cover_cache_read(&local_cover_cache_dir(), &path))
+    }
+
+    /// Remembers the answer for `path`: the `data:` URI, or `"none"` when
+    /// the file has no embedded picture. A file that cannot be stat'ed is
+    /// not cached — a key without a real identity would serve stale bytes.
+    pub fn cover_cache_put(&self, path: String, uri: String) -> Result<(), String> {
+        cover_cache_write(&local_cover_cache_dir(), &path, &uri)
+    }
+
+    /// The cache buckets' size and count, as a JSON object the interface
+    /// formats for people.
+    pub fn cache_stats(&self) -> Result<String, String> {
+        let root = data_root();
+        let stats = cache_stats_in(&root);
+        serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
+    }
+
+    /// Deletes one cache bucket's files (`all` = every bucket), keeps the
+    /// directories, and answers the stats as they are after the clean.
+    pub fn clear_cache(&self, kind: String) -> Result<String, String> {
+        clear_cache_in(&data_root(), &kind)
+    }
+
     // ---- playback: each is a queued command; the state changes as an event -
 
     /// Replaces the queue with this one track and starts it.
@@ -2286,4 +2697,265 @@ impl Base {
 /// than a panic in a listener's path.
 fn lock(inner: &Arc<Mutex<Inner>>) -> std::sync::MutexGuard<'_, Inner> {
     inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod cache_bucket_tests {
+    use super::*;
+
+    static CACHE_TEST_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    fn cache_tree() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "neiro-cache-test-{}-{}-{}",
+            std::process::id(),
+            CACHE_TEST_SEQ.fetch_add(1, Ordering::SeqCst),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let remote = remote_cache_dir_in(&root);
+        std::fs::create_dir_all(remote.join("artwork")).unwrap();
+        std::fs::create_dir_all(remote.join("catalog/nested")).unwrap();
+        std::fs::create_dir_all(local_cover_cache_dir_in(&root)).unwrap();
+        std::fs::write(remote.join("song.flac"), b"audio").unwrap();
+        std::fs::write(remote.join("artwork/cover.jpg"), b"cover").unwrap();
+        std::fs::write(remote.join("catalog/index.json"), b"catalog").unwrap();
+        std::fs::write(remote.join("catalog/nested/page.json"), b"page").unwrap();
+        std::fs::write(local_cover_cache_dir_in(&root).join("cover.txt"), b"local").unwrap();
+        let unrelated = root.join("Neiro").join("unrelated");
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(unrelated.join("keep.txt"), b"keep").unwrap();
+        root
+    }
+
+    #[test]
+    fn stats_walks_the_known_buckets_only() {
+        let root = cache_tree();
+        let stats = cache_stats_in(&root);
+        assert_eq!(stats.remote_audio_files, 1);
+        assert_eq!(stats.remote_audio_bytes, 5);
+        assert_eq!(stats.remote_artwork_files, 1);
+        assert_eq!(stats.remote_artwork_bytes, 5);
+        assert_eq!(stats.remote_catalog_files, 2);
+        assert_eq!(stats.remote_catalog_bytes, 11);
+        assert_eq!(stats.local_artwork_files, 1);
+        assert_eq!(stats.local_artwork_bytes, 5);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clear_removes_files_and_keeps_directories() {
+        let root = cache_tree();
+        // The runtime may add its own local cover entries while the Rust
+        // suite runs; this test only owns the remote catalog bucket.
+        let json = clear_cache_in(&root, "remote-catalog").unwrap();
+        assert_eq!(
+            remote_cache_dir_in(&root).join("song.flac").exists(),
+            true,
+            "clearing catalog must keep remote audio"
+        );
+        assert_eq!(remote_cache_dir_in(&root).join("catalog").exists(), true);
+        assert_eq!(remote_cache_dir_in(&root).join("catalog/nested").exists(), true);
+        assert_eq!(remote_cache_dir_in(&root).join("catalog/index.json").exists(), false);
+        assert_eq!(remote_cache_dir_in(&root).join("catalog/nested/page.json").exists(), false);
+        let stats: CacheStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(stats.remote_catalog_files, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clear_all_does_not_touch_unrelated_files_or_links() {
+        let root = cache_tree();
+        let link = remote_cache_dir_in(&root).join("linked.flac");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(remote_cache_dir_in(&root).join("song.flac"), &link).unwrap();
+        clear_cache_in(&root, "all").unwrap();
+        assert_eq!(remote_cache_dir_in(&root).join("song.flac").exists(), false);
+        assert_eq!(remote_cache_dir_in(&root).join("catalog").exists(), true);
+        assert_eq!(remote_cache_dir_in(&root).join("artwork").exists(), true);
+        assert_eq!(local_cover_cache_dir_in(&root).exists(), true);
+        assert_eq!(root.join("Neiro/unrelated/keep.txt").exists(), true);
+        #[cfg(unix)]
+        assert_eq!(link.symlink_metadata().unwrap().file_type().is_symlink(), true);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod cover_cache_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("neiro-cover-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn fnv1a64_matches_the_reference_vectors() {
+        assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
+    }
+
+    #[test]
+    fn key_changes_when_the_file_does() {
+        let dir = temp_dir("key");
+        let file = dir.join("song.flac");
+        std::fs::write(&file, b"first").expect("write");
+        let path = file.to_string_lossy().into_owned();
+        let first = cover_cache_key(&path).expect("first key");
+        std::fs::write(&file, b"second-and-longer").expect("rewrite");
+        let second = cover_cache_key(&path).expect("second key");
+        assert_ne!(first, second, "a replaced file must get a new key");
+        let missing = dir.join("missing");
+        assert!(cover_cache_key(missing.to_string_lossy().as_ref()).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn put_then_get_roundtrips_including_none() {
+        let dir = temp_dir("roundtrip");
+        let cache = dir.join("cache");
+        let file = dir.join("song.flac");
+        std::fs::write(&file, b"bytes").expect("write");
+        let path = file.to_string_lossy().into_owned();
+        assert_eq!(cover_cache_read(&cache, &path), "", "empty before any put");
+        cover_cache_write(&cache, &path, "data:image/png;base64,AAAA").expect("put");
+        assert_eq!(cover_cache_read(&cache, &path), "data:image/png;base64,AAAA");
+        cover_cache_write(&cache, &path, "none").expect("put none");
+        assert_eq!(cover_cache_read(&cache, &path), "none");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_drops_the_oldest_first() {
+        let dir = temp_dir("prune");
+        for (name, age) in [("a", 0u64), ("b", 1), ("c", 2)] {
+            let path = dir.join(name);
+            std::fs::write(&path, vec![0u8; 100]).expect("write");
+            let handle = std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("open");
+            handle
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000 + age))
+                .expect("mtime");
+        }
+        // 300 bytes over a 150 budget: the two oldest go, the newest stays.
+        prune_local_cover_cache_to(&dir, 150);
+        assert_eq!(std::fs::read_dir(&dir).expect("read").count(), 1);
+        assert!(dir.join("c").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod event_order_tests {
+    use super::*;
+
+    fn inner_with(path: &str, title: &str) -> Inner {
+        let mut inner = Inner::default();
+        inner.player = Some(PlayerState {
+            path: Some(path.into()),
+            title: title.into(),
+            artist: "old artist".into(),
+            album: "old album".into(),
+            ..Default::default()
+        });
+        inner
+    }
+
+    #[test]
+    fn position_for_a_new_path_clears_the_previous_tags() {
+        // `position` can be the first word of a new track; it must not leave
+        // the previous title standing beside the new cover.
+        let mut inner = inner_with("A", "A title");
+        inner.deliver(r#"{"event":"position","path":"B","position":0.0,"duration":180.0}"#);
+        let player = inner.player.as_ref().expect("player");
+        assert_eq!(player.path.as_deref(), Some("B"));
+        assert_eq!(player.title, "", "the previous title must not survive");
+        assert_eq!(player.artist, "");
+        assert_eq!(player.album, "");
+        assert_eq!(player.track_serial, 1.0);
+    }
+
+    #[test]
+    fn preloaded_analysis_applies_when_its_track_takes_over() {
+        // The engine analyses the next track while the previous still plays:
+        // that answer must be kept, not dropped, or the new title never comes.
+        let mut inner = inner_with("A", "A title");
+        inner.deliver(
+            r#"{"event":"analysis_ready","path":"B","analysis":{"title":"B title","artist":"B artist","album":"B album"},"cached":false}"#,
+        );
+        assert_eq!(
+            inner.player.as_ref().unwrap().title,
+            "A title",
+            "a preloaded track is not current yet"
+        );
+        assert!(inner.pending_analysis.is_some());
+
+        inner.deliver(r#"{"event":"track_changed","path":"B","render_path":{}}"#);
+        let player = inner.player.as_ref().unwrap();
+        assert_eq!(player.path.as_deref(), Some("B"));
+        assert_eq!(player.title, "B title");
+        assert_eq!(player.artist, "B artist");
+        assert_eq!(player.album, "B album");
+        assert!(inner.pending_analysis.is_none(), "used once");
+    }
+
+    #[test]
+    fn analysis_for_the_current_path_applies_at_once() {
+        let mut inner = inner_with("B", "B title");
+        inner.deliver(
+            r#"{"event":"analysis_ready","path":"B","analysis":{"title":"B title 2","artist":"B artist","album":"B album"},"cached":false}"#,
+        );
+        let player = inner.player.as_ref().unwrap();
+        assert_eq!(player.title, "B title 2");
+        assert_eq!(player.artist, "B artist");
+    }
+
+    #[test]
+    fn a_snapshot_for_the_same_track_does_not_revert_its_tags() {
+        let mut inner = inner_with("B", "B title");
+        inner.deliver(
+            r#"{"event":"state","path":"B","analysis":{"title":"A title","artist":"A artist","album":"A album"}}"#,
+        );
+        let player = inner.player.as_ref().unwrap();
+        assert_eq!(player.title, "B title");
+        assert_eq!(player.artist, "old artist");
+    }
+
+    #[test]
+    fn a_snapshot_for_a_new_path_takes_its_tags() {
+        let mut inner = inner_with("A", "A title");
+        inner.deliver(
+            r#"{"event":"state","path":"B","analysis":{"title":"B title","artist":"B artist","album":"B album"}}"#,
+        );
+        let player = inner.player.as_ref().unwrap();
+        assert_eq!(player.path.as_deref(), Some("B"));
+        assert_eq!(player.title, "B title");
+        assert_eq!(player.artist, "B artist");
+    }
+
+    #[test]
+    fn a_stale_snapshot_does_not_put_the_previous_title_back() {
+        // The reported case: the new track's position and analysis land, then
+        // a snapshot still carrying the previous analysis arrives.
+        let mut inner = inner_with("A", "A title");
+        inner.deliver(r#"{"event":"position","path":"B","position":0.0,"duration":257.0}"#);
+        inner.deliver(
+            r#"{"event":"analysis_ready","path":"B","analysis":{"title":"Butterfly","artist":"木村カエラ","album":"5years"},"cached":false}"#,
+        );
+        inner.deliver(
+            r#"{"event":"state","path":"B","analysis":{"title":"幸福了 然后呢","artist":"A-Lin","album":"幸福了 然后呢"}}"#,
+        );
+        let player = inner.player.as_ref().unwrap();
+        assert_eq!(player.title, "Butterfly");
+        assert_eq!(player.artist, "木村カエラ");
+        assert_eq!(player.album, "5years");
+    }
 }

@@ -19,11 +19,13 @@ import {
 import { notify } from "./feedback";
 import { activeSource } from "./sources";
 import { trackForPath } from "./catalog";
+import { shuffled } from "./shuffle";
 
 let remoteHooks: {
   playRemoteByPath: (path: string) => boolean;
   withRemotePathByPath: (path: string, then: (fetched: string) => void) => boolean;
   resolveRemotePath?: (path: string) => string | null;
+  cancelPlayIntent?: () => void;
 } | null = null;
 export function registerRemotePlayer(hooks: NonNullable<typeof remoteHooks>): void {
   remoteHooks = hooks;
@@ -73,6 +75,7 @@ effect(() => {
   engine.player();
   untracked(() => prune());
 });
+
 
 /** The optimistic layer (values still in flight over the engine's). */
 const optimistic = computed<Partial<Player>>(() => Object.assign({}, ...pending().map((p) => p.change)));
@@ -378,6 +381,9 @@ export function playLaterTrack(track: Track): void {
  * moment it is picked is itself, playing, until the engine names its own
  * state. */
 export function playTrack(track: Track): void {
+  // A new play supersedes a remote fetch still on its way: that answer must
+  // not take over the track the listener just chose.
+  remoteHooks?.cancelPlayIntent?.();
   if (track.path.startsWith("remote://")) {
     if (
       remoteHooks?.withRemotePathByPath(track.path, (cachedPath) => {
@@ -412,6 +418,19 @@ export function playTrack(track: Track): void {
  * 板要能一眼看完,而且引擎的队列是可编辑的,长队只会让编辑变难。 */
 export const QUEUE_AHEAD = 10;
 
+/** Tracks the one active context for progressive remote queueing. A new
+ * click replaces it; an old fetch that lands after that is ignored. */
+interface PlayContext {
+  rows: Track[];
+  cursor: number;
+  current: number;
+  queued: Set<string>;
+  inFlight: Set<string>;
+}
+
+let playContext: PlayContext | null = null;
+let contextFilling = false;
+
 /** 从列表点第 `index` 首:它开始播,后面 `QUEUE_AHEAD` 首按列表顺序进队
  * 列。换列表就换一批——队列属于"我现在在听的这张列表"。 */
 export function playFromRows(rows: Track[], index: number): void {
@@ -419,92 +438,148 @@ export function playFromRows(rows: Track[], index: number): void {
   playQueue(rows, index);
 }
 
-/** 播放全部：play(点击那首/第一首) + enqueue(其余)。shuffle 开 → 其余
- * Fisher–Yates 洗牌（同一集合不重复）；关 → 原序。支持本地、远程与混合队列。 */
+/** Plays the clicked row immediately and fills its context in order. An
+ * uncached remote row is fetched before queueing, and one fill stops at the
+ * first such row: the next one is fetched when playback reaches it. */
 export function playQueue(rows: Track[], firstIndex = 0): void {
   if (rows.length === 0) return;
   const idx = Math.min(Math.max(firstIndex, 0), rows.length - 1);
   const first = rows[idx];
+  const start = shuffleMode() ? 0 : idx;
+  const requestedOrder = shuffleMode()
+    ? [first, ...shuffled(rows.filter((_, i) => i !== idx))]
+    : rows;
+  const firstCachedPath = first.path.startsWith("remote://") ? remoteHooks?.resolveRemotePath?.(first.path) ?? null : null;
+  playContext = {
+    rows: requestedOrder,
+    cursor: start,
+    current: start,
+    queued: new Set(firstCachedPath ? [first.path, firstCachedPath] : [first.path]),
+    inFlight: new Set(),
+  };
 
-  if (first.path.startsWith("remote://")) {
-    if (
-      remoteHooks?.withRemotePathByPath(first.path, (cachedFirstPath) => {
-        const updated = [...rows];
-        updated[idx] = { ...first, path: cachedFirstPath };
-        playQueue(updated, idx);
-      })
-    ) {
-      return;
-    }
-  }
-
-  // 首曲已是本地/已缓存。检查首曲之后的待播项是否存在尚未缓存的 remote:// 曲目：
-  const subsequentRows = rows.slice(idx + 1);
-  const hasUncachedRemote = subsequentRows.some(
-    (t) => t.path.startsWith("remote://") && !remoteHooks?.resolveRemotePath?.(t.path),
-  );
-
-  if (hasUncachedRemote) {
-    // 首曲启动后对后续最多 QUEUE_AHEAD（10 首）按序通过 withRemotePathByPath 串行拉取并调用 engine.playLater 入队
-    engine.playContext([trackToQueueItem(first)], 0);
-    const rest = subsequentRows.slice(0, QUEUE_AHEAD);
-    const step = (i: number) => {
-      if (i >= rest.length) return;
-      const t = rest[i];
-      if (t.path.startsWith("remote://")) {
-        const resolved = remoteHooks?.resolveRemotePath?.(t.path);
-        if (resolved) {
-          try {
-            engine.playLater([trackToQueueItem({ ...t, path: resolved })]);
-          } catch (e) {
-            console.warn("neiro: 远程排队失败:", String(e));
-          }
-          step(i + 1);
-        } else {
-          const handled = remoteHooks?.withRemotePathByPath(t.path, (cachedPath) => {
-            try {
-              engine.playLater([trackToQueueItem({ ...t, path: cachedPath })]);
-            } catch (e) {
-              console.warn("neiro: 远程排队失败:", String(e));
-            }
-            step(i + 1);
-          });
-          if (!handled) {
-            step(i + 1);
-          }
-        }
-      } else {
-        try {
-          engine.playLater([trackToQueueItem(t)]);
-        } catch (e) {
-          console.warn("neiro: 排队失败:", String(e));
-        }
-        step(i + 1);
-      }
+  if (first.path.startsWith("remote://") && !remoteHooks?.resolveRemotePath?.(first.path)) {
+    const context = playContext;
+    const startRemote = () => {
+      context.inFlight.add(first.path);
+      remoteHooks?.withRemotePathByPath(first.path, (cachedPath) => {
+        if (playContext !== context) return;
+        context.inFlight.delete(first.path);
+        context.queued.add(first.path);
+        context.queued.add(cachedPath);
+        playTrack({ ...first, path: cachedPath });
+        fillPlayContext();
+      });
+      return context.inFlight.has(first.path);
     };
-    step(0);
-  } else {
-    const validItems: QueueItem[] = [];
-    let adjustedIndex = 0;
-    for (let i = 0; i < rows.length; i++) {
-      const t = rows[i];
-      if (i === idx) {
-        adjustedIndex = validItems.length;
-        validItems.push(trackToQueueItem(t));
-      } else if (t.path.startsWith("remote://")) {
-        const resolved = remoteHooks?.resolveRemotePath?.(t.path);
-        if (resolved) {
-          validItems.push(trackToQueueItem({ ...t, path: resolved }));
+    if (startRemote()) return;
+    reportEngineFailure(new Error("E_REMOTE: 服务器没有回这个文件的缓存路径"), "取流失败");
+    const next = requestedOrder.find((row, at) => at > start && (!row.path.startsWith("remote://") || remoteHooks?.resolveRemotePath?.(row.path)));
+    if (!next) return;
+    const nextAt = requestedOrder.indexOf(next);
+    playContext.cursor = nextAt;
+    playContext.current = nextAt;
+    playContext.queued.add(next.path);
+    playTrack(next);
+    fillPlayContext();
+    return;
+  }
+  playTrack(first);
+  fillPlayContext();
+}
+
+/** Enqueues rows after the cursor in original order. One uncached remote
+ * row may be in flight; `playLater` only receives local cached paths. */
+function fillPlayContext(): void {
+  if (!playContext || contextFilling) return;
+  const context = playContext;
+  contextFilling = true;
+  try {
+    while (context.cursor < context.rows.length) {
+      if (context.cursor - context.current >= QUEUE_AHEAD) return;
+      const row = context.rows[context.cursor];
+      const isRemote = row.path.startsWith("remote://");
+      const cached = isRemote ? remoteHooks?.resolveRemotePath?.(row.path) ?? null : null;
+      if (isRemote && !cached) {
+        if (context.inFlight.has(row.path)) return;
+        context.inFlight.add(row.path);
+        const handled = remoteHooks?.withRemotePathByPath(row.path, (cachedPath) => {
+          if (playContext !== context) return;
+          context.inFlight.delete(row.path);
+          context.queued.add(row.path);
+          context.queued.add(cachedPath);
+          try {
+            engine.playLater([trackToQueueItem({ ...row, path: cachedPath })]);
+          } catch (error) {
+            console.warn("neiro: 远程排队失败:", String(error));
+          }
+          context.cursor += 1;
+        }) ?? false;
+        if (!handled) {
+          context.inFlight.delete(row.path);
+          context.cursor += 1;
+          continue;
+        }
+        return;
+      }
+      const queueable = isRemote && cached ? { ...row, path: cached } : row;
+      if (!context.queued.has(queueable.path)) {
+        context.queued.add(queueable.path);
+        try {
+          engine.playLater([trackToQueueItem(queueable)]);
+        } catch (error) {
+          console.warn("neiro: 排队失败:", String(error));
         }
       } else {
-        validItems.push(trackToQueueItem(t));
+        context.queued.add(queueable.path);
       }
+      context.cursor += 1;
     }
-
-    if (validItems.length > 0) {
-      engine.playContext(validItems, adjustedIndex);
-    }
+  } finally {
+    contextFilling = false;
   }
+}
+
+effect(() => {
+  const path = player().path;
+  const context = playContext;
+  if (!context || !path) return;
+  const at = context.rows.findIndex(
+    (row) => row.path === path || (row.path.startsWith("remote://") && remoteHooks?.resolveRemotePath?.(row.path) === path),
+  );
+  if (at < 0) {
+    playContext = null;
+    return;
+  }
+  context.current = at;
+  if (at > context.cursor) context.cursor = at;
+  if (context.rows[at].path.startsWith("remote://") && !context.queued.has(context.rows[at].path)) {
+    context.queued.add(context.rows[at].path);
+    context.cursor = Math.max(context.cursor, at + 1);
+  }
+  untracked(() => fillPlayContext());
+});
+
+/** Test seam: advance the context by the exact index of the playing path
+ * and fill again (the same logic the player effect uses). */
+export function advancePlayContextToPath(path: string | null): void {
+  if (!playContext || !path) return;
+  const at = playContext.rows.findIndex(
+    (row) =>
+      row.path === path ||
+      (row.path.startsWith("remote://") && remoteHooks?.resolveRemotePath?.(row.path) === path),
+  );
+  if (at < 0) {
+    playContext = null;
+    return;
+  }
+  playContext.current = at;
+  if (at > playContext.cursor) playContext.cursor = at;
+  if (playContext.rows[at].path.startsWith("remote://") && !playContext.queued.has(playContext.rows[at].path)) {
+    playContext.queued.add(playContext.rows[at].path);
+    playContext.cursor = Math.max(playContext.cursor, at + 1);
+  }
+  fillPlayContext();
 }
 
 export function playQueueAt(index: number): void {

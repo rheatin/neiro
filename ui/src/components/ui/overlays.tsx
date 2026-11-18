@@ -6,6 +6,7 @@ import { createMotion, type JSX, type MotionSpec, View } from "nsh";
 import { titleBarArea } from "./title-bar";
 import { Dialog, Sheet } from "nsh/base";
 import { enter } from "./motion";
+import { ContextMenuHost } from "./context-menu";
 
 /** A dialog's entrance: up a little from slightly smaller, settling
  * without overshoot, as the scrim fades. */
@@ -94,6 +95,12 @@ export function AppSheet(props: {
         }}
       >
         {props.children}
+        {/* A Sheet covers everything on the app surface, so the surface's
+            right-click menu would sit under it. A full sheet draws its own
+            menu host, whose overlay's root is the sheet. */}
+        <If when={!!props.full}>
+          <ContextMenuHost layer="sheet" />
+        </If>
       </View>
     </Sheet>
   );

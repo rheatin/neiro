@@ -68,6 +68,9 @@ function onList({ pictures, path }: ArtworkList): void {
   listPath = null;
   if (!pictures.length) {
     settle(path, "");
+    // A read file with no picture is an answer worth keeping: the next run
+    // need not open it again.
+    engine.coverCachePut(path, "none");
     void Promise.resolve().then(pumpLocal);
   } else {
     try {
@@ -96,7 +99,9 @@ function onData({
   if (path !== dataPath) return;
   clearLocalTimer();
   dataPath = null;
-  settle(path, data ? `data:${mime || "image/jpeg"};base64,${data}` : "");
+  const uri = data ? `data:${mime || "image/jpeg"};base64,${data}` : "";
+  settle(path, uri);
+  engine.coverCachePut(path, uri === "" ? "none" : uri);
   void Promise.resolve().then(pumpLocal);
 }
 
@@ -173,7 +178,23 @@ function onRemoteArtwork(
  * reactive: a later cache fill re-renders the cover. */
 export function coverOf(path: string | undefined): string {
   if (!path || path.startsWith("remote://")) return "";
+  const known = cache.get(path);
+  if (known !== undefined) {
+    version();
+    return known;
+  }
   if (!asked.has(path)) {
+    // A previous run's answer, if the file still is what it was (the key
+    // carries its mtime and size): this skips reading the file and Base.
+    const disk = engine.coverCacheGet(path);
+    if (disk !== "") {
+      asked.add(path);
+      // Through `settle`, so a burst of disk hits still honours the memory
+      // cap and a later eviction is re-readable from disk.
+      settle(path, disk === "none" ? "" : disk);
+      version();
+      return cache.get(path) ?? "";
+    }
     asked.add(path);
     localQueue.push(path);
     void Promise.resolve().then(pumpLocal);
@@ -194,6 +215,16 @@ export function remoteCoverOf(id: string, coverArt: string | null): string {
   }
   version();
   return cache.get(coverArt) ?? "";
+}
+
+/** Drops this run's remote/local cover answers and pending asks: a disk
+ * clean must not leave deleted images on screen. */
+export function clearArtworkMemory(): void {
+  cache.clear();
+  asked.clear();
+  localQueue.length = 0;
+  remoteQueue.length = 0;
+  untracked(() => version.update((n) => n + 1));
 }
 
 /** Feeds one answer into the cache; the LRU loses its oldest while over
