@@ -17,12 +17,14 @@ import {
   trackSortOrder,
 } from "../src/state/library-prefs";
 import {
+  adoptLyrics,
   enabledLyricsCount,
   enabledLyricsProviders,
   matchScore,
   rankedCandidates,
   similarity,
   startLyricsSearch,
+  trackLyrics,
 } from "../src/state/lyrics";
 import { engine } from "../src/backend/engine";
 import { playTrack } from "../src/state/player";
@@ -248,4 +250,34 @@ test("startLyricsSearch 传给 engine.searchLyrics 的第 5 个参数确实是 s
     engine.searchLyrics = originalSearch;
     engine.setPlayerForTest({ path: null, state: "stopped" });
   }
+});
+
+test("搜索结果采用到发起搜索的那首，切歌后不会写到新曲上", () => {
+  const candidate = {
+    id: 9,
+    track: "晴天",
+    artist: "周杰伦",
+    album: "叶惠美",
+    durationS: 269,
+    synced: "[00:00.00]故事的小黄花",
+    plain: null,
+    provider: "builtin.lyrics.netease",
+    providerName: "网易云音乐",
+  };
+
+  engine.setPlayerForTest({ path: "/music/a.flac", title: "晴天", state: "playing" });
+  // The search remembers the track it asked about.
+  startLyricsSearch({ artist: "周杰伦", title: "晴天", album: "叶惠美", durationS: 269 });
+
+  // The track changes while that answer is on screen.
+  engine.setPlayerForTest({ path: "/music/b.flac", title: "另一首", state: "playing" });
+  adoptLyrics(candidate);
+
+  // The new track must not inherit the previous search's words.
+  expect(trackLyrics().present).toBe(false);
+
+  // The track that was searched keeps them.
+  engine.setPlayerForTest({ path: "/music/a.flac", title: "晴天", state: "playing" });
+  expect(trackLyrics().present).toBe(true);
+  expect(trackLyrics().lines[0]?.text).toBe("故事的小黄花");
 });

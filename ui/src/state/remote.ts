@@ -3,9 +3,9 @@
 // artwork 栈, 流程 设为 fetch→fetched→play。
 
 import { cleanup, computed, effect, signal, Storage, untracked } from "nsh";
-import { engine, reportEngineFailure } from "../backend/engine";
+import { engine, registerRemoteTrackLookup, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
-import { registerRemotePlayer, playTrack, QUEUE_AHEAD, trackToQueueItem } from "./player";
+import { registerRemotePlayer, playTrack, REMOTE_QUEUE_AHEAD, trackToQueueItem } from "./player";
 import { registerRemoteCatalog } from "./catalog";
 import { activeSourceId, registerRemoteActivator, registerRemoteDisconnector, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
 import { shuffle, shuffled } from "./shuffle";
@@ -712,6 +712,10 @@ export function remoteTrackForCachePath(path: string): RemoteTrack | null {
 
 export const remoteTrackForPath = remoteTrackForCachePath;
 
+// The server listing is the metadata the listener browsed: prefer it over a
+// cached file's own tags, which a stale/preloaded analysis can get wrong.
+registerRemoteTrackLookup((path) => remoteTrackForCachePath(path) ?? undefined);
+
 // ---- 播放：fetch → fetched → play --------------------------------------------
 
 export function remoteAsTrack(rt: RemoteTrack): Track {
@@ -742,26 +746,30 @@ export function asLocalTrack(track: RemoteTrack, path: string): Track {
 /** 点击一行：`fetchRemote(id)` 进缓存，`remote_fetched` 带回 path，直
  * 接 `play(path)`。等待中给该行转圈。 */
 export function playRemote(track: RemoteTrack): void {
+  playIntent = track.id;
+  playTracks.set(track.id, track);
   if (fetchingId(track.id)) return;
   fetchingIds.update((set) => new Set(set).add(track.id));
   try {
     engine.fetchRemote(track.id);
   } catch (error) {
     reportEngineFailure(error, "取流失败");
+    if (playIntent === track.id) playIntent = null;
+    playTracks.delete(track.id);
     unfetchId(track.id);
   }
 }
 
-/** 点远程列表的第 `index` 首:取流播放,并把后面 `QUEUE_AHEAD` 首依次取流
- * 后排队。远程曲目在缓存里才有本地路径,所以排队就是下载——一次只有一首在
- * 下,拿到路径就入队,顺序不会乱。 */
+/** 点远程列表的第 `index` 首:取流播放,并在当前曲开始后只预取下一首。
+ * 远程曲目在缓存里才有本地路径,而 Base 会整首下载;所以不再一次拉 10 首,
+ * 只把下一首准备好,其余等真正播到时再取。 */
 export function queueRemoteFrom(rows: RemoteTrack[], index: number): void {
   const at = Math.min(Math.max(index, 0), Math.max(rows.length - 1, 0));
   if (rows.length === 0) return;
   const first = rows[at];
   const other = rows.filter((_, i) => i !== at);
   const queuedOther = shuffle() ? shuffled(other) : rows.slice(at + 1);
-  const rest = queuedOther.slice(0, QUEUE_AHEAD);
+  const rest = queuedOther.slice(0, REMOTE_QUEUE_AHEAD);
 
   withRemotePath(first, (firstPath) => {
     playTrack(asLocalTrack(first, firstPath));
@@ -794,12 +802,22 @@ function unfetchId(id: string): void {
  * instead of being refused. Multiple concurrent callers queue their callbacks. */
 const fetchedActions = new Map<string, Array<(path: string) => void>>();
 
+/** The row the listener last asked to play: a fetch that finishes after a
+ * later click must not take over playback. */
+let playIntent: string | null = null;
+
+/** The row the click named, so the title/artist/album shown are the listing's
+ * even if a fetch event arrives with another shape. */
+const playTracks = new Map<string, RemoteTrack>();
+
 engine.subscribeRemoteFetched(({ track, path }) => {
   untracked(() => {
     if (!fetchingId(track.id)) return;
     unfetchId(track.id);
     if (!path) {
       fetchedActions.delete(track.id);
+      if (playIntent === track.id) playIntent = null;
+      playTracks.delete(track.id);
       reportEngineFailure(new Error("E_REMOTE: 服务器没有回这个文件的缓存路径"), "取流失败");
       return;
     }
@@ -814,8 +832,14 @@ engine.subscribeRemoteFetched(({ track, path }) => {
           console.warn("neiro: withRemotePath callback failed:", String(e));
         }
       }
-    } else {
-      playTrack(asLocalTrack(track, path));
+    }
+    // The last click wins, and the listing it named is the metadata shown:
+    // a fetch that finishes later must not put an earlier row on screen.
+    if (playIntent === track.id) {
+      playIntent = null;
+      const known = playTracks.get(track.id) ?? track;
+      playTracks.delete(track.id);
+      playTrack(asLocalTrack(known, path));
     }
   });
 });
@@ -863,6 +887,8 @@ effect(() => {
     if (stale.size > 0) {
       for (const id of stale) {
         fetchedActions.delete(id);
+        if (playIntent === id) playIntent = null;
+        playTracks.delete(id);
         unfetchId(id);
       }
     }
@@ -894,5 +920,8 @@ registerRemotePlayer({
   resolveRemotePath: (path) => {
     const rt = remoteTrackForCachePath(path);
     return rt ? cachedRemotePath(rt) : null;
+  },
+  cancelPlayIntent: () => {
+    playIntent = null;
   },
 });

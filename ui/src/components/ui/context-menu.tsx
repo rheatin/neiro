@@ -58,15 +58,25 @@ export function MenuSurface(props: { items: MenuAction[]; label?: string }) {
 interface OpenMenu {
   at: { x: number; y: number };
   items: MenuAction[];
+  /** Which root draws it: the app surface, or a sheet's own root (a Sheet
+   * covers everything on the surface, so a menu asked for inside one must be
+   * drawn inside it). */
+  layer: "root" | "sheet";
 }
 
 const open = signal<OpenMenu | null>(null);
 
 /** Shows the menu at `at` (the root view's coordinates, as
- * `onContextMenu` reports them), replacing whatever was open. */
-export function openContextMenu(at: { x: number; y: number }, items: MenuAction[]): void {
+ * `onContextMenu` reports them), replacing whatever was open. `layer` picks
+ * the root that draws it: a right click inside a Sheet passes `"sheet"`,
+ * because the surface's overlay sits under the Sheet and would never show. */
+export function openContextMenu(
+  at: { x: number; y: number },
+  items: MenuAction[],
+  layer: "root" | "sheet" = "root",
+): void {
   if (items.length === 0) return;
-  open.set({ at, items });
+  open.set({ at, items, layer });
 }
 
 export function closeContextMenu(): void {
@@ -94,8 +104,11 @@ function placeAt(at: { x: number; y: number }, items: MenuAction[]): { x: number
   return { x, y };
 }
 
-export function ContextMenuHost() {
-  const menu = () => open();
+export function ContextMenuHost(props: { layer?: "root" | "sheet" } = {}) {
+  const menu = () => {
+    const current = open();
+    return current !== null && current.layer === (props.layer ?? "root") ? current : null;
+  };
   const rise = enter("zoomIn");
   return (
     <If when={menu()}>

@@ -111,7 +111,7 @@ function NowPlayingContent() {
             ? [{ label: track()?.album ? "查看专辑" : "查看歌手", onSelect: openAlbum }]
             : []),
           ...rowActions(track()),
-        ])
+        ], "sheet")
       }
     >
       <Button

@@ -157,6 +157,20 @@ export function registerTrackLookup(
   trackLookup = lookup;
 }
 
+/** A remote track's cached file is named by the server's id; the listing is
+ * the metadata the listener browsed. It wins over the file's own tags, so a
+ * stale/preloaded analysis cannot put the previous song's title on it — and
+ * the cover (keyed by the same listing) stays in step with the title. */
+let remoteTrackLookup:
+  | ((path: string) => { title?: string; artist?: string; album?: string } | undefined)
+  | null = null;
+
+export function registerRemoteTrackLookup(
+  lookup: (path: string) => { title?: string; artist?: string; album?: string } | undefined,
+): void {
+  remoteTrackLookup = lookup;
+}
+
 function playerOf(n: NativePlayer | null | undefined): Player {
   if (!n) return { ...EMPTY_PLAYER, at: Date.now() };
   let title = text(n.title);
@@ -169,6 +183,14 @@ function playerOf(n: NativePlayer | null | undefined): Player {
       if (!title && fallback.title) title = fallback.title;
       if (!artist && fallback.artist) artist = fallback.artist;
       if (!album && fallback.album) album = fallback.album;
+    }
+  }
+  if (path) {
+    const remote = remoteTrackLookup?.(path);
+    if (remote) {
+      if (remote.title) title = remote.title;
+      if (remote.artist) artist = remote.artist;
+      if (remote.album) album = remote.album;
     }
   }
   return {
@@ -868,6 +890,30 @@ export class Engine implements Backend {
 
   readArtworkBytes(path: string, index: number): void {
     this.#command((base) => base.readArtworkBytes(path, index));
+  }
+
+  /** The cover a previous run cached on disk: `""` when there is no entry,
+   * `"none"` when that run found the file has no picture. */
+  coverCacheGet(path: string): string {
+    const base = this.#base;
+    if (!base) return "";
+    try {
+      return base.coverCacheGet(path);
+    } catch (error) {
+      console.warn("neiro: 封面缓存没有读出来:", String(error));
+      return "";
+    }
+  }
+
+  /** Writes a cover answer to the disk cache (the `data:` URI, or `"none"`). */
+  coverCachePut(path: string, uri: string): void {
+    const base = this.#base;
+    if (!base) return;
+    try {
+      base.coverCachePut(path, uri);
+    } catch (error) {
+      console.warn("neiro: 封面缓存没有写进去:", String(error));
+    }
   }
 
   // ---- 远程库（v2，契约：缓存目录由 Rust 固定，不传参） --------------------------

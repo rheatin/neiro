@@ -6,7 +6,7 @@
 // starts. LRC timestamps (`[01:23.45]`) are the only sync this reads, because
 // they are the only sync a file carries.
 
-import { signal, Storage } from "nsh";
+import { effect, signal, Storage, untracked } from "nsh";
 import { engine } from "../backend/engine";
 import type { LyricsCandidate } from "../backend/types";
 import { player } from "./player";
@@ -112,6 +112,9 @@ export function subscribeLyrics(): () => void {
     next.set(page.path, entry);
     cache.set(next);
     if (player().path === page.path) current.set(entry);
+    // A file with no lyric tag of its own is the case the automatic search
+    // exists for; the tag answer is the first moment that is known.
+    if (!entry.present) untracked(() => autoFetchFor(page.path));
   });
 }
 
@@ -142,6 +145,9 @@ export type LyricsSearchState =
 export const lyricsSearch = signal<LyricsSearchState>({ status: "idle" });
 
 let searchStop: (() => void) | null = null;
+/** The path the last search was asked for: its results must be adopted under
+ * that path, not whatever plays when the button is pressed later. */
+let searchPath: string | null = null;
 let searchOpen = false;
 /** The last words asked for, and whether the narrower retry has been spent. */
 let askedFor: LyricsQuery | null = null;
@@ -168,6 +174,12 @@ export function setLyricsSearchOpen(open: boolean): void {
   }
   // The previous track's answer is not this track's: opening the sheet starts
   // a new search and shows nothing of the old one while it runs.
+  if ((player().path ?? "") === "") {
+    // Nothing is playing: there is no song to ask about, and leaving the
+    // sheet "searching" would be a spinner that never ends.
+    lyricsSearch.set({ status: "done", candidates: [] });
+    return;
+  }
   lyricsSearch.set({ status: "searching" });
   startLyricsSearch();
 }
@@ -229,10 +241,138 @@ export function enabledLyricsCount(): number {
   return enabledLyricsProviders().length;
 }
 
+// ---- 自动检索 --------------------------------------------------------------
+
+/** Whether a track with no embedded words fetches some online by itself.
+ * Persisted: a search asks four services, which is a network round-trip the
+ * listener opts into rather than one that happens on every track. */
+const AUTO_KEY = "lyrics:auto";
+
+export const autoLyricsEnabled = signal(true);
+
+export function setAutoLyricsEnabled(on: boolean): void {
+  autoLyricsEnabled.set(on);
+  void Storage.setItem(AUTO_KEY, on ? "1" : "0").catch((error) =>
+    console.warn("neiro: 自动歌词设置没有记住:", String(error)),
+  );
+  if (on) maybeAutoFetchLyrics();
+}
+
+/** Reads the stored preference once, at startup. */
+export async function loadAutoLyricsSetting(): Promise<void> {
+  try {
+    const raw = await Storage.getItem(AUTO_KEY);
+    // On unless the listener turned it off: a track without words should
+    // fetch some by itself, which is the point of the feature.
+    if (raw === "0") autoLyricsEnabled.set(false);
+  } catch (error) {
+    console.warn("neiro: 自动歌词设置没有读出来:", String(error));
+  }
+}
+
+/** Paths the automatic search already tried, so a track is asked once a
+ * session even when its answer was empty. */
+const autoTried = new Set<string>();
+
+/** The automatic search in flight, if any. The engine's answer carries no
+ * request id, so the path it was asked for is the only correlation. */
+let autoPending: string | null = null;
+let autoStop: (() => void) | null = null;
+
+/** Drops the in-flight automatic search: its answer is not wanted any more. */
+function finishAuto(): void {
+  if (autoStop !== null) {
+    try {
+      autoStop();
+    } catch {}
+    autoStop = null;
+  }
+  autoPending = null;
+}
+
+/** The best words above this score are adopted; a weaker answer would put
+ * another song's words under this track, which is worse than none. */
+const AUTO_THRESHOLD = 0.5;
+
+/** Runs one automatic search for `path`, when the track has no words of its
+ * own. A track whose tag has not been read yet is read first; the tag answer
+ * calls back here. */
+function autoFetchFor(path: string): void {
+  if (!autoLyricsEnabled() || path === "" || autoTried.has(path)) return;
+  if (adopted().has(path)) return;
+  const known = cache().get(path);
+  if (!known) {
+    ensureLyrics(path);
+    return;
+  }
+  if (known.present) return;
+  const query = lyricsQueryForCurrent();
+  if (player().path !== path || query.title.trim() === "") return;
+  const enabled = enabledLyricsProviders();
+  if (enabled.length === 0) return;
+
+  // A previous track's answer is not this track's: drop it.
+  finishAuto();
+  autoTried.add(path);
+  autoPending = path;
+
+  autoStop = engine.subscribeLyricsFound((candidates) => {
+    // Another request (or another track) came back first: leave the answer.
+    if (autoPending !== path) return;
+    finishAuto();
+    if (player().path !== path || candidates.length === 0) return;
+    const best = candidates
+      .map((candidate) => ({ candidate, score: matchScore(candidate, query) }))
+      .sort((left, right) => right.score - left.score)[0];
+    const text = (best?.candidate.synced ?? best?.candidate.plain ?? "").trim();
+    if (best && best.score >= AUTO_THRESHOLD && text !== "") {
+      adoptLyrics(best.candidate, path);
+    }
+  });
+
+  const providersJson = JSON.stringify(enabled.map((p) => p.id));
+  try {
+    engine.searchLyrics(query.artist, query.title, query.album, query.durationS, providersJson);
+  } catch (error) {
+    finishAuto();
+    // The engine was not ready: let a later run try again.
+    autoTried.delete(path);
+    console.warn("neiro: 自动歌词搜索没有发出去:", String(error));
+  }
+}
+
+/** The trigger for the track that is playing now. */
+export function maybeAutoFetchLyrics(): void {
+  if (!autoLyricsEnabled()) return;
+  const path = player().path ?? "";
+  if (path !== "") autoFetchFor(path);
+}
+
+// Read each track's tags once, whether or not the lyrics panel is open: the
+// automatic search needs the "no lyric tag" answer, and the panel should have
+// the words ready when it is opened.
+effect(() => {
+  const path = player().path ?? "";
+  const engineReady = engine.health().status === "ready";
+  if (path === "" || !engineReady) return;
+  untracked(() => ensureLyrics(path));
+});
+
+// A track change, or the setting turned on, checks once. `untracked` keeps the
+// store's internal reads from re-running this on every cache write.
+effect(() => {
+  const on = autoLyricsEnabled();
+  const path = player().path ?? "";
+  const engineReady = engine.health().status === "ready";
+  if (!on || !engineReady || path === "") return;
+  untracked(() => autoFetchFor(path));
+});
+
 /** Asks the provider for the current track's words. */
 export function startLyricsSearch(query?: LyricsQuery): void {
   const path = player().path ?? "";
   if (path === "") return;
+  searchPath = path;
 
   const enabled = enabledLyricsProviders();
   if (enabled.length === 0) {
@@ -345,20 +485,22 @@ function fileTitle(path: string): string {
 }
 
 /** Use one candidate's words for `path`. The file itself is not touched. */
-export function adoptLyrics(candidate: LyricsCandidate): void {
-  const path = player().path ?? "";
-  if (path === "") return;
+export function adoptLyrics(candidate: LyricsCandidate, path?: string): void {
+  // The words belong to the track the search asked about; a track change
+  // while the sheet is open must not write them under the new one.
+  const target = path ?? searchPath ?? player().path ?? "";
+  if (target === "") return;
   const text = candidate.synced ?? candidate.plain ?? "";
   const parsed = parseLyrics(text);
-  const entry: Lyrics = { path, lines: parsed.lines, present: true, synced: parsed.synced };
+  const entry: Lyrics = { path: target, lines: parsed.lines, present: true, synced: parsed.synced };
   const next = new Map(adopted());
-  next.set(path, entry);
+  next.set(target, entry);
   adopted.set(next);
   persistAdopted(next);
   const cacheNext = new Map(cache());
-  cacheNext.set(path, entry);
+  cacheNext.set(target, entry);
   cache.set(cacheNext);
-  current.set(entry);
+  if (player().path === target) current.set(entry);
 }
 
 async function persistAdopted(all: Map<string, Lyrics>): Promise<void> {

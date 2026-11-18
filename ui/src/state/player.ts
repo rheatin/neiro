@@ -24,6 +24,7 @@ let remoteHooks: {
   playRemoteByPath: (path: string) => boolean;
   withRemotePathByPath: (path: string, then: (fetched: string) => void) => boolean;
   resolveRemotePath?: (path: string) => string | null;
+  cancelPlayIntent?: () => void;
 } | null = null;
 export function registerRemotePlayer(hooks: NonNullable<typeof remoteHooks>): void {
   remoteHooks = hooks;
@@ -378,6 +379,9 @@ export function playLaterTrack(track: Track): void {
  * moment it is picked is itself, playing, until the engine names its own
  * state. */
 export function playTrack(track: Track): void {
+  // A new play supersedes a remote fetch still on its way: that answer must
+  // not take over the track the listener just chose.
+  remoteHooks?.cancelPlayIntent?.();
   if (track.path.startsWith("remote://")) {
     if (
       remoteHooks?.withRemotePathByPath(track.path, (cachedPath) => {
@@ -412,6 +416,10 @@ export function playTrack(track: Track): void {
  * 板要能一眼看完,而且引擎的队列是可编辑的,长队只会让编辑变难。 */
 export const QUEUE_AHEAD = 10;
 
+/** Remote tracks are whole-file downloads (Base v0.2.0 has no streaming):
+ * fetch at most one next track, not a queue of ten. */
+export const REMOTE_QUEUE_AHEAD = 1;
+
 /** 从列表点第 `index` 首:它开始播,后面 `QUEUE_AHEAD` 首按列表顺序进队
  * 列。换列表就换一批——队列属于"我现在在听的这张列表"。 */
 export function playFromRows(rows: Track[], index: number): void {
@@ -445,9 +453,22 @@ export function playQueue(rows: Track[], firstIndex = 0): void {
   );
 
   if (hasUncachedRemote) {
-    // 首曲启动后对后续最多 QUEUE_AHEAD（10 首）按序通过 withRemotePathByPath 串行拉取并调用 engine.playLater 入队
+    // Remote tracks are whole-file downloads (Base v0.2.0 has no streaming).
+    // Keep the queue bounded and fetch at most one next remote track; local
+    // rows are enqueued without a download.
     engine.playContext([trackToQueueItem(first)], 0);
-    const rest = subsequentRows.slice(0, QUEUE_AHEAD);
+    const rest: Track[] = [];
+    let remoteAhead = 0;
+    for (const t of subsequentRows) {
+      if (rest.length >= QUEUE_AHEAD) break;
+      const uncachedRemote =
+        t.path.startsWith("remote://") && !remoteHooks?.resolveRemotePath?.(t.path);
+      if (uncachedRemote) {
+        if (remoteAhead >= REMOTE_QUEUE_AHEAD) continue;
+        remoteAhead += 1;
+      }
+      rest.push(t);
+    }
     const step = (i: number) => {
       if (i >= rest.length) return;
       const t = rest[i];
