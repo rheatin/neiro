@@ -85,7 +85,8 @@ function pluginIcon(p: PluginInfo): IconName {
   if (p.id.includes("netease")) return "music";
   if (p.id.includes("qqmusic")) return "headphones";
   if (p.id.includes("kugou")) return "mic";
-  if (p.id.includes("lrcapi")) return "globe";
+  if (p.id.includes("lrclib") || p.id.includes("lrcapi")) return "globe";
+  if (p.id.includes("studio-minimal")) return "disc";
   if (p.category === "lyrics.provider") return "fileText";
   if (p.category === "ui.shell") return "layout";
   if (p.category === "ui.visualizer") return "wave";
