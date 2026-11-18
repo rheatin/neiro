@@ -21,7 +21,7 @@ import { PlaylistDialogs } from "./src/components/library/playlist-dialogs";
 import { ContextMenuHost } from "./src/components/ui/context-menu";
 import { QueueSheet } from "./src/components/player/queue-sheet";
 import { bumpVolume, next, seek, toggle as togglePlayback } from "./src/state/player";
-import { loadAdoptedLyrics, subscribeLyrics } from "./src/state/lyrics";
+import { loadAdoptedLyrics, loadAutoLyricsSetting, subscribeLyrics } from "./src/state/lyrics";
 import { outputOpen, setOutputOpen, setPluginDialogOpen } from "./src/state/overlays";
 import {
   activeShellId,
@@ -44,6 +44,8 @@ if (health().status === "starting") engine.connect();
 subscribeLyrics();
 // Words chosen from the online search are remembered across launches.
 void loadAdoptedLyrics();
+// Whether a track without embedded words should fetch some on its own.
+void loadAutoLyricsSetting();
 
 import { restorePolicyAtStartup } from "./src/state/resolved";
 

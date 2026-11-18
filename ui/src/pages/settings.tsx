@@ -17,6 +17,7 @@ import { EFFECT_NAMES, TOOLBAR_EFFECTS, type ToolbarEffect } from "../components
 import { lightEffect, setLight, type LightChoice } from "../state/visual";
 import { isStreamBitPerfect, resolvedPath } from "../state/resolved";
 import { activeShellId, isRemoteKindEnabled, plugins } from "../state/plugins";
+import { autoLyricsEnabled, setAutoLyricsEnabled } from "../state/lyrics";
 export function SettingsPage() {
   const path = () => engine.renderPath();
   const res = () => resolvedPath();
@@ -316,6 +317,30 @@ export function SettingsPage() {
               >
                 <Text class="text-center text-xs font-medium leading-none text-foreground">
                   {sidebarCollapsed() ? "当前：纯图标 (点击展开)" : "当前：完整 (点击收起)"}
+                </Text>
+              </Button>
+            </View>
+          </View>
+
+          {/* ---- 歌词 ---- */}
+          <View class="gap-3">
+            <SectionTitle>歌词</SectionTitle>
+            <View class="flex-row items-center justify-between rounded-(--radius-panel) border border-border bg-card p-4">
+              <View class="gap-0.5 min-w-0 flex-1 pr-4">
+                <Text class="text-sm font-bold text-foreground">自动检索在线歌词</Text>
+                <Text class="text-xs text-muted-foreground">
+                  当前曲目没有内嵌歌词时，自动向已启用的歌词源检索并采用最匹配的一份；歌词源在插件管理器中管理。
+                </Text>
+              </View>
+              <Button
+                accessibilityLabel={autoLyricsEnabled() ? "自动检索歌词已开启，点击关闭" : "自动检索歌词已关闭，点击开启"}
+                onPress={() => setAutoLyricsEnabled(!autoLyricsEnabled())}
+                class={`h-8 items-center justify-center rounded-full border px-4 transition duration-150 ease-out active:scale-95 ${
+                  autoLyricsEnabled() ? "border-amber-500 bg-amber-500/15" : "border-border bg-secondary"
+                } ${focusRing}`}
+              >
+                <Text class={`text-center font-mono text-xs font-bold leading-none ${autoLyricsEnabled() ? "text-amber-500" : "text-muted-foreground"}`}>
+                  {autoLyricsEnabled() ? "已启用 ON" : "已关闭 OFF"}
                 </Text>
               </Button>
             </View>
