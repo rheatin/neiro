@@ -363,6 +363,8 @@ function lyricsCandidateOf(n: any): LyricsCandidate {
     durationS: typeof n?.durationS === "number" ? n.durationS : 0,
     synced: typeof n?.synced === "string" ? n.synced : null,
     plain: typeof n?.plain === "string" ? n.plain : null,
+    provider: typeof n?.provider === "string" ? n.provider : undefined,
+    providerName: typeof n?.providerName === "string" ? n.providerName : undefined,
   };
 }
 
@@ -457,6 +459,7 @@ export class Engine implements Backend {
   #remoteFetchedSubs = new Set<Fanout<RemoteFetched>>();
   #remoteArtworkSubs = new Set<Fanout<RemoteArtwork | null>>();
   #lyricsFoundSubs = new Set<Fanout<LyricsCandidate[]>>();
+  #remoteProbeSubs = new Set<Fanout<RemoteProbe>>();
 
   /** Builds the Base, absorbs its snapshot through the first listener calls
    * and reports `failed` with the engine's own words when there is none. */
@@ -496,13 +499,15 @@ export class Engine implements Backend {
       base.onError((e) => this.#fan(this.#errorSubs, { op: text(e?.op), message: text(e?.message) })),
       base.onRemote((s) => remoteStatusSig.set(remoteStatusOf(s))),
       base.onRemoteTracks((t) => remoteTracksSig.set((t ?? []).map(remoteTrackOf))),
-      base.onRemoteProbed((p) =>
-        remoteProbeSig.set({
+      base.onRemoteProbed((p) => {
+        const probed: RemoteProbe = {
           ok: p?.ok === true,
           message: text(p?.message),
           count: typeof p?.count === "number" ? p.count : 0,
-        }),
-      ),
+        };
+        remoteProbeSig.set(probed);
+        this.#fan(this.#remoteProbeSubs, probed);
+      }),
       base.onLyricsFound((list) => {
         lyricsFoundSig.set((list ?? []).map(lyricsCandidateOf));
         this.#fan(this.#lyricsFoundSubs, lyricsFoundSig());
@@ -585,6 +590,11 @@ export class Engine implements Backend {
   /** Asks the server one item; the outcome arrives on `subscribeRemoteProbe`. */
   probeRemote(): void {
     this.#command((base) => base.probeRemote());
+  }
+
+  subscribeRemoteProbe(sub: Fanout<RemoteProbe>): () => void {
+    this.#remoteProbeSubs.add(sub);
+    return () => this.#remoteProbeSubs.delete(sub);
   }
 
   /** The answer to one online lyrics search, as the provider returned it. */
@@ -892,9 +902,9 @@ export class Engine implements Backend {
 
   /** Asks the online provider for this track's words; the answer arrives on
    * `subscribeLyricsFound`. */
-  searchLyrics(artist: string, title: string, album: string, durationS: number | null): void {
+  searchLyrics(artist: string, title: string, album: string, durationS: number | null, providersJson?: string | null): void {
     this.#command((base) => {
-      base.searchLyrics(artist, title, album ?? null, durationS ?? null);
+      base.searchLyrics(artist, title, album ?? null, durationS ?? null, providersJson ?? null);
     });
   }
 
@@ -1030,6 +1040,10 @@ export class Engine implements Backend {
 
   recordPlay(path: string, atMs: number): void {
     this.#command((base) => base.recordPlay(path, atMs));
+  }
+
+  setPlayerForTest(p: Partial<Player>): void {
+    playerSig.update((prev) => ({ ...prev, ...p }));
   }
 }
 

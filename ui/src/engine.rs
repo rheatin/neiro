@@ -964,8 +964,14 @@ fn fallback_set_plugin_enabled(id: &str, enabled: bool) -> bool {
     if let Ok(mut set) = fallback_disabled_set().lock() {
         if enabled {
             set.remove(id);
+            if id == "jellyfin" {
+                set.remove("jellyfin_token");
+            }
         } else {
             set.insert(id.to_string());
+            if id == "jellyfin" {
+                set.insert("jellyfin_token".to_string());
+            }
         }
         true
     } else {
@@ -1016,26 +1022,13 @@ fn fallback_list_plugins_json() -> String {
         },
         {
             "id": "jellyfin",
-            "name": "Jellyfin 密码",
+            "name": "Jellyfin 媒体服务器",
             "version": "1.0.0",
             "author": "Char ONE",
-            "description": "通过用户密码认证连接 Jellyfin 远程音乐媒体库",
+            "description": "支持账号密码与 API Token 双模式连接 Jellyfin 远程无损音乐库",
             "tier": "base",
             "category": "source.connector",
             "enabled": is_fallback_enabled("jellyfin"),
-            "builtin": true,
-            "requiresRestart": false,
-            "permissions": ["remote.read", "remote.manage"]
-        },
-        {
-            "id": "jellyfin_token",
-            "name": "Jellyfin Token",
-            "version": "1.0.0",
-            "author": "Char ONE",
-            "description": "通过 API Token 免密安全连接 Jellyfin 远程媒体库",
-            "tier": "base",
-            "category": "source.connector",
-            "enabled": is_fallback_enabled("jellyfin_token"),
             "builtin": true,
             "requiresRestart": false,
             "permissions": ["remote.read", "remote.manage"]
@@ -1128,21 +1121,12 @@ fn fallback_remote_providers_json() -> String {
     if is_fallback_enabled("jellyfin") {
         list.push(serde_json::json!({
             "id": "jellyfin",
-            "name": "Jellyfin 密码",
+            "name": "Jellyfin 媒体服务器",
             "fields": [
                 { "key": "base_url", "label": "服务器地址", "kind": "url", "placeholder": "http://192.168.1.2:8096", "required": true, "secret": false },
-                { "key": "user", "label": "用户名", "kind": "text", "placeholder": "admin", "required": true, "secret": false },
-                { "key": "password", "label": "密码", "kind": "password", "placeholder": "", "required": true, "secret": true }
-            ]
-        }));
-    }
-    if is_fallback_enabled("jellyfin_token") {
-        list.push(serde_json::json!({
-            "id": "jellyfin_token",
-            "name": "Jellyfin Token",
-            "fields": [
-                { "key": "base_url", "label": "服务器地址", "kind": "url", "placeholder": "http://192.168.1.2:8096", "required": true, "secret": false },
-                { "key": "token", "label": "API Key / Token", "kind": "password", "placeholder": "MediaBrowser Token", "required": true, "secret": true }
+                { "key": "user", "label": "用户名", "kind": "text", "placeholder": "admin", "required": false, "secret": false },
+                { "key": "password", "label": "密码", "kind": "password", "placeholder": "", "required": false, "secret": true },
+                { "key": "token", "label": "API Key / Token", "kind": "password", "placeholder": "可选 API Token", "required": false, "secret": true }
             ]
         }));
     }

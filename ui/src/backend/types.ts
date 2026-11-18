@@ -387,6 +387,8 @@ export interface LyricsCandidate {
   durationS: number;
   synced: string | null;
   plain: string | null;
+  provider?: string;
+  providerName?: string;
 }
 
 /** One row of a remote listing. */
@@ -531,7 +533,8 @@ export type PluginCategory =
   | "source.enricher"
   | "playback.dsp"
   | "playback.decoder"
-  | "playback.output";
+  | "playback.output"
+  | "lyrics.provider";
 
 export interface PluginSettingSchema {
   key: string;
@@ -552,6 +555,7 @@ export interface PluginInfo {
   enabled: boolean;
   requiresRestart: boolean;
   breaksBitPerfect?: boolean;
+  locked?: boolean;
   entry?: string;
   slot?: string;
   permissions?: string[];

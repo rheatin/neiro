@@ -87,7 +87,7 @@ export function StudioMinimalShell() {
             accessibilityLabel="插件与壳层管理器"
             class={`items-center justify-center rounded-(--radius) border border-border bg-secondary p-1.5 hover:bg-muted active:opacity-75 ${focusRing}`}
           >
-            <Icon name="settings" size={15} color="muted-foreground" />
+            <Icon name="puzzle" size={15} color="muted-foreground" />
           </Button>
         </View>
       </View>

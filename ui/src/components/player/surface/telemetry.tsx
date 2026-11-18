@@ -110,14 +110,17 @@ function Audit() {
       <If
         when={noStream()}
         else={
-      <If
-        when={!bitPerfect()}
-        else={
-          <Text class="font-mono text-[9px]" style={{ color: "#34D399" }}>
-            ● 全链路未改动：采样与源一致、独占、音量 100%、所有 DSP 与 OPRA 旁通。
-          </Text>
-        }
-      >
+        <If
+          when={!bitPerfect()}
+          else={
+            <View class="flex-row items-center gap-1.5">
+              <View class="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: "#34D399" }} />
+              <Text class="font-mono text-[9px]" style={{ color: "#34D399" }}>
+                全链路未改动：采样与源一致、独占、音量 100%、所有 DSP 与 OPRA 旁通。
+              </Text>
+            </View>
+          }
+        >
         <View class="gap-1">
           <Each of={rows()} key={(code) => code}>
             {(code) => <AuditRow code={code()} />}

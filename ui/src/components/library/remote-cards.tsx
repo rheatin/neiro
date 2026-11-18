@@ -27,10 +27,12 @@ export function RemoteCardsRow(props: {
   /** A page that owns the whole screen lays its cards out as a filling grid;
    * a home-page section keeps them in a row. */
   grid?: boolean;
+  compact?: boolean;
 }) {
   if (props.grid) {
+    const minW = props.compact ? 112 : 160;
     return (
-      <View class="grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))" }}>
+      <View class="grid" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${minW}px, 1fr))` }}>
         <Each of={props.items} key={(item) => item.key}>
           {(item, index) => <RemoteGroupCard variant={props.variant} item={item()} index={index()} fill />}
         </Each>

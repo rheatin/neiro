@@ -34,7 +34,7 @@ export function AlbumPage(props: { album: string; albumArtist: string }) {
     <DetailPage
       title={props.album}
       kind="专辑"
-      coverPath={albumCoverTrack(props.album, props.albumArtist)}
+      coverPath={() => albumCoverTrack(props.album, props.albumArtist)}
       rows={() => tracksOfAlbum(props.album, props.albumArtist)}
     />
   );
@@ -46,13 +46,13 @@ export function ArtistPage(props: { artist: string }) {
     <DetailPage
       title={props.artist}
       kind="歌手"
-      coverPath={artistCoverTrack(props.artist)}
+      coverPath={() => artistCoverTrack(props.artist)}
       rows={() => tracksOfArtist(props.artist)}
     />
   );
 }
 
-function DetailPage(props: { title: string; kind: "专辑" | "歌手"; coverPath: string; rows: () => Track[] }) {
+function DetailPage(props: { title: string; kind: "专辑" | "歌手"; coverPath: () => string; rows: () => Track[] }) {
   // The shared index: it is the page's data, both its table's rows and its
   // header's quality facts.
   effect(() => {
@@ -86,9 +86,9 @@ function DetailPage(props: { title: string; kind: "专辑" | "歌手"; coverPath
                 coverPath={props.coverPath}
                 rows={props.rows}
                 firstTrack={first}
-                count={count()}
-                totalTime={totalTime()}
-                playing={playingHere()}
+                count={count}
+                totalTime={totalTime}
+                playing={playingHere}
               />
               <TrackHeader showAlbum={showAlbum} />
             </View>
@@ -127,12 +127,12 @@ function DetailPage(props: { title: string; kind: "专辑" | "歌手"; coverPath
 function Header(props: {
   kind: string;
   title: string;
-  coverPath: string;
+  coverPath: () => string;
   rows: () => Track[];
   firstTrack: () => Track | undefined;
-  count: number;
-  totalTime: number;
-  playing: boolean;
+  count: () => number;
+  totalTime: () => number;
+  playing: () => boolean;
 }) {
   const coverIn = untracked(() => enter("zoomIn"));
   const kindIn = enter("fadeInUp", 70);
@@ -142,7 +142,7 @@ function Header(props: {
   return (
     <View class="flex-row items-end gap-4 pl-[30px] pr-6 pb-4">
       <View style={coverIn}>
-        <Cover path={props.coverPath} size={96} round={props.kind === "歌手"} class="shadow-xl" />
+        <Cover path={props.coverPath()} size={96} round={props.kind === "歌手"} class="shadow-xl" />
       </View>
       <View class="min-w-0 flex-1 gap-1 self-stretch justify-center">
         <View style={kindIn}>
@@ -155,13 +155,13 @@ function Header(props: {
         </View>
         <View class="gap-1" style={restIn}>
           <Text class="text-xs text-muted-foreground">
-            {props.count} 首{props.totalTime > 0 ? ` · ${clock(props.totalTime)}` : ""}
+            {props.count()} 首{props.totalTime() > 0 ? ` · ${clock(props.totalTime())}` : ""}
           </Text>
         </View>
       </View>
       <View class="shrink-0" style={playIn}>
         <PlayButton
-          playing={props.playing}
+          playing={props.playing()}
           size={44}
           disabled={!props.firstTrack()}
           onPress={() => {

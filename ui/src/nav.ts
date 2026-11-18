@@ -120,14 +120,44 @@ effect(() => {
   });
 });
 
-function same(a: Route | undefined, b: Route): boolean {
+export function same(a: Route | undefined, b: Route): boolean {
   if (!a || a.name !== b.name) return false;
-  if (a.name === "album" && b.name === "album") return a.album === b.album && a.albumArtist === b.albumArtist;
-  if (a.name === "artist" && b.name === "artist") return a.artist === b.artist;
-  if (a.name === "playlist" && b.name === "playlist") return a.id === b.id;
-  if (a.name === "remotePlaylist" && b.name === "remotePlaylist") return a.id === b.id;
-  return true;
+  switch (a.name) {
+    case "home":
+    case "search":
+    case "albums":
+    case "artists":
+    case "tracks":
+    case "liked":
+    case "playlists":
+    case "eq":
+    case "remote":
+    case "settings":
+      return true;
+    case "album":
+      return a.album === (b as typeof a).album && a.albumArtist === (b as typeof a).albumArtist;
+    case "artist":
+      return a.artist === (b as typeof a).artist;
+    case "playlist":
+      return a.id === (b as typeof a).id;
+    case "remotePlaylist":
+      return a.id === (b as typeof a).id;
+    case "remoteAlbum":
+      return (
+        a.serverId === (b as typeof a).serverId &&
+        a.album === (b as typeof a).album &&
+        a.artist === (b as typeof a).artist
+      );
+    case "remoteArtist":
+      return a.serverId === (b as typeof a).serverId && a.artist === (b as typeof a).artist;
+    default: {
+      const _exhaustive: never = a;
+      return _exhaustive;
+    }
+  }
 }
+
+export const isSameRoute = same;
 
 /** The page on top (tracked where it is read). */
 export function currentRoute(): Route {

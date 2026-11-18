@@ -21,6 +21,7 @@ import {
 import { Button } from "nsh/base";
 import { chooseToast, dismissToast, toasts } from "../../state/feedback";
 import { ActionButton, focusRing } from "./controls";
+import { Icon } from "./icons";
 import { REVEAL_IN, REVEAL_OUT } from "./motion";
 
 /** The toasts: bottom right, above the player. */
@@ -59,8 +60,8 @@ function ToastItem(props: { id: string }) {
               </Button>
             )}
           </If>
-          <Button accessibilityLabel="关闭提示" onPress={() => dismissToast(props.id)} class={`shrink-0 rounded-(--radius) px-1 py-1 active:opacity-60 ${focusRing}`}>
-            <Text class="text-xs text-muted-foreground">✕</Text>
+          <Button accessibilityLabel="关闭提示" onPress={() => dismissToast(props.id)} class={`shrink-0 rounded-(--radius) p-1 active:opacity-60 ${focusRing}`}>
+            <Icon name="close" size={12} color="muted-foreground" />
           </Button>
         </View>
       )}
@@ -69,14 +70,21 @@ function ToastItem(props: { id: string }) {
 }
 
 /** A page that couldn't show its content: one plain sentence, and Retry. */
-export function ErrorState(props: { message: string; detail?: string; onRetry: () => void }) {
+export function ErrorState(props: {
+  message: string;
+  detail?: string;
+  onRetry?: () => void;
+  children?: JSX.Element;
+}) {
   return (
     <View role="alert" class="items-center gap-3 px-6 py-16">
       <Text class="text-center text-lg font-bold text-foreground">{props.message}</Text>
       <If when={props.detail}>
         <Text class="max-w-md text-center text-sm text-muted-foreground">{props.detail}</Text>
       </If>
-      <ActionButton label="重试" onPress={props.onRetry} />
+      <If when={props.children} else={props.onRetry ? <ActionButton label="重试" onPress={props.onRetry} /> : null}>
+        {props.children}
+      </If>
     </View>
   );
 }

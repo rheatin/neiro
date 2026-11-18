@@ -100,7 +100,7 @@ export function TrailingControls() {
   return (
     <View class="flex-row items-center gap-1">
       <SearchField />
-      <IconButton name="disc" label="插件与壳层" hint onPress={() => setPluginDialogOpen(true)} />
+      <IconButton name="puzzle" label="插件与壳层" hint onPress={() => setPluginDialogOpen(true)} />
       <IconButton name="settings" label="设置" hint onPress={() => switchTo(SETTINGS)} />
     </View>
   );

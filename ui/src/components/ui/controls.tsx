@@ -4,7 +4,7 @@
 
 import { effect, reduceMotion, signal, untracked, Text, View, type AnimatedValue, type JSX } from "nsh";
 import { Button, Slider, Tooltip } from "nsh/base";
-import { SwapIcon, iconMotion, type IconColor, type IconName } from "./icons";
+import { Icon, SwapIcon, iconMotion, type IconColor, type IconName } from "./icons";
 import { lazyMotion } from "./motion";
 import { DISTANCE, DURATION, DURATION_CLASS, EASE_CLASS, SCALE, SMOOTH_OUT } from "./tokens";
 
@@ -148,8 +148,10 @@ export function PlayButton(props: { playing: boolean; size?: number; disabled?: 
  * area (`bg-foreground`, spotish's rule), `outline` for the others. */
 export function ActionButton(props: {
   label: string;
+  icon?: IconName;
   variant?: "primary" | "outline";
   disabled?: boolean;
+  testID?: string;
   onPress: () => void;
 }) {
   const primary = () => props.variant === "primary";
@@ -164,9 +166,11 @@ export function ActionButton(props: {
   });
   return (
     <Button
+      testID={props.testID}
+      accessibilityLabel={props.label}
       disabled={props.disabled ?? false}
       onPress={props.onPress}
-      class={`group h-9 items-center justify-center overflow-hidden rounded-full px-5 ${PRESS} ${PRESSED} disabled:opacity-40 ${focusRing} ${
+      class={`group h-9 flex-row items-center justify-center gap-1.5 overflow-hidden rounded-full px-4 ${PRESS} ${PRESSED} disabled:opacity-40 ${focusRing} ${
         primary() ? "bg-foreground shadow-sm hover:shadow-md" : "border border-border bg-secondary hover:border-muted-foreground"
       }`}
     >
@@ -177,6 +181,9 @@ export function ActionButton(props: {
           primary() ? "bg-background" : "bg-foreground"
         }`}
       />
+      <If when={props.icon}>
+        <Icon name={props.icon!} size={14} color={primary() ? "background" : "foreground"} />
+      </If>
       <Text class={`text-center text-sm font-bold leading-none ${primary() ? "text-background" : "text-foreground"}`} style={labelMotion.style}>
         {props.label}
       </Text>
