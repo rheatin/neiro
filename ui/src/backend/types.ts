@@ -494,6 +494,11 @@ export interface Backend {
   searchLibrary(query: string, limit: number): void;
   readArtworkList(path: string): void;
   readArtworkBytes(path: string, index: number): void;
+  /** The cover a previous run cached for `path`: a `data:` URI, `"none"`
+   * when that run found no picture, or `""` when there is no entry. */
+  coverCacheGet(path: string): string;
+  /** Remembers a cover answer for `path`: the `data:` URI, or `"none"`. */
+  coverCachePut(path: string, uri: string): void;
 
   // 远程库（v2）
   setRemoteJellyfinPassword(baseUrl: string, user: string, password: string): void;

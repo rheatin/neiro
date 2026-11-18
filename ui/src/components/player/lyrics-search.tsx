@@ -274,14 +274,14 @@ export function LyricsSearchSheet() {
                         }`}
                       >
                         <View class="flex-row w-full items-center justify-between gap-2">
-                          <View class="flex-row items-center gap-1.5 min-w-0 flex-1">
+                          <View class="flex-row items-center gap-1.5 min-w-0 flex-1 overflow-hidden">
                             {/* Provider Badge */}
-                            <View class={`rounded px-1.5 py-0.5 ${meta().badgeClass}`}>
+                            <View class={`shrink-0 rounded px-1.5 py-0.5 ${meta().badgeClass}`}>
                               <Text class="font-mono text-[9px] font-bold">
                                 {meta().label}
                               </Text>
                             </View>
-                            <Text class="truncate text-sm font-bold text-foreground">
+                            <Text class="min-w-0 flex-1 truncate text-sm font-bold text-foreground">
                               {candidate().track || "未命名"}
                             </Text>
                           </View>
@@ -290,7 +290,7 @@ export function LyricsSearchSheet() {
                           </Text>
                         </View>
 
-                        <Text class="truncate text-xs text-muted-foreground">
+                        <Text class="w-full truncate text-xs text-muted-foreground">
                           {[candidate().artist, candidate().album, clockOf(candidate().durationS)]
                             .filter((part) => part !== "")
                             .join(" · ")}
