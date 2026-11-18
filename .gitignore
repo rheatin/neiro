@@ -53,3 +53,4 @@ base/*.wav
 .cache/
 ui/prebuilts/
 /analysis_tone.wav
+Neiro/
