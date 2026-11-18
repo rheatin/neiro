@@ -916,6 +916,32 @@ export class Engine implements Backend {
     }
   }
 
+  /** The cache buckets' size and count, as the Rust host reports them. */
+  cacheStats(): string | null {
+    const base = this.#base;
+    if (!base) return null;
+    try {
+      const json = base.cacheStats();
+      return typeof json === "string" ? json : JSON.stringify(json);
+    } catch (error) {
+      console.warn("neiro: 缓存统计没有读出来:", String(error));
+      return null;
+    }
+  }
+
+  /** Deletes one cache bucket; the answer is the stats after the clean. */
+  clearCache(kind: string): string | null {
+    const base = this.#base;
+    if (!base) return null;
+    try {
+      const json = base.clearCache(kind);
+      return typeof json === "string" ? json : JSON.stringify(json);
+    } catch (error) {
+      console.warn("neiro: 缓存没有清理:", String(error));
+      return null;
+    }
+  }
+
   // ---- 远程库（v2，契约：缓存目录由 Rust 固定，不传参） --------------------------
 
   setRemoteJellyfinPassword(baseUrl: string, user: string, password: string): void {

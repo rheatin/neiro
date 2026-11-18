@@ -5,10 +5,9 @@
 import { cleanup, computed, effect, signal, Storage, untracked } from "nsh";
 import { engine, registerRemoteTrackLookup, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
-import { registerRemotePlayer, playTrack, REMOTE_QUEUE_AHEAD, trackToQueueItem } from "./player";
+import { playQueue, registerRemotePlayer, playTrack } from "./player";
 import { registerRemoteCatalog } from "./catalog";
 import { activeSourceId, registerRemoteActivator, registerRemoteDisconnector, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
-import { shuffle, shuffled } from "./shuffle";
 
 const CONFIG_KEY = "remote:config";
 
@@ -766,26 +765,7 @@ export function playRemote(track: RemoteTrack): void {
 export function queueRemoteFrom(rows: RemoteTrack[], index: number): void {
   const at = Math.min(Math.max(index, 0), Math.max(rows.length - 1, 0));
   if (rows.length === 0) return;
-  const first = rows[at];
-  const other = rows.filter((_, i) => i !== at);
-  const queuedOther = shuffle() ? shuffled(other) : rows.slice(at + 1);
-  const rest = queuedOther.slice(0, REMOTE_QUEUE_AHEAD);
-
-  withRemotePath(first, (firstPath) => {
-    playTrack(asLocalTrack(first, firstPath));
-    const step = (i: number) => {
-      if (i >= rest.length) return;
-      withRemotePath(rest[i], (path) => {
-        try {
-          engine.playLater([trackToQueueItem(asLocalTrack(rest[i], path))]);
-        } catch (e) {
-          console.warn("neiro: 远程排队失败:", String(e));
-        }
-        step(i + 1);
-      });
-    };
-    step(0);
-  });
+  playQueue(rows.map(remoteAsTrack), at);
 }
 
 function unfetchId(id: string): void {
@@ -853,6 +833,16 @@ const fetchedPaths = new Map<string, string>();
  * on disk from an earlier run, and only the engine's own answer is a fact. */
 export function cachedRemotePath(track: RemoteTrack): string | null {
   return fetchedPaths.get(track.id) ?? null;
+}
+
+/** Drops this run's known remote cache paths and pending playback intents:
+ * after a disk clean the old paths are facts no longer. */
+export function forgetFetchedRemotePaths(): void {
+  fetchedPaths.clear();
+  fetchedActions.clear();
+  playIntent = null;
+  playTracks.clear();
+  fetchingIds.set(new Set());
 }
 
 /** Fetches a remote row and runs `then` with the cached path (no play).

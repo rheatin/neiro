@@ -217,6 +217,16 @@ export function remoteCoverOf(id: string, coverArt: string | null): string {
   return cache.get(coverArt) ?? "";
 }
 
+/** Drops this run's remote/local cover answers and pending asks: a disk
+ * clean must not leave deleted images on screen. */
+export function clearArtworkMemory(): void {
+  cache.clear();
+  asked.clear();
+  localQueue.length = 0;
+  remoteQueue.length = 0;
+  untracked(() => version.update((n) => n + 1));
+}
+
 /** Feeds one answer into the cache; the LRU loses its oldest while over
  * capacity. */
 function settle(key: string, uri: string): void {
