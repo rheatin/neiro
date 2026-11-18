@@ -70,14 +70,21 @@ function ToastItem(props: { id: string }) {
 }
 
 /** A page that couldn't show its content: one plain sentence, and Retry. */
-export function ErrorState(props: { message: string; detail?: string; onRetry: () => void }) {
+export function ErrorState(props: {
+  message: string;
+  detail?: string;
+  onRetry?: () => void;
+  children?: JSX.Element;
+}) {
   return (
     <View role="alert" class="items-center gap-3 px-6 py-16">
       <Text class="text-center text-lg font-bold text-foreground">{props.message}</Text>
       <If when={props.detail}>
         <Text class="max-w-md text-center text-sm text-muted-foreground">{props.detail}</Text>
       </If>
-      <ActionButton label="重试" onPress={props.onRetry} />
+      <If when={props.children} else={props.onRetry ? <ActionButton label="重试" onPress={props.onRetry} /> : null}>
+        {props.children}
+      </If>
     </View>
   );
 }

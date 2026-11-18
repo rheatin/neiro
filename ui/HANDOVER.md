@@ -135,11 +135,11 @@ Spotify 流——没有登录/账号/Premium/liked，侧栏底面板展示本地
 
 ## 真机验收记录（2026-11-09 晚）
 
-- 用户的 Jellyfin：`http://192.168.1.30:8096`，用户名**小写 `char`**——Jellyfin 的
+- 用户的 Jellyfin：`<JELLYFIN_SERVER_URL>`，用户名**小写 `char`**——Jellyfin 的
   用户名大小写敏感，`Char` 一律 401（这推翻了最初"密码失效"的猜测，密码
-  `991788` 本身没变）。再遇"没反应"先用 `remote_probe`（凭据走环境变量），
+  本身没变）。再遇"没反应"先用 `remote_probe`（凭据走环境变量），
   十秒定位是凭据还是代码。
-- 本地根是 `\\192.168.1.20\nas\Media\Music`（用户的 NAS，SMB，机器可达），
+- 本地根是 `\\<NAS_HOST>\nas\Media\Music`（用户的 NAS，SMB，机器可达），
   用户点"添加文件夹"时已登记进 Storage（`library:roots`），app 启动即扫。
 - 远程真机验收通过：`remote_probe` 五步全绿（remote_changed / 3 条列出 /
   下载 FLAC / 封面 31624 B 进 `%LOCALAPPDATA%\Neiro\remote`），窗口里远程页

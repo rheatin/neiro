@@ -301,7 +301,24 @@ export function RemotePage() {
               when={remoteLoadingState() === "error" && filteredTracks().length === 0}
               else={<RemoteList rows={filteredTracks()} />}
             >
-              <ErrorState message="远程曲目没有读出来。" onRetry={retryRemote} />
+              <ErrorState
+                message="远程曲目读取失败"
+                detail={
+                  remoteError()
+                    ? `服务器错误: ${remoteError()}`
+                    : "请检查网络连通性或服务器凭据是否有效。"
+                }
+                onRetry={retryRemote}
+              >
+                <View class="flex-row items-center gap-2 pt-2">
+                  <ActionButton label="重新连接" onPress={retryRemote} />
+                  <ActionButton
+                    label="检查配置"
+                    variant="outline"
+                    onPress={() => setServerDialogOpen(true)}
+                  />
+                </View>
+              </ErrorState>
             </If>
           </If>
           <If when={activeTab() === "albums"}>

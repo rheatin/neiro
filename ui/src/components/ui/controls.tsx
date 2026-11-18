@@ -151,6 +151,7 @@ export function ActionButton(props: {
   icon?: IconName;
   variant?: "primary" | "outline";
   disabled?: boolean;
+  testID?: string;
   onPress: () => void;
 }) {
   const primary = () => props.variant === "primary";
@@ -165,6 +166,8 @@ export function ActionButton(props: {
   });
   return (
     <Button
+      testID={props.testID}
+      accessibilityLabel={props.label}
       disabled={props.disabled ?? false}
       onPress={props.onPress}
       class={`group h-9 flex-row items-center justify-center gap-1.5 overflow-hidden rounded-full px-4 ${PRESS} ${PRESSED} disabled:opacity-40 ${focusRing} ${

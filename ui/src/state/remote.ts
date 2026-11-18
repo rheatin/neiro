@@ -86,6 +86,107 @@ export async function saveRemoteConfig(cfg: RemoteConfig): Promise<void> {
   );
 }
 
+/** 探测服务器连通性与凭据有效性（用于 ServerDialog 的测试连接按钮与排障）。 */
+export async function probeRemoteConfig(
+  cfg: RemoteConfig,
+  timeoutMs: number = 8000,
+): Promise<{ ok: boolean; message: string; count: number }> {
+  const url = cfg.baseUrl.replace(/\/+$/, "");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    if (cfg.kind === "jellyfin" || cfg.kind === "jellyfin_token") {
+      // 1. 探测 Jellyfin 公开服务信息
+      const infoRes = await fetch(`${url}/System/Info/Public`, { signal: controller.signal });
+      if (!infoRes.ok) {
+        return { ok: false, message: `服务器返回状态码 ${infoRes.status}`, count: 0 };
+      }
+      const info = (await infoRes.json().catch(() => ({}))) as { ServerName?: string; Version?: string };
+      const serverName = info.ServerName ?? "Jellyfin";
+
+      // 2. Token 模式验证
+      if (cfg.token) {
+        const claim = `MediaBrowser Client="neiro", Device="desktop", DeviceId="neiro-base", Version="0.1", Token="${cfg.token}"`;
+        const testRes = await fetch(`${url}/Items?Limit=1`, {
+          signal: controller.signal,
+          headers: {
+            Authorization: claim,
+            "X-Emby-Authorization": claim,
+            "X-Emby-Token": cfg.token,
+          },
+        });
+        if (!testRes.ok) {
+          return { ok: false, message: `API Token 验证失败 (${testRes.status})`, count: 0 };
+        }
+        return { ok: true, message: `连接成功 (${serverName} ${info.Version ?? ""})`, count: 1 };
+      }
+
+      // 3. 密码模式验证
+      if (cfg.password || cfg.user) {
+        const claim = `MediaBrowser Client="neiro", Device="desktop", DeviceId="neiro-base", Version="0.1"`;
+        const authRes = await fetch(`${url}/Users/AuthenticateByName`, {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            Authorization: claim,
+            "X-Emby-Authorization": claim,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ Username: cfg.user ?? "", Pw: cfg.password ?? "" }),
+        });
+        if (!authRes.ok) {
+          return { ok: false, message: `用户名或密码错误 (${authRes.status})`, count: 0 };
+        }
+        const authData = (await authRes.json().catch(() => ({}))) as { AccessToken?: string };
+        if (!authData.AccessToken) {
+          return { ok: false, message: "认证未返回 AccessToken", count: 0 };
+        }
+        return { ok: true, message: `连接成功 (${serverName}，用户 ${cfg.user})`, count: 1 };
+      }
+
+      return { ok: true, message: `服务器可达 (${serverName})`, count: 1 };
+    }
+
+    if (cfg.kind === "navidrome") {
+      const pingUrl = `${url}/rest/ping.view?u=${encodeURIComponent(cfg.user ?? "")}&p=${encodeURIComponent(
+        cfg.password ?? "",
+      )}&v=1.16.1&c=neiro&f=json`;
+      const res = await fetch(pingUrl, { signal: controller.signal });
+      if (!res.ok) return { ok: false, message: `服务器返回状态码 ${res.status}`, count: 0 };
+      return { ok: true, message: "连接成功 (Navidrome / Subsonic 可达)", count: 1 };
+    }
+
+    if (cfg.kind === "webdav") {
+      const res = await fetch(url, {
+        method: "PROPFIND",
+        signal: controller.signal,
+        headers: {
+          Depth: "0",
+          ...(cfg.user && cfg.password
+            ? { Authorization: `Basic ${btoa(`${cfg.user}:${cfg.password}`)}` }
+            : {}),
+        },
+      });
+      if (res.status >= 200 && res.status < 400) {
+        return { ok: true, message: "连接成功 (WebDAV 可达)", count: 1 };
+      }
+      return { ok: false, message: `WebDAV 返回状态码 ${res.status}`, count: 0 };
+    }
+
+    // 默认兜底探测
+    const res = await fetch(url, { signal: controller.signal });
+    return { ok: res.ok, message: res.ok ? "服务器可达" : `状态码 ${res.status}`, count: res.ok ? 1 : 0 };
+  } catch (err: any) {
+    if (err?.name === "AbortError" || String(err).includes("abort")) {
+      return { ok: false, message: "连接探测超时（8 秒内服务器未响应，请检查 IP 与端口是否可达）", count: 0 };
+    }
+    return { ok: false, message: `网络连接失败: ${String(err)}`, count: 0 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function disconnectRemote(clearCache: boolean = false): Promise<void> {
   config.set(null);
   await Storage.removeItem(CONFIG_KEY).then(undefined, (error) =>
@@ -519,10 +620,8 @@ engine.subscribeEngineError((error) => {
   if (error.op !== "remote") return;
   untracked(() => {
     remoteError.set(error.message);
-    if (remoteFetching()) {
-      remoteFetching.set(false);
-      remoteLoadingState.set("error");
-    }
+    remoteFetching.set(false);
+    remoteLoadingState.set("error");
   });
 });
 
