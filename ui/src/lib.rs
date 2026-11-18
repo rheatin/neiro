@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 /// [`Engine`]: ../src/engine.rs.html
 pub mod engine;
+pub mod lyrics_providers;
 
 use crate::engine::{Engine, RenderPath, Snapshot, WireEvent};
 
@@ -303,6 +304,8 @@ pub struct LyricsCandidate {
     pub duration_s: f64,
     pub synced: Option<String>,
     pub plain: Option<String>,
+    pub provider: String,
+    pub provider_name: String,
 }
 
 /// A playlist on the server.
@@ -416,81 +419,7 @@ impl<T: CallbackArgs + Clone + 'static> Listeners<T> {
     }
 }
 
-/// LRCLIB's search: the provider that needs no key and returns both timed and
-/// untimed words for the same song.
-///
-/// A miss is an empty list. The interface asks this once per press, so a
-/// provider that is down costs a delay and no error state.
-fn fetch_lyrics(
-    artist: String,
-    title: String,
-    album: Option<String>,
-    duration_s: Option<f64>,
-) -> Vec<LyricsCandidate> {
-    let mut url = String::from("https://lrclib.net/api/search?track_name=");
-    url.push_str(&percent(&title));
-    if !artist.trim().is_empty() {
-        url.push_str("&artist_name=");
-        url.push_str(&percent(&artist));
-    }
-    if let Some(album) = album.as_deref().filter(|album| !album.trim().is_empty()) {
-        url.push_str("&album_name=");
-        url.push_str(&percent(album));
-    }
-    let response = ureq::get(&url)
-        .header("User-Agent", "Neiro/0.1 (https://github.com/rheatin/neiro)")
-        .header("Accept", "application/json")
-        .call();
-    let Ok(mut response) = response else {
-        return Vec::new();
-    };
-    let Ok(body) = response.body_mut().read_to_string() else {
-        return Vec::new();
-    };
-    let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else {
-        return Vec::new();
-    };
-    rows.iter()
-        .filter_map(|row| {
-            let text = |key: &str| row.get(key).and_then(|v| v.as_str()).map(str::to_string);
-            let duration = row.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            // The caller's length is a hint the row shows, not a filter: a
-            // live version or a remaster differs by minutes and still carries
-            // the words. `duration_s` stays in the signature for that display.
-            let _ = duration_s;
-            let synced = text("syncedLyrics").filter(|t| !t.trim().is_empty());
-            let plain = text("plainLyrics").filter(|t| !t.trim().is_empty());
-            if synced.is_none() && plain.is_none() {
-                return None;
-            }
-            Some(LyricsCandidate {
-                id: row.get("id").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                track: text("trackName").unwrap_or_default(),
-                artist: text("artistName").unwrap_or_default(),
-                album: text("albumName").unwrap_or_default(),
-                duration_s: duration,
-                synced,
-                plain,
-            })
-        })
-        .take(10)
-        .collect()
-}
 
-/// Percent-encoding for a query value. Only the unreserved set survives: a
-/// Japanese title is UTF-8 bytes, and an unencoded `&` would split the query.
-fn percent(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
 
 /// The state the listeners last heard. Every field has one owner, here.
 #[derive(Default)]
@@ -2189,28 +2118,38 @@ impl Base {
     /// file that is open; a family the container cannot hold is refused by Base
     /// before anything is written, so a wrong guess reports an error rather
     /// than silently doing nothing.
-    /// Ask the online lyrics provider for this track's words.
+    /// Ask the online lyrics providers for this track's words.
     ///
     /// The request runs on a thread of its own and answers through the
-    /// channel `lyrics_pump` drains: it blocks for as long as the provider
-    /// takes, and the interface must keep painting while it does.
+    /// channel `lyrics_pump` drains: it blocks for as long as the providers
+    /// take, and the interface keeps painting while it does.
     pub fn search_lyrics(
         &self,
         artist: String,
         title: String,
         album: Option<String>,
         duration_s: Option<f64>,
+        providers_json: Option<String>,
     ) -> Result<(), String> {
         if title.trim().is_empty() {
             return Err("E_LYRICS: 这首歌没有标题，无法搜索。".into());
         }
+        let enabled_providers: Option<Vec<String>> = providers_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok());
         let sender = LYRICS_RESULTS
             .get_or_init(|| std::sync::Mutex::new(None))
             .lock()
             .ok()
             .and_then(|guard| guard.clone());
         std::thread::spawn(move || {
-            let candidates = fetch_lyrics(artist, title, album, duration_s);
+            let candidates = lyrics_providers::search_all_lyrics(
+                &artist,
+                &title,
+                album.as_deref(),
+                duration_s,
+                enabled_providers.as_deref(),
+            );
             if let Some(sender) = sender {
                 let _ = sender.send(candidates);
             }
@@ -2245,6 +2184,7 @@ impl Base {
         )
     }
 
+    /// Writes lyrics text into the file's tag families.
     pub fn write_lyrics(&self, path: String, text: String) -> Result<(), String> {
         self.command(&serde_json::json!({
             "command": "write_lyrics",
@@ -2259,6 +2199,7 @@ impl Base {
         self.command(&serde_json::json!({ "command": "forget_folder", "root": root }))
     }
 
+    /// Stops watching a folder for changes; answered on `on_scan`.
     pub fn unwatch_folder(&self, root: String) -> Result<(), String> {
         self.command(&serde_json::json!({ "command": "unwatch_folder", "root": root }))
     }
@@ -2291,6 +2232,7 @@ impl Base {
         paths.first().map(|path| path.to_string_lossy().into_owned())
     }
 
+    /// Opens the system folder picker dialog; `null` when cancelled.
     pub async fn pick_folder(this: Instance<Self>) -> Option<String> {
         let _ = &this;
         let picked = pick_paths(

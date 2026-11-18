@@ -363,6 +363,8 @@ function lyricsCandidateOf(n: any): LyricsCandidate {
     durationS: typeof n?.durationS === "number" ? n.durationS : 0,
     synced: typeof n?.synced === "string" ? n.synced : null,
     plain: typeof n?.plain === "string" ? n.plain : null,
+    provider: typeof n?.provider === "string" ? n.provider : undefined,
+    providerName: typeof n?.providerName === "string" ? n.providerName : undefined,
   };
 }
 
@@ -892,9 +894,9 @@ export class Engine implements Backend {
 
   /** Asks the online provider for this track's words; the answer arrives on
    * `subscribeLyricsFound`. */
-  searchLyrics(artist: string, title: string, album: string, durationS: number | null): void {
+  searchLyrics(artist: string, title: string, album: string, durationS: number | null, providersJson?: string | null): void {
     this.#command((base) => {
-      base.searchLyrics(artist, title, album ?? null, durationS ?? null);
+      base.searchLyrics(artist, title, album ?? null, durationS ?? null, providersJson ?? null);
     });
   }
 
