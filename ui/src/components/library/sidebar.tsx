@@ -1,19 +1,20 @@
 // The sidebar: 换页 panel (首页), the library panel (专辑、歌手、全部
-// 曲目) and the 来源 panel (local roots and remote servers). On a narrow
-// window every panel becomes a rail of icons, each with a tooltip — no
-// labels, so nothing is ever cut in half. Every row shares one geometry:
-// 44 high, its glyph in the same 30pt column, so the icons line up.
+// 曲目), the playlists panel, and the 来源 panel (local roots and remote
+// servers). On a narrow window every panel becomes a rail of icons, each
+// with a tooltip — no labels, so nothing is ever cut in half. Every row
+// shares one geometry: 44 high, its glyph in the same 30pt column, so the
+// icons line up.
 
-import { createMotion, effect, reduceMotion, signal, token, untracked, View } from "nsh";
+import { createMotion, effect, reduceMotion, signal, token, untracked, Scroll, View } from "nsh";
 import { Button } from "nsh/base";
 import { Text } from "nsh";
-import { ALBUMS, ARTISTS, LIKED, PLAYLISTS, REMOTE, SETTINGS, TRACKS, currentRoot, switchTo, type Route } from "../../nav";
-import { favourites } from "../../state/user-catalog";
+import { ALBUMS, ARTISTS, LIKED, REMOTE, SETTINGS, TRACKS, currentRoute, currentRoot, switchTo, type Route } from "../../nav";
+import { favourites, playlists } from "../../state/user-catalog";
 import { setNewPlaylistOpen } from "./playlist-dialogs";
 import { removeRoot, roots, scopedRoot, setHomeRoot } from "../../state/catalog";
 import type { Playlist } from "../../backend/types";
 import { activeRemoteServer, isRemoteConfigured, removeServerById } from "../../state/remote";
-import { allSources, LOCAL_ALL_ID, selectSource, servers } from "../../state/sources";
+import { ALL_ID, allSources, selectSource, servers } from "../../state/sources";
 import { isRemoteKindEnabled } from "../../state/plugins";
 import { openSourceDialog } from "../ui/server-dialog";
 import { Hint, focusRing, LAYER } from "../ui/controls";
@@ -66,13 +67,16 @@ function SlidingSelection(props: { index: () => number; top: number }) {
 function NavRow(props: {
   icon: IconName;
   label: string;
-  route: Route;
+  route?: Route;
   compact: boolean;
   /** Runs before the page changes: a row that also means "the whole library"
    * has to clear a scoped source, or the page stays where it was. */
   action?: () => void;
+  trailing?: string;
+  selected?: () => boolean;
+  onPress?: () => void;
 }) {
-  const selected = () => currentRoot().name === props.route.name;
+  const selected = () => props.selected?.() ?? currentRoot().name === props.route?.name;
   const hover = iconMotion();
   return (
     <View onMouseEnter={() => hover.play(props.icon)}>
@@ -80,8 +84,12 @@ function NavRow(props: {
         accessibilityLabel={props.label}
         selected={selected()}
         onPress={() => {
+          if (props.onPress) {
+            props.onPress();
+            return;
+          }
           props.action?.();
-          switchTo(props.route);
+          if (props.route) switchTo(props.route);
         }}
         tooltip={props.compact ? <Hint label={props.label} /> : undefined}
         class={`group h-11 flex-row items-center rounded-(--radius-inset) transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none ${focusRing} ${
@@ -102,6 +110,9 @@ function NavRow(props: {
           >
             {props.label}
           </Text>
+        </If>
+        <If when={!props.compact && props.trailing}>
+          <Text class="shrink-0 pl-1 text-xs tabular-nums text-muted-foreground">{props.trailing}</Text>
         </If>
       </Button>
     </View>
@@ -132,7 +143,6 @@ function LibraryPanel(props: { compact: boolean }) {
       : root === "albums" ? 1
       : root === "artists" ? 2
       : root === "tracks" ? (scopedRoot() === null ? 3 : -1)
-      : root === "playlists" ? 4
       : -1
     );
   };
@@ -158,9 +168,59 @@ function LibraryPanel(props: { compact: boolean }) {
         label="全部曲目"
         route={TRACKS}
         compact={props.compact}
-        action={() => selectSource(LOCAL_ALL_ID)}
+        action={() => selectSource(ALL_ID)}
       />
-      <NavRow icon="queue" label="曲单" route={PLAYLISTS} compact={props.compact} />
+    </View>
+  );
+}
+
+/** The playlists panel: one row per playlist (no separate list page first),
+ * 新建 always available, and an honest empty state. */
+function PlaylistsPanel(props: { compact?: boolean }) {
+  const compact = () => props.compact === true;
+  const list = () => playlists();
+  return (
+    <View class="relative gap-1 rounded-(--radius-panel) border border-border bg-card p-2" accessibilityLabel="曲单" role="navigation">
+      <SlidingSelection
+        index={() => {
+          const route = currentRoute();
+          return list().findIndex((playlist) => route.name === "playlist" && route.id === playlist.id);
+        }}
+        top={8}
+      />
+      <If
+        when={list().length > 0}
+        else={
+          <NavRow
+            icon="queue"
+            label="还没有曲单"
+            onPress={() => setNewPlaylistOpen(true)}
+            compact={compact()}
+          />
+        }
+      >
+        <Each of={list()} key={(playlist: Playlist) => playlist.id}>
+          {(playlist) => (
+            <NavRow
+              icon="queue"
+              label={playlist().name}
+              route={{ name: "playlist", id: playlist().id, playlist: playlist().name }}
+              selected={() => {
+                const route = currentRoute();
+                return route.name === "playlist" && route.id === playlist().id;
+              }}
+              compact={compact()}
+              trailing={String(playlist().trackCount)}
+            />
+          )}
+        </Each>
+      </If>
+      <NavRow
+        icon="plus"
+        label="新建曲单"
+        onPress={() => setNewPlaylistOpen(true)}
+        compact={compact()}
+      />
     </View>
   );
 }
@@ -294,9 +354,12 @@ export function Sidebar(props: { compact?: boolean }) {
       role="navigation"
       onLayout={(e) => narrow.set(e.bounds.size.width < 200)}
     >
-      <NavPanel compact={compact()} />
-      <LibraryPanel compact={compact()} />
-      <SourcesPanel compact={compact()} />
+      <Scroll class="min-h-0 flex-1" contentClass="gap-2">
+        <NavPanel compact={compact()} />
+        <LibraryPanel compact={compact()} />
+        <PlaylistsPanel compact={compact()} />
+        <SourcesPanel compact={compact()} />
+      </Scroll>
     </View>
   );
 }

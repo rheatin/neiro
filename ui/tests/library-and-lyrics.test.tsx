@@ -1,7 +1,7 @@
 import { expect, test } from "nsh/test";
 import { EMPTY_PLAYER, type Album, type Artist, type Track } from "../src/backend/types";
 import {
-  albumDensity,
+  albumViewMode,
   albumSortField,
   artistSortField,
   artistViewMode,
@@ -143,7 +143,7 @@ test("曲目表头循环切换排序状态 (asc -> desc -> default)", () => {
   expect(trackSortOrder()).toBe("asc");
 });
 
-test("专辑排序、过滤与密度模式验证", () => {
+test("专辑排序、过滤与网格/列表双视图模式验证", () => {
   // Sort by album name
   const byAlbumAsc = sortAndFilterAlbums(SAMPLE_ALBUMS, { sortField: "album", sortOrder: "asc" });
   expect(byAlbumAsc[0].album).toBe("A Album");
@@ -154,12 +154,12 @@ test("专辑排序、过滤与密度模式验证", () => {
   expect(byCountDesc[0].trackCount).toBe(12);
   expect(byCountDesc[2].trackCount).toBe(5);
 
-  // Density preference
-  albumDensity.set("standard");
-  expect(albumDensity()).toBe("standard");
-  albumDensity.set("compact");
-  expect(albumDensity()).toBe("compact");
-  albumDensity.set("standard");
+  // View mode preference
+  albumViewMode.set("grid");
+  expect(albumViewMode()).toBe("grid");
+  albumViewMode.set("list");
+  expect(albumViewMode()).toBe("list");
+  albumViewMode.set("grid");
 });
 
 test("歌手排序、过滤与网格/列表双视图模式验证", () => {

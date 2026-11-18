@@ -31,7 +31,7 @@ test("窄侧栏：来源只剩图标，动作仍可达", async () => {
   // With no source added, the rail's 来源 panel is the 加号 alone.
   await app.waitFor("id:rail-source-add");
   const texts = app.texts();
-  expect(texts.includes("本地")).toBe(false);
+  expect(texts.includes("全部本地")).toBe(false);
   expect(texts.some((t) => t.includes("还没有文件夹"))).toBe(false);
   expect(texts.includes("远程")).toBe(false);
   expect(app.shows("id:source-server")).toBe(false);

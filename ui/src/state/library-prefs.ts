@@ -37,11 +37,11 @@ export function cycleTrackSort(field: TrackSortField): void {
 // ---- 专辑偏好 ---------------------------------------------------------------
 
 export type AlbumSortField = "default" | "album" | "artist" | "year" | "trackCount";
-export type AlbumDensity = "standard" | "compact";
+export type AlbumViewMode = "grid" | "list";
 
 export const albumSortField = signal<AlbumSortField>("default");
 export const albumSortOrder = signal<SortOrder>("asc");
-export const albumDensity = signal<AlbumDensity>("standard");
+export const albumViewMode = signal<AlbumViewMode>("grid");
 export const albumFilterQuery = signal<string>("");
 
 export function cycleAlbumSort(field: AlbumSortField): void {
@@ -87,7 +87,8 @@ interface StoredPrefs {
   trackFilterPill?: TrackFilterPill;
   albumSortField?: AlbumSortField;
   albumSortOrder?: SortOrder;
-  albumDensity?: AlbumDensity;
+  albumDensity?: "standard" | "compact";
+  albumViewMode?: AlbumViewMode;
   artistSortField?: ArtistSortField;
   artistSortOrder?: SortOrder;
   artistViewMode?: ArtistViewMode;
@@ -107,7 +108,9 @@ effect(() => {
       if (data.trackFilterPill) trackFilterPill.set(data.trackFilterPill);
       if (data.albumSortField) albumSortField.set(data.albumSortField);
       if (data.albumSortOrder) albumSortOrder.set(data.albumSortOrder);
-      if (data.albumDensity) albumDensity.set(data.albumDensity);
+      // 旧 `albumDensity` 两种都曾是网格；列表是这次新增的另一种视图。
+      if (data.albumViewMode) albumViewMode.set(data.albumViewMode);
+      else if (data.albumDensity) albumViewMode.set("grid");
       if (data.artistSortField) artistSortField.set(data.artistSortField);
       if (data.artistSortOrder) artistSortOrder.set(data.artistSortOrder);
       if (data.artistViewMode) artistViewMode.set(data.artistViewMode);
@@ -122,7 +125,7 @@ function savePrefs(): void {
     trackFilterPill: trackFilterPill(),
     albumSortField: albumSortField(),
     albumSortOrder: albumSortOrder(),
-    albumDensity: albumDensity(),
+    albumViewMode: albumViewMode(),
     artistSortField: artistSortField(),
     artistSortOrder: artistSortOrder(),
     artistViewMode: artistViewMode(),
@@ -136,7 +139,7 @@ effect(() => {
   trackFilterPill();
   albumSortField();
   albumSortOrder();
-  albumDensity();
+  albumViewMode();
   artistSortField();
   artistSortOrder();
   artistViewMode();
