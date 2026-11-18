@@ -5,6 +5,7 @@
 import { Scroll, signal, Text, View } from "nsh";
 import { Button, Menu, MenuItem, MenuSeparator } from "nsh/base";
 import { lightEffect, lightName, lightRandom, setLight } from "../../state/visual";
+import { isVisualizerPluginEnabled } from "../../state/plugins";
 import { focusRing, Hint, LAYER, menuItem, popupSurface } from "../ui/controls";
 import { EFFECT_NAMES, TOOLBAR_EFFECTS } from "../ui/toolbar-fx";
 import { Icon, iconMotion } from "../ui/icons";
@@ -14,11 +15,26 @@ const ROW = 32;
 const VIEW = 288;
 
 export function LightMenu(props?: { placement?: "top" | "bottom"; size?: number }) {
+  const enabled = () => isVisualizerPluginEnabled();
   const open = signal(false);
   const hover = iconMotion();
   const placement = () => props?.placement ?? "bottom";
   const size = () => props?.size ?? 18;
   const label = () => `Light: ${lightName()}`;
+
+  if (!enabled()) {
+    return (
+      <Button
+        accessibilityLabel="频谱可视化插件已停用"
+        disabled
+        tooltip={<Hint label="频谱可视化插件已停用" />}
+        class="cursor-not-allowed items-center justify-center rounded-full opacity-40"
+        style={{ width: size() + 16, height: size() + 16 }}
+      >
+        <Icon name="sparkles" size={size()} color="muted-foreground" />
+      </Button>
+    );
+  }
   // The effects' list: rows of ROW points in a window of VIEW. Where it
   // starts, so the effect in use is in the middle of it.
   const openAt = () => {

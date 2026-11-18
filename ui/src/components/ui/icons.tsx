@@ -16,7 +16,9 @@ export type IconName =
   | "play" | "pause" | "skipBack" | "skipForward"
   | "heart" | "heartFilled" | "plus" | "sparkles" | "server" | "shuffle"
   | "repeat" | "repeatOnce"
-  | "dots" | "queue" | "settings";
+  | "dots" | "queue" | "settings"
+  | "layout" | "wave" | "cloud" | "fileText" | "cpu" | "sliders"
+  | "grid" | "list" | "sortAsc" | "sortDesc" | "layers";
 
 // Tabler Icons, outline (1pt in the source files; drawn here at 1.5) and
 // filled for the transport. Each string is the inside of a 24×24 SVG.
@@ -60,6 +62,17 @@ const BODY: Record<IconName, string> = {
   plus: '<path d="M12 5l0 14" /><path d="M5 12l14 0" />',
   // Tabler sparkles（light 菜单的 ✦）。
   sparkles: '<path d="M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 6 6z" />',
+  layout: '<rect x="4" y="4" width="16" height="16" rx="2" /><line x1="4" y1="10" x2="20" y2="10" /><line x1="10" y1="10" x2="10" y2="20" />',
+  wave: '<path d="M4 12h2l2 -6l3 12l3 -8l2 5l2 -3h2" />',
+  cloud: '<path d="M6.657 18c-2.572 0 -4.657 -2.007 -4.657 -4.483c0 -2.31 1.78 -4.212 4.062 -4.444c.485 -2.872 3.125 -5.073 6.281 -5.073c3.481 0 6.326 2.67 6.617 6.07c2.253 .248 4.04 2.155 4.04 4.45c0 2.476 -2.085 4.48 -4.657 4.48h-11.686z" />',
+  fileText: '<path d="M14 3v4a1 1 0 0 0 1 1h4" /><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z" /><line x1="9" y1="9" x2="10" y2="9" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="15" y2="17" />',
+  cpu: '<rect x="4" y="4" width="16" height="16" rx="1" /><path d="M9 9h6v6h-6z" /><path d="M3 10h1" /><path d="M3 14h1" /><path d="M10 3v1" /><path d="M14 3v1" /><path d="M20 10h1" /><path d="M20 14h1" /><path d="M10 20v1" /><path d="M14 20v1" />',
+  sliders: '<line x1="4" y1="10" x2="4" y2="20" /><line x1="4" y1="4" x2="4" y2="7" /><circle cx="4" cy="8" r="2" /><line x1="12" y1="17" x2="12" y2="20" /><line x1="12" y1="4" x2="12" y2="14" /><circle cx="12" cy="16" r="2" /><line x1="20" y1="13" x2="20" y2="20" /><line x1="20" y1="4" x2="20" y2="10" /><circle cx="20" cy="12" r="2" />',
+  grid: '<rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" />',
+  list: '<line x1="9" y1="6" x2="20" y2="6" /><line x1="9" y1="12" x2="20" y2="12" /><line x1="9" y1="18" x2="20" y2="18" /><line x1="5" y1="6" x2="5" y2="6.01" /><line x1="5" y1="12" x2="5" y2="12.01" /><line x1="5" y1="18" x2="5" y2="18.01" />',
+  sortAsc: '<path d="M4 6l7 0" /><path d="M4 12l7 0" /><path d="M4 18l9 0" /><path d="M15 9l3 -3l3 3" /><path d="M18 6l0 12" />',
+  sortDesc: '<path d="M4 6l9 0" /><path d="M4 12l7 0" /><path d="M4 18l7 0" /><path d="M15 15l3 3l3 -3" /><path d="M18 6l0 12" />',
+  layers: '<polygon points="12 2 2 7 12 12 22 7 12 2" /><polyline points="2 17 12 22 22 17" /><polyline points="2 12 12 17 22 12" />',
 };
 
 /** The glyphs that draw themselves filled (the transport), the rest stroked. */

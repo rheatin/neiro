@@ -8,6 +8,7 @@
 
 import { type AnimatedValue, type JSX, reduceMotion, Shader, token, View } from "nsh";
 import { BASS, BEAT, BAND0, CLOCK, LEVEL, MID, ONSET, PHASE, SINCE, TREBLE, live } from "../../state/visualiser";
+import { isVisualizerPluginEnabled } from "../../state/plugins";
 
 // ---- HEAD：uniforms 结构 + band/spectrum/vivid/tame/cycle/ends + pill ----
 
@@ -694,7 +695,7 @@ const CLOCK_SLOT = CLOCK;
  * theme tokens 读；音乐的数值是 visualiser 里的 animated values（帧驱
  * 动）。reduced motion 或非 playing：全部静止 0。 */
 function lightUniforms(props: { effect: ToolbarEffect; playing: boolean }) {
-  const on = () => props.playing && !reduceMotion();
+  const on = () => props.playing && !reduceMotion() && isVisualizerPluginEnabled();
   const v = live.values;
   const bands = (from: number) => [v[BAND0 + from], v[BAND0 + from + 1], v[BAND0 + from + 2], v[BAND0 + from + 3]];
   const palette = () => {
@@ -748,14 +749,16 @@ export function PlayerGlass(props: {
         class="absolute inset-0 border border-border"
         style={{ backgroundColor: String(token("player")), borderRadius: radius() }}
       />
-      <Shader
-        source={LIGHTS[props.effect]}
-        accessibilityElementsHidden
-        paused={!light.on()}
-        class="absolute overflow-hidden inset-0"
-        style={{ borderRadius: radius() }}
-        uniforms={light.uniforms({ strength: 0.6, radius: radius(), reach: 40 })}
-      />
+      <If when={isVisualizerPluginEnabled()}>
+        <Shader
+          source={LIGHTS[props.effect]}
+          accessibilityElementsHidden
+          paused={!light.on()}
+          class="absolute overflow-hidden inset-0"
+          style={{ borderRadius: radius() }}
+          uniforms={light.uniforms({ strength: 0.6, radius: radius(), reach: 40 })}
+        />
+      </If>
       {props.children}
     </View>
   );
@@ -768,13 +771,15 @@ export function MusicLight(props: { effect: ToolbarEffect; playing: boolean; rea
   const light = lightUniforms(props);
   const reach = () => props.reach * REACH[props.effect];
   return (
-    <Shader
-      source={LIGHTS[props.effect]}
-      accessibilityElementsHidden
-      paused={!light.on()}
-      class={`absolute inset-x-0 bottom-0 ${props.class ?? ""}`}
-      style={{ height: Math.ceil(reach() + 24) }}
-      uniforms={light.uniforms({ strength: 0.7, radius: 0, reach: reach() })}
-    />
+    <If when={isVisualizerPluginEnabled()}>
+      <Shader
+        source={LIGHTS[props.effect]}
+        accessibilityElementsHidden
+        paused={!light.on()}
+        class={`absolute inset-x-0 bottom-0 ${props.class ?? ""}`}
+        style={{ height: Math.ceil(reach() + 24) }}
+        uniforms={light.uniforms({ strength: 0.7, radius: 0, reach: reach() })}
+      />
+    </If>
   );
 }

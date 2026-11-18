@@ -12,7 +12,7 @@ import {
 import { selectSource, servers, upsertServer, type RemoteServer } from "../../state/sources";
 import { isRemoteConfigured } from "../../state/remote";
 import { setServerDialogOpen, serverDialogOpen } from "../../state/overlays";
-import { refreshPlugins, remoteProviders } from "../../state/plugins";
+import { isRemoteKindEnabled, refreshPlugins, remoteProviders } from "../../state/plugins";
 import { reportEngineFailure } from "../../backend/engine";
 import { ActionButton, TextLink, focusRing } from "./controls";
 import { AppDialog } from "./overlays";
@@ -20,7 +20,9 @@ import { Icon } from "./icons";
 import { addRoot } from "../../state/catalog";
 
 function remoteProvidersList(): ProviderDescriptor[] {
-  return remoteProviders();
+  return remoteProviders().filter(
+    (p) => p.id !== "jellyfin_token" && isRemoteKindEnabled(p.id)
+  );
 }
 
 function hostOf(baseUrl: string): string {
@@ -141,7 +143,15 @@ function ServerList(props: { onNew: () => void; onEdit: (server: RemoteServer) =
 function ServerForm(props: { server: RemoteServer | null; onDone: () => void; onCancel: () => void }) {
   const existing = props.server;
   const providers = () => remoteProvidersList();
-  const selectedKind = signal<string>(existing?.kind ?? providers()[0]?.id ?? "jellyfin");
+  const initialKind = () => {
+    if (!existing) return providers()[0]?.id ?? "jellyfin";
+    if (existing.kind === "jellyfin_token") return "jellyfin";
+    return existing.kind;
+  };
+  const selectedKind = signal<string>(initialKind());
+  const jellyfinAuthMode = signal<"password" | "token">(
+    (existing?.token || existing?.kind === "jellyfin_token") ? "token" : "password"
+  );
   const values = signal<Record<string, string>>({
     base_url: existing?.baseUrl ?? "",
     user: existing?.user ?? "",
@@ -168,10 +178,15 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
     const userName = (vals.user ?? "").trim();
 
     busy.set(true);
+    let targetKind = selectedKind();
+    if (targetKind === "jellyfin" && jellyfinAuthMode() === "token") {
+      targetKind = "jellyfin_token";
+    }
+
     const server: RemoteServer = {
       id: existing?.id ?? `srv-${Date.now().toString(36)}`,
       label: serverLabel,
-      kind: selectedKind(),
+      kind: targetKind,
       baseUrl: url,
       user: userName,
       ...(vals.token ? { token: vals.token.trim() } : {}),
@@ -263,21 +278,103 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
           />
         </Field>
 
-        <Each of={currentDescriptor()?.fields ?? []}>
-          {(field) => (
-            <Field label={field().label} hint={field().required ? "必填" : "选填"}>
+        <If
+          when={selectedKind() === "jellyfin"}
+          else={
+            <Each of={currentDescriptor()?.fields ?? []}>
+              {(field) => (
+                <Field label={field().label} hint={field().required ? "必填" : "选填"}>
+                  <Input
+                    value={values()[field().key] ?? ""}
+                    onChange={({ value }) => updateValue(field().key, value)}
+                    placeholder={field().placeholder}
+                    masked={field().kind === "password"}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    class="flex-1 text-sm text-foreground"
+                  />
+                </Field>
+              )}
+            </Each>
+          }
+        >
+          <View class="gap-1.5">
+            <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">认证模式</Text>
+            <View class="flex-row rounded-(--radius) border border-border bg-secondary p-0.5">
+              <Button
+                selected={jellyfinAuthMode() === "password"}
+                onPress={() => jellyfinAuthMode.set("password")}
+                class={`flex-1 rounded-(--radius) py-1.5 transition ${
+                  jellyfinAuthMode() === "password"
+                    ? "bg-background text-foreground font-bold shadow-xs"
+                    : "text-muted-foreground hover:text-foreground"
+                } ${focusRing}`}
+              >
+                <Text class="text-center text-xs">账号密码</Text>
+              </Button>
+              <Button
+                selected={jellyfinAuthMode() === "token"}
+                onPress={() => jellyfinAuthMode.set("token")}
+                class={`flex-1 rounded-(--radius) py-1.5 transition ${
+                  jellyfinAuthMode() === "token"
+                    ? "bg-background text-foreground font-bold shadow-xs"
+                    : "text-muted-foreground hover:text-foreground"
+                } ${focusRing}`}
+              >
+                <Text class="text-center text-xs">API Token</Text>
+              </Button>
+            </View>
+          </View>
+
+          <Field label="服务器地址" hint="必填">
+            <Input
+              value={values().base_url ?? ""}
+              onChange={({ value }) => updateValue("base_url", value)}
+              placeholder="http://192.168.1.2:8096"
+              autoCapitalize="none"
+              autoCorrect={false}
+              class="flex-1 text-sm text-foreground"
+            />
+          </Field>
+
+          <If when={jellyfinAuthMode() === "password"}>
+            <Field label="用户名" hint="选填">
               <Input
-                value={values()[field().key] ?? ""}
-                onChange={({ value }) => updateValue(field().key, value)}
-                placeholder={field().placeholder}
-                masked={field().kind === "password"}
+                value={values().user ?? ""}
+                onChange={({ value }) => updateValue("user", value)}
+                placeholder="admin"
                 autoCapitalize="none"
                 autoCorrect={false}
                 class="flex-1 text-sm text-foreground"
               />
             </Field>
-          )}
-        </Each>
+            <Field label="密码" hint="选填">
+              <Input
+                value={values().password ?? ""}
+                onChange={({ value }) => updateValue("password", value)}
+                masked
+                placeholder=""
+                autoCapitalize="none"
+                autoCorrect={false}
+                class="flex-1 text-sm text-foreground"
+              />
+            </Field>
+          </If>
+
+          <If when={jellyfinAuthMode() === "token"}>
+            <Field label="API Key / Token" hint="必填">
+              <Input
+                value={values().token ?? ""}
+                onChange={({ value }) => updateValue("token", value)}
+                masked
+                placeholder="MediaBrowser Token"
+                autoCapitalize="none"
+                autoCorrect={false}
+                class="flex-1 text-sm text-foreground"
+              />
+            </Field>
+          </If>
+        </If>
 
         <View class="flex-row items-center justify-between pt-2">
           <TextLink label="取消" small onPress={props.onCancel} />

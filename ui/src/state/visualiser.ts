@@ -14,12 +14,13 @@ import { engine } from "../backend/engine";
 import { engineHealth } from "../state/engine";
 import { nowPlayingOpen, outputOpen } from "./overlays";
 import { isPlaying } from "./player";
-import { isStudioMinimalShell } from "./plugins";
+import { isStudioMinimalShell, isVisualizerPluginEnabled } from "./plugins";
 import { lightEffect } from "./visual";
 
 /** Whether a surface that draws the frames is actually visible and consuming them.
  * Saves 60Hz cross-language IPC & CPU when playing in the background with no visualizer active. */
 export const visualiserWanted = computed(() => {
+  if (!isVisualizerPluginEnabled()) return false;
   if (!isPlaying()) return false;
   if (nowPlayingOpen()) return true;
   if (outputOpen()) return true;

@@ -7,7 +7,7 @@ import { engine, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
 import { registerRemotePlayer, playTrack, QUEUE_AHEAD, trackToQueueItem } from "./player";
 import { registerRemoteCatalog } from "./catalog";
-import { activeSourceId, registerRemoteActivator, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
+import { activeSourceId, registerRemoteActivator, registerRemoteDisconnector, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
 import { shuffle, shuffled } from "./shuffle";
 
 const CONFIG_KEY = "remote:config";
@@ -274,6 +274,10 @@ export async function activateServer(serverId: string): Promise<void> {
 // sources.ts 的来源切换在这里落地（注册避免模块循环）；激活的失败不悬空。
 registerRemoteActivator((serverId) => {
   activateServer(serverId).catch((error) => console.warn("neiro: 服务器没有连上:", String(error)));
+});
+
+registerRemoteDisconnector(() => {
+  void disconnectRemote();
 });
 
 /** 从花名册删掉一台服务器；删的是当前连着的 → 断开并回到本地来源。 */

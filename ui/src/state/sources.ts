@@ -9,6 +9,8 @@
 import { computed, effect, signal, Storage } from "nsh";
 import type { RemoteKind } from "../backend/types";
 import { addRoot, roots, rootsLoaded, scopedRoot, setHomeRoot } from "./catalog";
+import { isRemoteKindEnabled } from "./plugins";
+import { notify } from "./feedback";
 
 export type SourceKind = "local" | "remote";
 
@@ -62,14 +64,30 @@ export const localSources = computed<Source[]>(() => {
   return list;
 });
 
-/** 远程来源：每个已配置服务器。 */
-export const remoteSources = computed<Source[]>(() => servers().map(serverSource));
+/** 远程来源：每个已配置服务器（仅展示已启用插件的协议）。 */
+export const remoteSources = computed<Source[]>(() =>
+  servers().filter((s) => isRemoteKindEnabled(s.kind)).map(serverSource)
+);
 
 /** 全部来源（本地在前）。 */
 export const allSources = (): Source[] => [...localSources(), ...remoteSources()];
 
 /** 当前激活来源（tracked；未持久化前 = 全部本地）。 */
 export const activeSourceId = signal<string>(LOCAL_ALL_ID);
+
+/** 协议被禁用时若当前正激活该协议来源，自动断开并退回全部本地 */
+effect(() => {
+  const currentId = activeSourceId();
+  if (currentId.startsWith("remote:")) {
+    const sId = currentId.slice("remote:".length);
+    const s = servers().find((srv) => srv.id === sId);
+    if (s && !isRemoteKindEnabled(s.kind)) {
+      selectSource(LOCAL_ALL_ID);
+      remoteDisconnector?.();
+      notify("远程插件已停用，已断开连接");
+    }
+  }
+});
 
 export const activeSource = (): Source => {
   const id = activeSourceId();
@@ -98,6 +116,11 @@ export async function removeServer(id: string): Promise<void> {
 let remoteActivator: ((serverId: string) => void) | null = null;
 export function registerRemoteActivator(fn: (serverId: string) => void): void {
   remoteActivator = fn;
+}
+
+let remoteDisconnector: (() => void) | null = null;
+export function registerRemoteDisconnector(fn: () => void): void {
+  remoteDisconnector = fn;
 }
 
 /** 切换来源并持久化；远程来源触发连接 + 重拉（remote.ts）。 */

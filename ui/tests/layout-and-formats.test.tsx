@@ -39,7 +39,7 @@ test("窄侧栏：来源只剩图标，动作仍可达", async () => {
   await app.press("id:rail-source-add");
   // The 加号 opens the kind dialog: jellyfin, navidrome, and a local folder.
   await app.waitFor("text:本地路径", { timeout: 5_000 });
-  expect(app.shows("text:Jellyfin 密码")).toBe(true);
+  expect(app.shows("text:Jellyfin 媒体服务器")).toBe(true);
 }, 60_000);
 
 test("宽侧栏：来源文字仍在", async () => {
