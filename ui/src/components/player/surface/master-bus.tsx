@@ -223,9 +223,10 @@ export function MasterBus() {
             : `NON-BIT-PERFECT ROOT CAUSES (${causes().length}):`}
         </Text>
         <If when={bitPerfect()}>
-          <View class="rounded px-2 py-1" style={{ backgroundColor: "rgba(16,185,129,0.10)", borderWidth: 1, borderColor: "rgba(16,185,129,0.45)" }}>
+          <View class="flex-row items-center gap-1.5 rounded px-2 py-1" style={{ backgroundColor: "rgba(16,185,129,0.10)", borderWidth: 1, borderColor: "rgba(16,185,129,0.45)" }}>
+            <View class="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: "#34D399" }} />
             <Text class="font-mono text-[9px] font-bold" style={{ color: "#34D399" }}>
-              ● 整条通路未改动：采样与源一致、独占、音量 100%、所有 DSP 与 OPRA 旁通
+              整条通路未改动：采样与源一致、独占、音量 100%、所有 DSP 与 OPRA 旁通
             </Text>
           </View>
         </If>

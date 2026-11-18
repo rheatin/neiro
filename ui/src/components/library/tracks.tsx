@@ -230,20 +230,76 @@ import { focusRing, LAYER, popupSurface } from "../ui/controls";
 import { listItemEntrance, type ListWave, WAVE } from "../ui/motion";
 import { PlayingBars } from "../ui/playing";
 import { Popover } from "nsh/base";
+import { cycleTrackSort, trackSortField, trackSortOrder, type TrackSortField } from "../../state/library-prefs";
 
-/** The header row above a track list. */
-export function TrackHeader(props: { showAlbum: boolean }) {
+/** The header row above a track list, with clickable interactive sort headers. */
+export function TrackHeader(props: { showAlbum: boolean; interactive?: boolean }) {
+  const isInteractive = () => props.interactive ?? true;
+  const currentField = () => trackSortField();
+  const currentOrder = () => trackSortOrder();
+
+  const renderIndicator = (field: TrackSortField) => {
+    if (currentField() !== field) return null;
+    return (
+      <Icon
+        name={currentOrder() === "asc" ? "sortAsc" : "sortDesc"}
+        size={11}
+        color="primary"
+      />
+    );
+  };
+
   return (
     <View class="mx-6 mb-1 h-8 flex-row items-center gap-3 border-b border-border/60 px-3">
       {/* The number column has no heading; 标题 starts where the covers do. */}
       <View class="w-6" />
-      <Text class="flex-1 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">标题</Text>
+      <Button
+        disabled={!isInteractive()}
+        onPress={() => cycleTrackSort("title")}
+        accessibilityLabel="按标题排序"
+        class={`flex-1 flex-row items-center gap-1 ${focusRing} text-left`}
+      >
+        <Text
+          class={`text-[11px] font-bold uppercase tracking-wider ${
+            currentField() === "title" ? "text-primary font-extrabold" : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          标题
+        </Text>
+        {renderIndicator("title")}
+      </Button>
+
       <If when={props.showAlbum}>
-        <Text class="flex-1 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">专辑</Text>
+        <Button
+          disabled={!isInteractive()}
+          onPress={() => cycleTrackSort("album")}
+          accessibilityLabel="按专辑排序"
+          class={`flex-1 flex-row items-center gap-1 ${focusRing} text-left`}
+        >
+          <Text
+            class={`text-[11px] font-bold uppercase tracking-wider ${
+              currentField() === "album" ? "text-primary font-extrabold" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            专辑
+          </Text>
+          {renderIndicator("album")}
+        </Button>
       </If>
-      <View class="w-12 items-end">
-        <Icon name="clock" size={14} color="muted-foreground" />
-      </View>
+
+      <Button
+        disabled={!isInteractive()}
+        onPress={() => cycleTrackSort("duration")}
+        accessibilityLabel="按时长排序"
+        class={`w-12 flex-row items-center justify-end gap-0.5 ${focusRing}`}
+      >
+        <Icon
+          name="clock"
+          size={14}
+          color={currentField() === "duration" ? "primary" : "muted-foreground"}
+        />
+        {renderIndicator("duration")}
+      </Button>
     </View>
   );
 }

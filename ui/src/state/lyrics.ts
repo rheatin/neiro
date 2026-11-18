@@ -206,10 +206,41 @@ export function lyricsQueryForCurrent(): LyricsQuery {
   };
 }
 
+import { isPluginEnabled } from "./plugins";
+
+export const LYRICS_PROVIDER_IDS = [
+  "builtin.lyrics.lrclib",
+  "builtin.lyrics.netease",
+  "builtin.lyrics.qqmusic",
+  "builtin.lyrics.kugou",
+];
+
+export function enabledLyricsProviders(): { id: string; name: string }[] {
+  const all = [
+    { id: "builtin.lyrics.lrclib", name: "LRCLIB" },
+    { id: "builtin.lyrics.netease", name: "网易云音乐" },
+    { id: "builtin.lyrics.qqmusic", name: "QQ 音乐" },
+    { id: "builtin.lyrics.kugou", name: "酷狗音乐" },
+  ];
+  return all.filter((p) => isPluginEnabled(p.id));
+}
+
+export function enabledLyricsCount(): number {
+  return enabledLyricsProviders().length;
+}
+
 /** Asks the provider for the current track's words. */
 export function startLyricsSearch(query?: LyricsQuery): void {
   const path = player().path ?? "";
   if (path === "") return;
+
+  const enabled = enabledLyricsProviders();
+  if (enabled.length === 0) {
+    lyricsSearch.set({ status: "done", candidates: [] });
+    return;
+  }
+  const providersJson = JSON.stringify(enabled.map((p) => p.id));
+
   if (searchStop === null) {
     searchStop = engine.subscribeLyricsFound((candidates) => {
       // A provider indexes 「奇洛李维斯回信」 under a name this file does not
@@ -218,7 +249,7 @@ export function startLyricsSearch(query?: LyricsQuery): void {
       const asked = askedFor;
       if (candidates.length === 0 && !fallbackTried && asked && (asked.artist !== "" || asked.album !== "")) {
         fallbackTried = true;
-        engine.searchLyrics("", asked.title, "", null);
+        engine.searchLyrics("", asked.title, "", null, providersJson);
         return;
       }
       lyricsSearch.set({ status: "done", candidates });
@@ -229,7 +260,7 @@ export function startLyricsSearch(query?: LyricsQuery): void {
   askedFor = asked;
   fallbackTried = false;
   try {
-    engine.searchLyrics(asked.artist, asked.title, asked.album, asked.durationS);
+    engine.searchLyrics(asked.artist, asked.title, asked.album, asked.durationS, providersJson);
   } catch (error) {
     console.warn("neiro: 歌词搜索没有发出去:", String(error));
     lyricsSearch.set({ status: "done", candidates: [] });

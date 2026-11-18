@@ -219,6 +219,20 @@ export const tracksState = signal<TracksListState>("idle");
 /** Whether the index is whole (the cover-per-album maps exist). */
 export const tracksComplete = (): boolean => tracksState() === "complete";
 
+/** 只给测试注入曲目数据（无头测试模拟曲库） */
+export function setTracksForTest(tracks: Track[], testRoots?: string[]): void {
+  if (testRoots) {
+    roots.set(testRoots);
+    rootsLoaded.set(true);
+  } else if (roots().length === 0) {
+    roots.set(["/music"]);
+    rootsLoaded.set(true);
+  }
+  allTracks.set(tracks);
+  tracksTotal.set(tracks.length);
+  tracksState.set("complete");
+}
+
 let loadingTracks = false;
 let tracksWatchdog: ReturnType<typeof setTimeout> | null = null;
 

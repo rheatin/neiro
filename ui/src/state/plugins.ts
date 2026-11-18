@@ -1,12 +1,80 @@
 // Plugin state store, scoped permission gate, and hot-swappable shell registry.
 
-import { signal, Storage } from "nsh";
+import { effect, signal, Storage } from "nsh";
 import { engine } from "../backend/engine";
+import { ready } from "./engine";
 import type { PluginInfo, ProviderDescriptor } from "../backend/types";
 
 const ACTIVE_SHELL_KEY = "neiro:active-shell-id";
+const DISABLED_PLUGINS_KEY = "neiro:disabled-plugins";
+
 export const DEFAULT_SHELL_ID = "builtin.shell.industrial-rack";
 export const STUDIO_MINIMAL_SHELL_ID = "builtin.shell.studio-minimal";
+
+/** Permanent core plugins that cannot be dynamically disabled. */
+export const LOCKED_PLUGIN_IDS = new Set<string>([
+  DEFAULT_SHELL_ID,
+  "builtin.expander.cue",
+  "builtin.expander.sacd",
+  "builtin.decoder.dsd",
+  "builtin.dsp.soxr",
+]);
+
+/** Online lyrics provider plugins across the multi-source matrix. */
+export const LYRICS_PLUGINS: PluginInfo[] = [
+  {
+    id: "builtin.lyrics.lrclib",
+    name: "LRCLIB 同步歌词",
+    version: "1.0.0",
+    author: "Char ONE",
+    description: "开源同步歌词库（欧美曲库强，支持逐字时间轴与纯文本）",
+    tier: "ui",
+    category: "lyrics.provider",
+    builtin: true,
+    enabled: true,
+    requiresRestart: false,
+    permissions: ["lyrics.read"],
+  },
+  {
+    id: "builtin.lyrics.netease",
+    name: "网易云音乐歌词",
+    version: "1.0.0",
+    author: "Char ONE",
+    description: "网易云音乐在线歌词检索（华语、日音、ACG 覆盖极佳）",
+    tier: "ui",
+    category: "lyrics.provider",
+    builtin: true,
+    enabled: true,
+    requiresRestart: false,
+    permissions: ["lyrics.read"],
+  },
+  {
+    id: "builtin.lyrics.qqmusic",
+    name: "QQ 音乐歌词",
+    version: "1.0.0",
+    author: "Char ONE",
+    description: "QQ 音乐在线歌词检索（华语流行、港台经典时间轴极全）",
+    tier: "ui",
+    category: "lyrics.provider",
+    builtin: true,
+    enabled: true,
+    requiresRestart: false,
+    permissions: ["lyrics.read"],
+  },
+  {
+    id: "builtin.lyrics.kugou",
+    name: "酷狗音乐歌词",
+    version: "1.0.0",
+    author: "Char ONE",
+    description: "酷狗音乐在线歌词检索（冷门老歌、Live 现场、翻唱极强）",
+    tier: "ui",
+    category: "lyrics.provider",
+    builtin: true,
+    enabled: true,
+    requiresRestart: false,
+    permissions: ["lyrics.read"],
+  },
+];
 
 export function isStudioMinimalShell(id: string = activeShellId()): boolean {
   return id === STUDIO_MINIMAL_SHELL_ID || id === "builtin.ui.shell.studio-minimal";
@@ -97,6 +165,7 @@ export function createPluginContext(manifest: PluginInfo): NeiroPluginContext {
 export const plugins = signal<PluginInfo[]>([]);
 export const remoteProviders = signal<ProviderDescriptor[]>([]);
 export const pluginsLoaded = signal(false);
+export const disabledPlugins = signal<Set<string>>(new Set());
 export const activeShellId = signal<string>(DEFAULT_SHELL_ID);
 export const shellError = signal<{ shellId: string; message: string } | null>(null);
 export const devWatchEnabled = signal(false);
@@ -111,12 +180,111 @@ export function getExternalUiShell(id: string): ((ctx: NeiroPluginContext) => un
   return externalShells.get(id);
 }
 
+/** Check whether a plugin is enabled. Permanent core plugins are always true. */
+export function isPluginEnabled(id: string): boolean {
+  if (LOCKED_PLUGIN_IDS.has(id)) return true;
+  return !disabledPlugins().has(id);
+}
+
+/** Check whether a remote protocol is enabled. */
+export function isRemoteKindEnabled(kind: string): boolean {
+  if (kind === "jellyfin" || kind === "jellyfin_token") {
+    return isPluginEnabled("jellyfin");
+  }
+  if (kind === "navidrome") {
+    return isPluginEnabled("navidrome");
+  }
+  if (kind === "webdav") {
+    return isPluginEnabled("webdav");
+  }
+  return isPluginEnabled(kind);
+}
+
+/** Check whether the 60Hz FFT visualizer plugin is enabled. */
+export function isVisualizerPluginEnabled(): boolean {
+  return isPluginEnabled("builtin.visualizer.signal-chain");
+}
+
+/** Merges engine plugins, folds jellyfin/jellyfin_token into one, appends lyrics plugins, and marks locked status. */
+function mergePluginList(raw: PluginInfo[]): PluginInfo[] {
+  const list: PluginInfo[] = [];
+  let hasJellyfin = false;
+
+  for (const p of raw) {
+    if (p.id === "jellyfin" || p.id === "jellyfin_token") {
+      if (!hasJellyfin) {
+        hasJellyfin = true;
+        list.push({
+          id: "jellyfin",
+          name: "Jellyfin 媒体服务器",
+          version: "1.0.0",
+          author: "Char ONE",
+          description: "支持账号密码与 API Token 双模式连接 Jellyfin 远程无损音乐库",
+          tier: "base",
+          category: "source.connector",
+          builtin: true,
+          enabled: isPluginEnabled("jellyfin"),
+          locked: false,
+          requiresRestart: false,
+          permissions: ["remote.read", "remote.manage"],
+        });
+      }
+    } else {
+      const locked = LOCKED_PLUGIN_IDS.has(p.id);
+      list.push({
+        ...p,
+        locked,
+        enabled: locked ? true : isPluginEnabled(p.id),
+      });
+    }
+  }
+
+  // Ensure the 4 built-in online lyrics plugins are included
+  for (const lyr of LYRICS_PLUGINS) {
+    if (!list.some((p) => p.id === lyr.id)) {
+      list.push({
+        ...lyr,
+        locked: false,
+        enabled: isPluginEnabled(lyr.id),
+      });
+    }
+  }
+
+  return list;
+}
+
+/** Merges and filters remote providers. */
+function mergeProviderList(raw: ProviderDescriptor[]): ProviderDescriptor[] {
+  const list: ProviderDescriptor[] = [];
+  let hasJellyfin = false;
+  for (const prov of raw) {
+    if (prov.id === "jellyfin" || prov.id === "jellyfin_token") {
+      if (!hasJellyfin) {
+        hasJellyfin = true;
+        list.push({
+          id: "jellyfin",
+          name: "Jellyfin 媒体服务器",
+          fields: [
+            { key: "base_url", label: "服务器地址", kind: "url", placeholder: "http://192.168.1.2:8096", required: true, secret: false },
+            { key: "user", label: "用户名", kind: "text", placeholder: "admin", required: false, secret: false },
+            { key: "password", label: "密码", kind: "password", placeholder: "", required: false, secret: true },
+            { key: "token", label: "API Key / Token", kind: "password", placeholder: "可选 API Token", required: false, secret: true },
+          ],
+        });
+      }
+    } else {
+      list.push(prov);
+    }
+  }
+  return list;
+}
+
 export function refreshPlugins(): void {
   try {
-    const list = engine.listPlugins();
-    const providers = engine.remoteProviders();
-    plugins.set(list);
-    remoteProviders.set(providers);
+    const rawList = engine.listPlugins();
+    const rawProviders = engine.remoteProviders();
+    plugins.set(mergePluginList(rawList));
+    remoteProviders.set(mergeProviderList(rawProviders));
     pluginsLoaded.set(true);
   } catch (error) {
     console.warn("neiro: 刷新插件列表失败:", error);
@@ -125,22 +293,88 @@ export function refreshPlugins(): void {
 
 export function rescanPlugins(): void {
   try {
-    const list = engine.reloadPlugins();
-    const providers = engine.remoteProviders();
-    plugins.set(list);
-    remoteProviders.set(providers);
+    const rawList = engine.reloadPlugins();
+    const rawProviders = engine.remoteProviders();
+    plugins.set(mergePluginList(rawList));
+    remoteProviders.set(mergeProviderList(rawProviders));
     pluginsLoaded.set(true);
   } catch (error) {
     console.warn("neiro: 重新扫描本地插件失败:", error);
   }
 }
 
+type PluginToggleHook = (id: string, enabled: boolean) => void;
+const toggleHooks: PluginToggleHook[] = [];
+export function registerPluginToggleHook(hook: PluginToggleHook): void {
+  toggleHooks.push(hook);
+}
+
+export function syncPluginStatesToEngine(): void {
+  const syncable = [
+    "jellyfin",
+    "jellyfin_token",
+    "navidrome",
+    "webdav",
+    "builtin.visualizer.signal-chain",
+    STUDIO_MINIMAL_SHELL_ID,
+  ];
+  for (const id of syncable) {
+    const enabled = isPluginEnabled(id);
+    try {
+      engine.setPluginEnabled(id, enabled);
+    } catch {}
+  }
+}
+
+// Automatically sync whenever engine becomes ready
+effect(() => {
+  if (ready()) {
+    syncPluginStatesToEngine();
+  }
+});
+
 export function togglePlugin(id: string, enabled: boolean): void {
+  if (LOCKED_PLUGIN_IDS.has(id)) {
+    return;
+  }
   try {
-    engine.setPluginEnabled(id, enabled);
+    // Persist in disabled set
+    disabledPlugins.update((set) => {
+      const next = new Set(set);
+      if (enabled) {
+        next.delete(id);
+        if (id === "jellyfin") next.delete("jellyfin_token");
+      } else {
+        next.add(id);
+        if (id === "jellyfin") next.add("jellyfin_token");
+      }
+      void Storage.setItem(DISABLED_PLUGINS_KEY, JSON.stringify([...next])).catch(() => {});
+      return next;
+    });
+
+    // Notify backend engine if applicable
+    try {
+      engine.setPluginEnabled(id, enabled);
+      if (id === "jellyfin") {
+        try {
+          engine.setPluginEnabled("jellyfin_token", enabled);
+        } catch {}
+      }
+    } catch {}
+
+    syncPluginStatesToEngine();
+
     refreshPlugins();
 
-    // If the active shell was disabled, automatically fall back to default
+    for (const hook of toggleHooks) {
+      try {
+        hook(id, enabled);
+      } catch (e) {
+        console.warn("neiro: plugin toggle hook error:", e);
+      }
+    }
+
+    // If active shell was disabled, automatically fall back to default industrial rack
     if (!enabled && activeShellId() === id) {
       switchShell(DEFAULT_SHELL_ID);
     }
@@ -150,19 +384,39 @@ export function togglePlugin(id: string, enabled: boolean): void {
 }
 
 export function switchShell(shellId: string): void {
+  // Disallow switching to disabled shell
+  if (!isPluginEnabled(shellId)) {
+    return;
+  }
   shellError.set(null);
   activeShellId.set(shellId);
   void Storage.setItem(ACTIVE_SHELL_KEY, shellId).catch(() => {});
 }
 
-// Initialise active shell from storage
-void Storage.getItem(ACTIVE_SHELL_KEY)
-  .then((saved) => {
-    if (saved && saved.trim() !== "") {
-      activeShellId.set(saved.trim());
+// Initialise active shell and disabled plugins from storage
+void Promise.all([
+  Storage.getItem(ACTIVE_SHELL_KEY).catch(() => null),
+  Storage.getItem(DISABLED_PLUGINS_KEY).catch(() => null),
+]).then(([savedShell, savedDisabled]) => {
+  if (savedDisabled) {
+    try {
+      const arr = JSON.parse(savedDisabled) as string[];
+      if (Array.isArray(arr)) {
+        disabledPlugins.set(new Set(arr));
+      }
+    } catch {}
+  }
+  syncPluginStatesToEngine();
+  if (savedShell && savedShell.trim() !== "") {
+    const trimmed = savedShell.trim();
+    if (isPluginEnabled(trimmed)) {
+      activeShellId.set(trimmed);
+    } else {
+      activeShellId.set(DEFAULT_SHELL_ID);
     }
-  })
-  .catch(() => {});
+  }
+  refreshPlugins();
+});
 
 // Initial load
 refreshPlugins();

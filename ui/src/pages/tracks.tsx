@@ -2,6 +2,7 @@
 // streams in page by page (500 rows each); rows show as they land, and
 // the list scrolls on as far as what arrived. A scan that found or lost
 // files restarts the load.
+// 包含 Hi-Fi 格式过滤胶囊栏（全部/Hi-Res/DSD/无损/喜欢）、批量管理模式联动、播放全部与随机播放。
 
 import { effect, List, Scroll, signal, Text, token, untracked, View } from "nsh";
 import { Button, Input } from "nsh/base";
@@ -32,11 +33,111 @@ import { queueRemoteFrom, remoteLoadingState, remoteTracks, retryRemote } from "
 import { RemoteTrackRow } from "./remote";
 import { barSize, wideTracks } from "../components/layout";
 import { SelectionBar } from "../components/library/selection-bar";
-import { selectionActive } from "../state/queue";
+import { beginSelection, endSelection, selectionActive } from "../state/queue";
 import { CardGrid } from "../components/library/cards";
 import { shuffled } from "../state/shuffle";
 import { engine } from "../backend/engine";
-import { albumKey, type Album, type Artist, type Track } from "../backend/types";
+import { Icon } from "../components/ui/icons";
+import { albumKey, type Album, type Artist, type RemoteTrack, type Track } from "../backend/types";
+import {
+  sortAndFilterRemoteTracks,
+  sortAndFilterTracks,
+  trackFilterPill,
+  trackFilterQuery,
+  type TrackFilterPill,
+} from "../state/library-prefs";
+
+function TrackToolbar(props: {
+  onPlayAll: () => void;
+  onShuffle: () => void;
+}) {
+  const currentPill = () => trackFilterPill();
+  const PILLS: { key: TrackFilterPill; label: string; icon?: "heart" }[] = [
+    { key: "all", label: "全部" },
+    { key: "hires", label: "Hi-Res" },
+    { key: "dsd", label: "DSD" },
+    { key: "lossless", label: "无损" },
+    { key: "favourite", label: "已喜欢", icon: "heart" },
+  ];
+
+  const selecting = () => selectionActive();
+
+  return (
+    <View class="gap-2.5 px-6 pb-2 pt-1">
+      {/* Action Buttons & Filter Pills Row */}
+      <View class="flex-row flex-wrap items-center justify-between gap-2">
+        <View class="flex-row items-center gap-1.5">
+          <ActionButton label="播放全部" icon="play" onPress={props.onPlayAll} />
+          <ActionButton label="随机播放" icon="shuffle" variant="outline" onPress={props.onShuffle} />
+          <ActionButton
+            label={selecting() ? "完成管理" : "批量管理"}
+            icon="check"
+            variant={selecting() ? "primary" : "outline"}
+            onPress={() => {
+              if (selecting()) endSelection();
+              else beginSelection();
+            }}
+          />
+        </View>
+
+        {/* Filter Pills */}
+        <View class="flex-row items-center gap-1 rounded-full border border-border/60 bg-secondary/60 p-0.5">
+          <Each of={PILLS}>
+            {(pill) => {
+              const selected = () => currentPill() === pill().key;
+              return (
+                <Button
+                  selected={selected()}
+                  onPress={() => trackFilterPill.set(pill().key)}
+                  accessibilityLabel={`过滤 ${pill().label}`}
+                  class={`flex-row items-center gap-1 rounded-full px-2.5 py-1 text-xs transition ${
+                    selected()
+                      ? "bg-background text-foreground font-bold shadow-2xs"
+                      : "text-muted-foreground hover:text-foreground"
+                  } ${focusRing}`}
+                >
+                  <If when={pill().icon}>
+                    <Icon name={pill().icon!} size={11} color={selected() ? "foreground" : "muted-foreground"} />
+                  </If>
+                  <Text
+                    class={`text-xs ${
+                      selected() ? "font-bold text-foreground" : "text-muted-foreground"
+                    }`}
+                  >
+                    {pill().label}
+                  </Text>
+                </Button>
+              );
+            }}
+          </Each>
+        </View>
+      </View>
+
+      {/* Filter Input */}
+      <View class="flex-row items-center rounded-(--radius) border border-border/80 bg-secondary/40 px-2.5 py-1 focus-within:border-foreground/40">
+        <Icon name="search" size={14} color="muted-foreground" />
+        <Input
+          value={trackFilterQuery()}
+          onChange={({ value }) => trackFilterQuery.set(value)}
+          placeholder="在曲目中过滤…"
+          accessibilityLabel="过滤曲目列表"
+          class="ml-2 flex-1 text-xs text-foreground"
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        <If when={trackFilterQuery().length > 0}>
+          <Button
+            onPress={() => trackFilterQuery.set("")}
+            accessibilityLabel="清空过滤"
+            class="p-0.5 text-muted-foreground hover:text-foreground"
+          >
+            <Icon name="close" size={12} color="muted-foreground" />
+          </Button>
+        </If>
+      </View>
+    </View>
+  );
+}
 
 export function TracksPage() {
   effect(() => {
@@ -46,11 +147,15 @@ export function TracksPage() {
   // The rows' wave, played as the page is entered (rows scrolled to come
   // in on their own).
   const wave = createListWave({ isTop: () => currentRoute().name === "tracks", reenter: rootOpens });
-  const state = tracksState();
-  const list = homeTracks();
+  const state = () => tracksState();
+  const rawList = () => homeTracks();
+  const list = () => sortAndFilterTracks(rawList());
   const showAlbum = wideTracks();
 
   const remote = () => activeSource().kind === "remote";
+  const rawRemote = () => remoteTracks();
+  const filteredRemote = () => sortAndFilterRemoteTracks(rawRemote());
+
   /** A folder picked in the sidebar is this page's subject: it says which one
    * instead of claiming to be every track. */
   const rootName = () => {
@@ -60,8 +165,9 @@ export function TracksPage() {
     return parts.length > 0 ? parts[parts.length - 1] : root;
   };
   const title = () => (rootName() === "" ? "全部曲目" : rootName());
-  const paths = () => list.map((t) => t.path);
+  const paths = () => list().map((t) => t.path);
   const isScoped = () => scopedRoot() !== null;
+
   return (
     <AppPage title={title()} testID="page-tracks">
       <If
@@ -70,41 +176,49 @@ export function TracksPage() {
           <If
             when={remote()}
             else={
-          <List
-            each={list}
-            keyExtractor={(t) => t.path}
-            estimatedItemSize={48}
-            empty={() => <EmptyTracks state={state} />}
-            header={() => (
-              <View class="pt-2">
-                <TracksHead count={homeTracks().length} total={scopedRoot() === null ? Math.max(tracksTotal(), list.length) : homeTracks().length} state={scopedRoot() === null ? (list.length > 0 && state === "idle" ? "complete" : state) : "complete"} />
-                <TrackHeader showAlbum={showAlbum} />
-              </View>
-            )}
-            footer={() => (
-              <If when={state === "loading" && list.length > 0}>
-                <View class="py-6 items-center">
-                  <Text class="text-xs text-muted-foreground">正在读曲库…</Text>
-                </View>
-              </If>
-            )}
-            class="flex-1"
-            contentClass="pb-28"
-          >
-            {(track, index) => (
-              <TrackRow
-                track={track()}
-                number={index()}
-                showAlbum={showAlbum}
-                wave={wave}
-                onPlay={() => playFromRows(list, index())}
-              />
-            )}
-          </List>
+              <List
+                each={list()}
+                keyExtractor={(t) => t.path}
+                estimatedItemSize={48}
+                empty={() => <EmptyTracks state={state()} />}
+                header={() => (
+                  <View class="pt-2">
+                    <TracksHead
+                      count={list().length}
+                      total={scopedRoot() === null ? Math.max(tracksTotal(), rawList().length) : rawList().length}
+                      state={scopedRoot() === null ? (rawList().length > 0 && state() === "idle" ? "complete" : state()) : "complete"}
+                    />
+                    <TrackToolbar
+                      onPlayAll={() => playFromRows(list(), 0)}
+                      onShuffle={() => playQueue(shuffled(list()), 0)}
+                    />
+                    <TrackHeader showAlbum={showAlbum} />
+                  </View>
+                )}
+                footer={() => (
+                  <If when={state() === "loading" && list().length > 0}>
+                    <View class="py-6 items-center">
+                      <Text class="text-xs text-muted-foreground">正在读曲库…</Text>
+                    </View>
+                  </If>
+                )}
+                class="flex-1"
+                contentClass="pb-28"
+              >
+                {(track, index) => (
+                  <TrackRow
+                    track={track()}
+                    number={index()}
+                    showAlbum={showAlbum}
+                    wave={wave}
+                    onPlay={() => playFromRows(list(), index())}
+                  />
+                )}
+              </List>
             }
           >
             <List
-              each={remoteTracks()}
+              each={filteredRemote()}
               keyExtractor={(t) => t.id}
               estimatedItemSize={48}
               class="flex-1"
@@ -129,21 +243,34 @@ export function TracksPage() {
                 </If>
               )}
               header={() => (
-                <View class="px-6 pb-4 pt-2">
-                  <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
-                    {`${remoteTracks().length} 首远程曲目`}
-                  </Text>
+                <View class="pt-2">
+                  <View class="px-6 pb-2">
+                    <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
+                      {`${filteredRemote().length} 首远程曲目`}
+                    </Text>
+                  </View>
+                  <TrackToolbar
+                    onPlayAll={() => queueRemoteFrom(filteredRemote(), 0)}
+                    onShuffle={() => queueRemoteFrom(shuffled(filteredRemote()), 0)}
+                  />
+                  <TrackHeader showAlbum={showAlbum} />
                 </View>
               )}
               footer={() => (
-                <If when={remoteLoadingState() === "loading" && remoteTracks().length > 0}>
+                <If when={remoteLoadingState() === "loading" && filteredRemote().length > 0}>
                   <View class="py-6 items-center">
                     <Text class="text-xs text-muted-foreground">正在读远程库…</Text>
                   </View>
                 </If>
               )}
             >
-              {(track, index) => <RemoteTrackRow track={track()} number={index()} onPlay={() => queueRemoteFrom(remoteTracks(), index())} />}
+              {(track, index) => (
+                <RemoteTrackRow
+                  track={track()}
+                  number={index()}
+                  onPlay={() => queueRemoteFrom(filteredRemote(), index())}
+                />
+              )}
             </List>
           </If>
         }
@@ -169,14 +296,7 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave }) {
 
   const q = () => query().trim().toLowerCase();
   const filteredTracks = (): Track[] => {
-    const term = q();
-    if (!term) return sourceTracks();
-    return sourceTracks().filter(
-      (t) =>
-        t.title.toLowerCase().includes(term) ||
-        t.artist.toLowerCase().includes(term) ||
-        t.album.toLowerCase().includes(term),
-    );
+    return sortAndFilterTracks(sourceTracks(), { query: q() });
   };
   const filteredAlbums = (): Album[] => {
     const term = q();
@@ -339,7 +459,7 @@ function TracksHead(props: { count: number; total: number; state: string }) {
         : "";
   return (
     <If when={label()}>
-      <Text class="px-6 pb-4 text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
+      <Text class="px-6 pb-2 text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
         {label()}
       </Text>
     </If>
@@ -347,9 +467,6 @@ function TracksHead(props: { count: number; total: number; state: string }) {
 }
 
 function EmptyTracks(props: { state: "idle" | "loading" | "complete" | "error" }) {
-  // While the first page is on its way: skeleton rows shaped like the
-  // table; an error: 重试; an empty (scanned to nothing or before any
-  // scan): what to do.
   return (
     <If
       when={props.state === "error"}

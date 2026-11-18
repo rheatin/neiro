@@ -438,7 +438,7 @@ export function DspMatrix(props: {
             class="h-6 flex-row items-center gap-1.5 rounded px-2"
           >
             <Text class="font-mono text-[8px] font-bold tracking-wider" style={{ color: HARDWARE.cyan }}>
-              32-BAND RACK EQ ▲
+              32-BAND RACK EQ
             </Text>
           </MechKey>
         }
@@ -539,7 +539,7 @@ export function DspMatrix(props: {
           <View class="gap-1 rounded-lg p-2" style={{ backgroundColor: "rgba(0,0,0,0.25)" }}>
             <View class="flex-row w-full items-center justify-between">
               <Silkscreen tone="amber">MODULATION & SPATIAL</Silkscreen>
-              <Silkscreen tone="faint">DRAG ↑↓</Silkscreen>
+              <Silkscreen tone="faint">DRAG VERTICAL</Silkscreen>
             </View>
             <View class="flex-row w-full items-stretch justify-around">
               <RatioEncoder

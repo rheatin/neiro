@@ -9,12 +9,12 @@ publish = false
 # TSX interface only through the exports in `src/lib.rs`.
 #
 # The `nsh-*` crates are taken from Native Shell's `main` at the commit this
-# repository's `nsh` CLI was built from (nightly `27f288e`; its own tag
+# repository's `nsh` CLI was built from (nightly `4aeefa8`; its own tag
 # `nightly` is the same commit), so the app and the generated hosts share one
 # `nsh-core`.
 [dependencies]
-nsh-core = { git = "https://github.com/longbridge/nsh", rev = "27f288e2e8f62c017520c63190a0fb4c3ca42f8a" }
-nsh-base = { git = "https://github.com/longbridge/nsh", rev = "27f288e2e8f62c017520c63190a0fb4c3ca42f8a" }
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "4aeefa80ab5a517d6c184eb95863bb646389d102" }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "4aeefa80ab5a517d6c184eb95863bb646389d102" }
 # Base is opened at run time, never linked: the DLL sits beside the binary and
 # the UI still builds where the engine was never built.
 libloading = "0.8"
