@@ -60,6 +60,7 @@ export function Card(props: {
   width?: number;
   /** Stretched by its container (a grid's cell) rather than `width` wide. */
   fill?: boolean;
+  compact?: boolean;
 }) {
   const width = () => props.width ?? CARD_WIDTH;
   // Made once, here: inside the Button's style it would be made (and
@@ -96,7 +97,9 @@ export function Card(props: {
       accessibilityLabel={`${props.item.name}, ${props.item.subtitle}`}
       onPress={() => openItem(props.item)}
       style={props.fill ? rise : { ...rise, width: width() }}
-      class={`group shrink-0 gap-2 rounded-(--radius-card) p-2.5 transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none motion-reduce:active:scale-100 ${focusRing}`}
+      class={`group shrink-0 gap-1.5 rounded-(--radius-card) ${
+        props.compact ? "p-1.5" : "p-2.5"
+      } transition duration-200 ease-out hover:bg-row-hover active:scale-[0.98] motion-reduce:transition-none motion-reduce:active:scale-100 ${focusRing}`}
     >
       <View class="relative">
         {/* Layered on hover, and steady: the card doesn't move; a wash comes
@@ -128,9 +131,9 @@ export function Card(props: {
           />
         </View>
       </View>
-      <View class="gap-1">
-        <Text class="line-clamp-1 text-sm font-medium text-foreground">{props.item.name}</Text>
-        <Text class="line-clamp-2 text-xs text-muted-foreground">{props.item.subtitle}</Text>
+      <View class="gap-0.5">
+        <Text class={`line-clamp-1 ${props.compact ? "text-xs" : "text-sm"} font-medium text-foreground`}>{props.item.name}</Text>
+        <Text class={`line-clamp-2 ${props.compact ? "text-[10px]" : "text-xs"} text-muted-foreground`}>{props.item.subtitle}</Text>
       </View>
     </Button>
     </View>
@@ -170,24 +173,25 @@ export function CardRow(props: { title?: string; items: LibraryItem[]; class?: s
 }
 
 /** Cards that wrap into a filling grid (a page's or an artist's list). */
-export function CardGrid(props: { items: LibraryItem[]; class?: string; wave?: ListWave; delay?: number }) {
+export function CardGrid(props: { items: LibraryItem[]; class?: string; wave?: ListWave; delay?: number; compact?: boolean }) {
   const wave = untracked(() => props.wave?.child(props.delay ?? 0));
+  const minWidth = props.compact ? 112 : CARD_WIDTH;
   // As many columns as fit at a card's width, widened to share the row out
   // so no room is left at its end. The width one card gets is worked out
   // for its play button.
   const room = signal(0);
   const cardWidth = () => {
     const w = room();
-    return w > 0 ? w / Math.max(1, Math.floor(w / CARD_WIDTH)) : CARD_WIDTH;
+    return w > 0 ? w / Math.max(1, Math.floor(w / minWidth)) : minWidth;
   };
   return (
     <View
       class={props.class ?? "grid"}
-      style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${CARD_WIDTH}px, 1fr))` }}
+      style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${minWidth}px, 1fr))` }}
       onLayout={(e) => room.set(e.bounds.size.width)}
     >
       <Each of={props.items} key={cardKey}>
-        {(item, index) => <Card item={item()} index={index()} wave={wave} width={cardWidth()} fill />}
+        {(item, index) => <Card item={item()} index={index()} wave={wave} width={cardWidth()} compact={props.compact} fill />}
       </Each>
     </View>
   );
