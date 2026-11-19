@@ -55,19 +55,25 @@ export function TransportControls(props: {
 
   return (
     <View class={`flex-row items-center ${props.large ? "gap-6" : "gap-4"}`} role="toolbar" accessibilityLabel="播放">
+      {/* The mode sits at the far left, and the trail's slot is reserved even
+       * when empty, so prev/play/next stay exactly centred in every layout. */}
+      <View class="items-start" style={{ width: icon() + 16 }}>
+        <IconButton
+          name={modeIcon()}
+          label={modeLabel()}
+          hint
+          size={icon()}
+          pressed={mode() !== "sequential"}
+          pressedColor={mode() === "sequential" ? undefined : "primary"}
+          onPress={() => cyclePlaybackMode()}
+        />
+      </View>
       <IconButton name="skipBack" label="上一曲" size={icon()} disabled={!usable() || !canPrev()} onPress={prev} />
       <PlayButton quiet={props.quiet} playing={isPlaying()} size={props.large ? 56 : 36} disabled={!ready() || !hasTrack()} onPress={toggle} />
       <IconButton name="skipForward" label="下一曲" size={icon()} disabled={!usable() || !canNext()} onPress={next} />
-      <IconButton
-        name={modeIcon()}
-        label={modeLabel()}
-        hint
-        size={icon()}
-        pressed={mode() !== "sequential"}
-        pressedColor={mode() === "sequential" ? undefined : "primary"}
-        onPress={() => cyclePlaybackMode()}
-      />
-      {props.trail}
+      <View class="items-end" style={{ width: icon() + 16 }}>
+        {props.trail}
+      </View>
     </View>
   );
 }
