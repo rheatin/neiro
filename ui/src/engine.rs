@@ -56,7 +56,8 @@ type ClearUserQueueFn = unsafe extern "C" fn(base: *mut c_void) -> i32;
 type MoveUserQueueItemFn = unsafe extern "C" fn(base: *mut c_void, from_idx: usize, to_idx: usize) -> i32;
 
 /// A running Base. Dropping it unsubscribes (so no callback ever runs on
-/// freed memory), shuts Base down and releases the DLL.
+/// freed memory), shuts Base down (a moment at most: a remote request in
+/// flight must not freeze a quit) and releases the DLL.
 pub struct Engine {
     base: *mut c_void,
     command: CommandFn,
@@ -80,7 +81,7 @@ pub struct Engine {
     move_user_queue_item: Option<MoveUserQueueItemFn>,
     /// The subscription's context; freed in `Drop`, after `unsubscribe`.
     ctx: *mut Ctx,
-    _library: Library,
+    _library: Option<Library>,
 }
 
 // The pointer is process-owned state; nothing inside it is thread-local, and
@@ -792,7 +793,7 @@ impl Prepared {
                 clear_user_queue: self.clear_user_queue,
                 move_user_queue_item: self.move_user_queue_item,
                 ctx,
-                _library: self.library,
+                _library: Some(self.library),
             },
             receiver,
         ))
@@ -886,6 +887,12 @@ impl Exports {
     }
 }
 
+/// How long a drop waits for Base to stop before leaving its worker to the
+/// process. Base's shutdown joins its worker, and that worker may sit in a
+/// remote request (a page still listing, a fetch from a server that stopped
+/// answering): waiting for the network there froze the window on quit.
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 impl Drop for Engine {
     fn drop(&mut self) {
         unsafe {
@@ -893,9 +900,32 @@ impl Drop for Engine {
             // freeing the context afterwards is safe; `-4` only says there
             // was nothing to drop.
             (self.unsubscribe)(self.base);
-            (self.shutdown)(self.base);
             if !self.ctx.is_null() {
                 drop(Box::from_raw(self.ctx));
+            }
+            let base = self.base as usize;
+            let shutdown = self.shutdown;
+            let (done, finished) = std::sync::mpsc::channel::<()>();
+            let stopped = match std::thread::Builder::new()
+                .name("neiro-base-shutdown".into())
+                .spawn(move || {
+                    (shutdown)(base as *mut c_void);
+                    let _ = done.send(());
+                }) {
+                Ok(_) => finished.recv_timeout(SHUTDOWN_WAIT).is_ok(),
+                // No thread to wait on: shut down here, as before.
+                Err(_) => {
+                    (self.shutdown)(self.base);
+                    true
+                }
+            };
+            if !stopped {
+                // Base is still inside the DLL: leak the handle rather than
+                // unload it under running code. The process exit finishes
+                // what the shutdown wait could not.
+                if let Some(library) = self._library.take() {
+                    std::mem::forget(library);
+                }
             }
         }
     }
