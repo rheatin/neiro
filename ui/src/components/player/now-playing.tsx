@@ -147,9 +147,8 @@ function NowPlayingContent() {
           }
         />
       </View>
-      <View class="flex-row items-center justify-center gap-6" style={enter("fadeInUp", 260)}>
-        <TransportControls large quiet />
-        <NowPlayingHeart size={22} />
+      <View class="flex-row items-center justify-center" style={enter("fadeInUp", 260)}>
+        <TransportControls large quiet trail={<NowPlayingHeart size={22} />} />
       </View>
     </>
   );
@@ -201,9 +200,8 @@ function NowPlayingContent() {
             </View>
           }
         />
-            <View class="flex-row items-center justify-center gap-6">
-              <TransportControls large quiet />
-              <NowPlayingHeart size={22} />
+            <View class="flex-row items-center justify-center">
+              <TransportControls large quiet trail={<NowPlayingHeart size={22} />} />
             </View>
           </View>
         </View>
