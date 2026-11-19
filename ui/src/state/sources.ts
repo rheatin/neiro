@@ -34,8 +34,7 @@ export interface Source {
   serverId?: string;
 }
 
-/** 「全部」= 本地曲库 + 当前已连接/已加载的远程列表；不拼 serverCache，
- * 因为 Base 同一时间只连一台远程。 */
+/** 「全部」= 本地曲库 + 所有已配置远程服务器的列表（实时优先，缓存兜底）。 */
 export const ALL_ID = "all";
 export const ALL: Source = { id: ALL_ID, kind: "all", label: "全部" };
 

@@ -277,6 +277,16 @@ const REPEAT_KEY = "player:repeat";
 export const repeatMode = signal<RepeatMode>("off");
 export const shuffleMode = signal<boolean>(false);
 
+export type PlaybackMode = "sequential" | "shuffle" | "repeatAll" | "repeatOne";
+
+/** The one transport mode implied by the mutually exclusive engine modes. */
+export const playbackMode = (): PlaybackMode => {
+  if (repeatMode() === "one") return "repeatOne";
+  if (repeatMode() === "all") return "repeatAll";
+  if (shuffleMode()) return "shuffle";
+  return "sequential";
+};
+
 // 启动读回持久化的 repeat 和 shuffle 设置，并在连接后同步给引擎
 void (async () => {
   try {
@@ -287,6 +297,12 @@ void (async () => {
     const savedRepeat = await Storage.getItem(REPEAT_KEY);
     if (savedRepeat === "off" || savedRepeat === "all" || savedRepeat === "one") {
       repeatMode.set(savedRepeat);
+    }
+    // 旧版存过随机 + 循环同时开。现在只有一个模式按钮：循环优先
+    // （与 playbackMode() 的顺序一致），随机落回关闭，按钮与引擎一致。
+    if (repeatMode() !== "off" && shuffleMode()) {
+      shuffleMode.set(false);
+      void Storage.setItem(SHUFFLE_KEY, "0").catch((e) => console.warn("neiro: shuffle 没有记住:", String(e)));
     }
   } catch (error) {
     console.warn("neiro: 播放模式持久化读取失败:", String(error));
@@ -313,12 +329,12 @@ effect(() => {
   const snap = engine.queue().snapshot;
   if (!snap) return;
   untracked(() => {
-    if (snap.repeatMode && snap.repeatMode !== repeatMode()) {
-      repeatMode.set(snap.repeatMode);
-    }
-    if (snap.shuffleEnabled !== undefined && snap.shuffleEnabled !== shuffleMode()) {
-      shuffleMode.set(snap.shuffleEnabled);
-    }
+    const nextRepeat = snap.repeatMode ?? repeatMode();
+    // One mode at a time: an engine that reports both is folded to repeat,
+    // the same way playbackMode() reads them.
+    const nextShuffle = (snap.shuffleEnabled ?? shuffleMode()) && nextRepeat === "off";
+    if (nextRepeat !== repeatMode()) repeatMode.set(nextRepeat);
+    if (nextShuffle !== shuffleMode()) shuffleMode.set(nextShuffle);
   });
 });
 
@@ -329,6 +345,8 @@ export function cycleRepeatMode(): void {
 }
 
 export function setRepeatMode(mode: RepeatMode): void {
+  if (mode === repeatMode() && (mode === "off" || !shuffleMode())) return;
+  if (mode !== "off" && shuffleMode()) setShuffle(false);
   repeatMode.set(mode);
   void Storage.setItem(REPEAT_KEY, mode).catch((e) => console.warn("neiro: repeat 没有记住:", String(e)));
   try {
@@ -338,15 +356,34 @@ export function setRepeatMode(mode: RepeatMode): void {
   }
 }
 
-export function toggleShuffle(): void {
-  const next = !shuffleMode();
-  shuffleMode.set(next);
-  void Storage.setItem(SHUFFLE_KEY, next ? "1" : "0").catch((e) => console.warn("neiro: shuffle 没有记住:", String(e)));
+/** Turns shuffle on or off without repeating the same engine command. */
+export function setShuffle(enabled: boolean): void {
+  if (enabled === shuffleMode()) return;
+  if (enabled && repeatMode() !== "off") setRepeatMode("off");
+  shuffleMode.set(enabled);
+  void Storage.setItem(SHUFFLE_KEY, enabled ? "1" : "0").catch((e) =>
+    console.warn("neiro: shuffle 没有记住:", String(e)),
+  );
   try {
-    engine.setShuffleMode(next);
+    engine.setShuffleMode(enabled);
   } catch (e) {
     reportEngineFailure(e, "设置随机播放失败");
   }
+}
+
+export function toggleShuffle(): void {
+  setShuffle(!shuffleMode());
+}
+
+export function setPlaybackMode(mode: PlaybackMode): void {
+  setShuffle(mode === "shuffle");
+  setRepeatMode(mode === "repeatOne" ? "one" : mode === "repeatAll" ? "all" : "off");
+}
+
+export function cyclePlaybackMode(): void {
+  const modes: PlaybackMode[] = ["sequential", "shuffle", "repeatAll", "repeatOne"];
+  const next = modes[(modes.indexOf(playbackMode()) + 1) % modes.length];
+  setPlaybackMode(next);
 }
 
 export function playNextTrack(track: Track): void {
@@ -422,6 +459,7 @@ export const QUEUE_AHEAD = 10;
  * click replaces it; an old fetch that lands after that is ignored. */
 interface PlayContext {
   rows: Track[];
+  pathIndex: Map<string, number>;
   cursor: number;
   current: number;
   queued: Set<string>;
@@ -438,6 +476,14 @@ export function playFromRows(rows: Track[], index: number): void {
   playQueue(rows, index);
 }
 
+/** “播放全部”:顺序时从第一首开始;随机时首曲也随机,然后由 playQueue
+ * 以 shuffleMode 的一次性请求序接着排。 */
+export function playAll(rows: Track[]): void {
+  toggleShuffle();
+  const start = shuffleMode() && rows.length > 0 ? Math.floor(Math.random() * rows.length) : 0;
+  playQueue(rows, start);
+}
+
 /** Plays the clicked row immediately and fills its context in order. An
  * uncached remote row is fetched before queueing, and one fill stops at the
  * first such row: the next one is fetched when playback reaches it. */
@@ -450,8 +496,12 @@ export function playQueue(rows: Track[], firstIndex = 0): void {
     ? [first, ...shuffled(rows.filter((_, i) => i !== idx))]
     : rows;
   const firstCachedPath = first.path.startsWith("remote://") ? remoteHooks?.resolveRemotePath?.(first.path) ?? null : null;
+  const pathIndex = new Map<string, number>();
+  requestedOrder.forEach((row, at) => pathIndex.set(row.path, at));
+  if (firstCachedPath) pathIndex.set(firstCachedPath, start);
   playContext = {
     rows: requestedOrder,
+    pathIndex,
     cursor: start,
     current: start,
     queued: new Set(firstCachedPath ? [first.path, firstCachedPath] : [first.path]),
@@ -462,24 +512,34 @@ export function playQueue(rows: Track[], firstIndex = 0): void {
     const context = playContext;
     const startRemote = () => {
       context.inFlight.add(first.path);
-      remoteHooks?.withRemotePathByPath(first.path, (cachedPath) => {
+      const handled = remoteHooks?.withRemotePathByPath(first.path, (cachedPath) => {
         if (playContext !== context) return;
         context.inFlight.delete(first.path);
         context.queued.add(first.path);
         context.queued.add(cachedPath);
+        context.pathIndex.set(cachedPath, start);
         playTrack({ ...first, path: cachedPath });
         fillPlayContext();
-      });
-      return context.inFlight.has(first.path);
+      }) ?? false;
+      if (!handled) context.inFlight.delete(first.path);
+      return handled;
     };
     if (startRemote()) return;
     reportEngineFailure(new Error("E_REMOTE: 服务器没有回这个文件的缓存路径"), "取流失败");
-    const next = requestedOrder.find((row, at) => at > start && (!row.path.startsWith("remote://") || remoteHooks?.resolveRemotePath?.(row.path)));
+    const next = requestedOrder.find((row, at) => {
+      if (at <= start) return false;
+      if (!row.path.startsWith("remote://")) return true;
+      return remoteHooks?.resolveRemotePath?.(row.path) !== null;
+    });
     if (!next) return;
     const nextAt = requestedOrder.indexOf(next);
+    const nextCachedPath = next.path.startsWith("remote://") ? remoteHooks?.resolveRemotePath?.(next.path) ?? null : null;
     playContext.cursor = nextAt;
     playContext.current = nextAt;
+    playContext.pathIndex.set(next.path, nextAt);
+    if (nextCachedPath) playContext.pathIndex.set(nextCachedPath, nextAt);
     playContext.queued.add(next.path);
+    if (nextCachedPath) playContext.queued.add(nextCachedPath);
     playTrack(next);
     fillPlayContext();
     return;
@@ -508,6 +568,7 @@ function fillPlayContext(): void {
           context.inFlight.delete(row.path);
           context.queued.add(row.path);
           context.queued.add(cachedPath);
+          context.pathIndex.set(cachedPath, context.cursor);
           try {
             engine.playLater([trackToQueueItem({ ...row, path: cachedPath })]);
           } catch (error) {
@@ -523,6 +584,7 @@ function fillPlayContext(): void {
         return;
       }
       const queueable = isRemote && cached ? { ...row, path: cached } : row;
+      if (queueable.path !== row.path) context.pathIndex.set(queueable.path, context.cursor);
       if (!context.queued.has(queueable.path)) {
         context.queued.add(queueable.path);
         try {
@@ -544,9 +606,7 @@ effect(() => {
   const path = player().path;
   const context = playContext;
   if (!context || !path) return;
-  const at = context.rows.findIndex(
-    (row) => row.path === path || (row.path.startsWith("remote://") && remoteHooks?.resolveRemotePath?.(row.path) === path),
-  );
+  const at = context.pathIndex.get(path) ?? -1;
   if (at < 0) {
     playContext = null;
     return;
@@ -560,15 +620,45 @@ effect(() => {
   untracked(() => fillPlayContext());
 });
 
-/** Test seam: advance the context by the exact index of the playing path
- * and fill again (the same logic the player effect uses). */
-export function advancePlayContextToPath(path: string | null): void {
-  if (!playContext || !path) return;
-  const at = playContext.rows.findIndex(
-    (row) =>
-      row.path === path ||
-      (row.path.startsWith("remote://") && remoteHooks?.resolveRemotePath?.(row.path) === path),
+/** A remote download failed before the context ever heard a path. When it
+ * was the row playback was waiting on, take the next row that can play
+ * (local, or a remote file already cached) instead of stalling. */
+export function notifyRemoteFetchFailed(id: string): void {
+  const context = playContext;
+  if (!context) return;
+  const prefix = `remote://${id}.`;
+  const path = Array.from(context.pathIndex.keys()).find((candidate) => candidate.startsWith(prefix));
+  if (!path) return;
+  const at = context.pathIndex.get(path) ?? -1;
+  context.inFlight.delete(path);
+  if (at < 0) return;
+  if (at !== context.current) {
+    // A prefetch failed: move past it so the queue keeps filling.
+    if (at >= context.cursor) {
+      context.cursor = at + 1;
+      fillPlayContext();
+    }
+    return;
+  }
+  const nextAt = context.rows.findIndex(
+    (row, index) =>
+      index > at &&
+      (!row.path.startsWith("remote://") || (remoteHooks?.resolveRemotePath?.(row.path) ?? null) !== null),
   );
+  if (nextAt < 0) return;
+  const next = context.rows[nextAt];
+  context.cursor = nextAt;
+  context.current = nextAt;
+  context.pathIndex.set(next.path, nextAt);
+  context.queued.add(next.path);
+  playTrack(next);
+  fillPlayContext();
+}
+
+/** Test seam: advance the context by the exact index of the playing path
+ * and fill again (the same logic the player effect uses). */export function advancePlayContextToPath(path: string | null): void {
+  if (!playContext || !path) return;
+  const at = playContext.pathIndex.get(path) ?? -1;
   if (at < 0) {
     playContext = null;
     return;
