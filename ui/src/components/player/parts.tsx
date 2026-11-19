@@ -10,7 +10,7 @@ import {
   canNext,
   canPrev,
   controlsEnabled,
-  cycleRepeatMode,
+  cyclePlaybackMode,
   dragSeek,
   dragVolume,
   durationClock,
@@ -22,17 +22,14 @@ import {
   position,
   positionClock,
   positionFill,
-  repeatMode,
+  playbackMode,
   seek,
   setVolume,
-  shuffleMode,
   toggle,
-  toggleShuffle as togglePlayerShuffle,
   volumeLevel,
 } from "../../state/player";
 import { trackForPath } from "../../state/catalog";
 import { ready } from "../../state/engine";
-import { shuffle, shuffleSupported, toggleShuffle } from "../../state/shuffle";
 import { notify } from "../../state/feedback";
 import { Cover } from "../ui/cover";
 import { Digits } from "../ui/digits";
@@ -52,30 +49,23 @@ export function TransportControls(props: {
 }) {
   const icon = () => (props.large ? 22 : 18);
   const usable = () => controlsEnabled();
-  const rep = () => repeatMode();
-  const repIcon = () => (rep() === "one" ? "repeatOnce" : "repeat");
-  const repLabel = () => (rep() === "one" ? "单曲循环" : rep() === "all" ? "全部循环" : "顺序播放");
+  const mode = () => playbackMode();
+  const modeIcon = (): IconName => mode() === "repeatOne" ? "repeatOnce" : mode() === "repeatAll" ? "repeat" : mode() === "shuffle" ? "shuffle" : "list";
+  const modeLabel = () => mode() === "repeatOne" ? "单曲循环" : mode() === "repeatAll" ? "列表循环" : mode() === "shuffle" ? "随机播放" : "顺序播放";
 
   return (
     <View class={`flex-row items-center ${props.large ? "gap-6" : "gap-4"}`} role="toolbar" accessibilityLabel="播放">
-      <IconButton
-        name="shuffle"
-        label={shuffleMode() ? "随机播放（已开）" : "随机播放（已关）"}
-        hint
-        size={icon()}
-        pressed={shuffleMode()}
-        onPress={() => togglePlayerShuffle()}
-      />
       <IconButton name="skipBack" label="上一曲" size={icon()} disabled={!usable() || !canPrev()} onPress={prev} />
       <PlayButton quiet={props.quiet} playing={isPlaying()} size={props.large ? 56 : 36} disabled={!ready() || !hasTrack()} onPress={toggle} />
       <IconButton name="skipForward" label="下一曲" size={icon()} disabled={!usable() || !canNext()} onPress={next} />
       <IconButton
-        name={repIcon()}
-        label={repLabel()}
+        name={modeIcon()}
+        label={modeLabel()}
         hint
         size={icon()}
-        pressed={rep() !== "off"}
-        onPress={() => cycleRepeatMode()}
+        pressed={mode() !== "sequential"}
+        pressedColor={mode() === "sequential" ? undefined : "primary"}
+        onPress={() => cyclePlaybackMode()}
       />
       {props.trail}
     </View>

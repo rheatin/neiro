@@ -7,7 +7,7 @@
 // (the sidebar shows 连接服务器 instead); configured but the server
 // unreachable is the error+重试 state below.
 
-import { Scroll, Text, effect, signal, untracked, View, token } from "nsh";
+import { computed, Scroll, Text, effect, signal, untracked, View, token } from "nsh";
 import { Button, Input } from "nsh/base";
 import { Digits } from "../components/ui/digits";
 import { clock, type RemoteTrack } from "../backend/types";
@@ -25,6 +25,7 @@ import {
   removeServerById,
   remoteIsFresh,
   playRemote,
+  playAllRemote,
   queueRemoteFrom,
   remoteLoadingState,
   remoteQuery,
@@ -50,7 +51,7 @@ import { Icon } from "../components/ui/icons";
 import { TrackHeader } from "../components/library/tracks";
 import { wideTracks } from "../components/layout";
 import { RemoteCardsRow, type RemoteCardItem } from "../components/library/remote-cards";
-import { shuffled } from "../state/shuffle";
+import { shuffleMode } from "../state/player";
 import { selectSource, ALL_ID } from "../state/sources";
 
 const CONTAINER_LABEL = (container: string): string => (container ? container.toUpperCase() : "").slice(0, 5);
@@ -154,13 +155,13 @@ export function RemotePage() {
 
   const activeTab = signal<"tracks" | "albums" | "artists" | "playlists">("tracks");
   const srv = () => activeRemoteServer();
-  const allTracksList = () => remoteTracks();
+  const allTracksList = computed(() => remoteTracks());
   const albumsList = () => remoteAlbumGroups();
   const artistsList = () => remoteArtistGroups();
   const playlists = engine.remotePlaylists;
 
   const q = () => remoteQuery().trim().toLowerCase();
-  const filteredTracks = () => filteredRemoteTracks();
+  const filteredTracks = computed(() => filteredRemoteTracks());
   const filteredAlbums = (): RemoteCardItem[] => {
     const term = q();
     const list = albumsList();
@@ -212,11 +213,11 @@ export function RemotePage() {
               {remoteLoadingState() === "loading" ? " · 读取中…" : ""}
             </Text>
             <View class="flex-row flex-wrap items-center gap-2 pt-1">
-              <ActionButton label="播放全部" onPress={() => queueRemoteFrom(allTracksList(), 0)} />
               <ActionButton
-                label="随机播放"
-                variant="outline"
-                onPress={() => queueRemoteFrom(shuffled(allTracksList()), 0)}
+                label={shuffleMode() ? "随机播放" : "顺序播放"}
+                icon={shuffleMode() ? "shuffle" : "play"}
+                selected={shuffleMode()}
+                onPress={() => playAllRemote(allTracksList())}
               />
               <ActionButton label="同步更新" variant="outline" onPress={() => void reconnectServer(srv()!.id)} />
               <ActionButton label="测试连接" variant="outline" onPress={() => engine.probeRemote()} />

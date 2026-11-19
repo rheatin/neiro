@@ -3,6 +3,7 @@ import {
   advancePlayContextToPath,
   canPrev,
   cycleRepeatMode,
+  notifyRemoteFetchFailed,
   playLaterTrack,
   playNextTrack,
   playQueue,
@@ -426,6 +427,150 @@ test("远程上下文：等待取流时直接播放别的本地曲目，旧 fetc
     resolved.set(remoteRow.path, "/cache/other-0.flac");
     releaseQueue.shift()?.();
     expect(played).toEqual([localRow.path]);
+  } finally {
+    (engine as any).playContext = originalPlayContext;
+    (engine as any).playLater = originalPlayLater;
+  }
+});
+
+test("远程上下文：首曲取流失败退到已缓存远程，不重复入队且索引可用", () => {
+  const rows = [
+    createDummyTrack("remote://fallback-0.flac", "Remote 0", "Artist", "Album", 100000),
+    createDummyTrack("remote://fallback-1.flac", "Remote 1", "Artist", "Album", 100001),
+  ];
+  const cached = new Map<string, string>([[rows[1].path, "/cache/fallback-1.flac"]]);
+  registerRemotePlayer({
+    playRemoteByPath: () => true,
+    withRemotePathByPath: (path, then) => {
+      if (path !== rows[1].path) return false;
+      then(cached.get(path)!);
+      return true;
+    },
+    resolveRemotePath: (path) => cached.get(path) ?? null,
+    cancelPlayIntent: () => {},
+  });
+
+  const played: string[] = [];
+  const later: string[] = [];
+  const originalPlayContext = (engine as any).playContext.bind(engine);
+  const originalPlayLater = (engine as any).playLater.bind(engine);
+  (engine as any).playContext = (items: any[]) => { played.push(items[0].path); };
+  (engine as any).playLater = (items: any[]) => later.push(...items.map((item: any) => item.path));
+
+  try {
+    playQueue(rows, 0);
+    expect(played).toEqual(["/cache/fallback-1.flac"]);
+    expect(later).not.toContain("/cache/fallback-1.flac");
+
+    advancePlayContextToPath("/cache/fallback-1.flac");
+    expect(played).toEqual(["/cache/fallback-1.flac"]);
+  } finally {
+    (engine as any).playContext = originalPlayContext;
+    (engine as any).playLater = originalPlayLater;
+  }
+});
+
+test("混合上下文：路径索引缓存远程解析，避免每次推进全表扫描", () => {
+  const remoteRows = Array.from({ length: 10_000 }, (_, i) =>
+    createDummyTrack(`remote://perf-${i}.flac`, `Remote ${i}`, "Artist", "Album", 100000 + i),
+  );
+  const localRow = createDummyTrack("/music/perf-local.flac", "Local", "Artist", "Album", 100000);
+  const rows = [...remoteRows, localRow];
+  let resolverCalls = 0;
+  registerRemotePlayer({
+    playRemoteByPath: () => true,
+    withRemotePathByPath: () => false,
+    resolveRemotePath: (path) => {
+      resolverCalls += 1;
+      return remoteRows.find((row) => row.path === path) ? `/cache/${path.slice(9)}` : null;
+    },
+    cancelPlayIntent: () => {},
+  });
+
+  const originalPlayContext = (engine as any).playContext.bind(engine);
+  const originalPlayLater = (engine as any).playLater.bind(engine);
+  (engine as any).playContext = () => {};
+  (engine as any).playLater = () => {};
+
+  try {
+    playQueue(rows, remoteRows.length);
+    const callsBeforeAdvance = resolverCalls;
+    advancePlayContextToPath(localRow.path);
+    expect(resolverCalls).toBeLessThan(20);
+    expect(resolverCalls).toBeGreaterThanOrEqual(callsBeforeAdvance);
+  } finally {
+    (engine as any).playContext = originalPlayContext;
+    (engine as any).playLater = originalPlayLater;
+  }
+});
+
+test("混合上下文：第二首已缓存远程曲目播放后上下文仍然有效", () => {
+  const remote0 = createDummyTrack("remote://cached-a.flac", "A", "Artist", "Album", 100000);
+  const remote1 = createDummyTrack("remote://cached-b.flac", "B", "Artist", "Album", 100001);
+  const locals = Array.from({ length: 13 }, (_, index) =>
+    createDummyTrack(`/music/local-${index}.flac`, `L${index}`, "Artist", "Album", 100002 + index),
+  );
+  const rows = [remote0, remote1, ...locals];
+  const cached = new Map<string, string>([
+    [remote0.path, "/cache/cached-a.flac"],
+    [remote1.path, "/cache/cached-b.flac"],
+  ]);
+  registerRemotePlayer({
+    playRemoteByPath: () => true,
+    withRemotePathByPath: (path, then) => {
+      const cachedPath = cached.get(path);
+      if (!cachedPath) return false;
+      then(cachedPath);
+      return true;
+    },
+    resolveRemotePath: (path) => cached.get(path) ?? null,
+    cancelPlayIntent: () => {},
+  });
+
+  const later: string[] = [];
+  const originalPlayContext = (engine as any).playContext.bind(engine);
+  const originalPlayLater = (engine as any).playLater.bind(engine);
+  (engine as any).playContext = () => {};
+  (engine as any).playLater = (items: any[]) => later.push(...items.map((item: any) => item.path));
+
+  try {
+    playQueue(rows, 0);
+    advancePlayContextToPath("/cache/cached-a.flac");
+    advancePlayContextToPath("/cache/cached-b.flac");
+    for (const local of locals) advancePlayContextToPath(local.path);
+    expect(later).toContain(locals[locals.length - 1].path);
+  } finally {
+    (engine as any).playContext = originalPlayContext;
+    (engine as any).playLater = originalPlayLater;
+  }
+});
+
+test("远程上下文：当前曲取流失败时跳到下一首能播的曲目，而不是停死", () => {
+  const rows = [
+    createDummyTrack("remote://fail-1.flac", "Remote Fail", "Artist", "Album", 100000),
+    createDummyTrack("/music/after-fail.flac", "Local After", "Artist", "Album", 100001),
+  ];
+  registerRemotePlayer({
+    playRemoteByPath: () => true,
+    // In flight and never lands — the engine reports the failure separately.
+    withRemotePathByPath: () => true,
+    resolveRemotePath: () => null,
+    cancelPlayIntent: () => {},
+  });
+
+  const played: string[] = [];
+  const originalPlayContext = (engine as any).playContext.bind(engine);
+  const originalPlayLater = (engine as any).playLater.bind(engine);
+  (engine as any).playContext = (items: any[]) => {
+    played.push(items[0].path);
+  };
+  (engine as any).playLater = () => {};
+
+  try {
+    playQueue(rows, 0);
+    expect(played).toEqual([]);
+    notifyRemoteFetchFailed("fail-1");
+    expect(played).toEqual(["/music/after-fail.flac"]);
   } finally {
     (engine as any).playContext = originalPlayContext;
     (engine as any).playLater = originalPlayLater;
