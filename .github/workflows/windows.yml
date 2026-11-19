@@ -20,7 +20,7 @@ jobs:
       # from neiro-core answers 404 ("release not found").
       GH_TOKEN: ${{ secrets.CORE_RELEASE_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Rust (GNU toolchain)
         run: |
