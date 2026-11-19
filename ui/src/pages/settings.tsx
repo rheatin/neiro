@@ -3,6 +3,7 @@
 import { effect, signal, untracked, Scroll, Text, View } from "nsh";
 import { Button } from "nsh/base";
 import { AppPage } from "../components/page";
+import { rememberScroll } from "../state/page-scroll";
 import { ActionButton, focusRing, SectionTitle } from "../components/ui/controls";
 import { Icon } from "../components/ui/icons";
 import { enter } from "../components/ui/motion";
@@ -45,6 +46,8 @@ export function SettingsPage() {
   const gapless = () => gaplessEnabled();
   const serverList = () => servers();
   const localRoots = () => roots();
+  // 切走 tab 再回来，停在原处。
+  const scroll = rememberScroll("settings");
 
   const deviceLabel = () => {
     const r = res();
@@ -140,8 +143,8 @@ export function SettingsPage() {
   };
 
   return (
-    <AppPage title="设置" testID="page-settings">
-      <Scroll class="flex-1" contentClass="pb-28">
+    <AppPage title="设置" testID="page-settings" scroll={scroll}>
+      <Scroll class="flex-1" contentClass="pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <View class="px-6 pt-2 pb-6 gap-1" role="header">
           <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">系统首选项</Text>
           <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>

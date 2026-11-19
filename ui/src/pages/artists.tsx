@@ -17,6 +17,7 @@ import {
   visibleArtists,
 } from "../state/catalog";
 import { activeSource } from "../state/sources";
+import { rememberScroll } from "../state/page-scroll";
 import { activeRemoteServer, queueRemoteFrom, remoteArtistGroups, remoteLoadingState, remoteTracks, retryRemote } from "../state/remote";
 import { open } from "../nav";
 import { RemoteCardsRow } from "../components/library/remote-cards";
@@ -83,6 +84,8 @@ export function ArtistsPage() {
   };
 
   const isListView = () => artistViewMode() === "list";
+  // 切走 tab 再回来，停在原处（本地 / 远程各记各的）。
+  const scroll = rememberScroll(`artists:${activeSource().kind}`);
 
   const renderToolbar = () => (
     <View class="gap-2.5 pb-4 px-6">
@@ -187,7 +190,7 @@ export function ArtistsPage() {
   );
 
   return (
-    <AppPage title="歌手" testID="page-artists">
+    <AppPage title="歌手" testID="page-artists" scroll={scroll}>
       <If
         when={remote()}
         else={
@@ -219,7 +222,7 @@ export function ArtistsPage() {
                   <If
                     when={isListView()}
                     else={
-                      <Scroll class="flex-1" contentClass="px-6 pb-28">
+                      <Scroll class="flex-1" contentClass="px-6 pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
                         <CardGrid items={items()} />
                       </Scroll>
                     }
@@ -230,6 +233,9 @@ export function ArtistsPage() {
                       estimatedItemSize={56}
                       class="flex-1"
                       contentClass="px-6 pb-28 gap-1.5"
+                      contentOffset={scroll.contentOffset}
+                      onScroll={scroll.onScroll}
+                      ref={scroll.ref}
                     >
                       {(artist) => <ArtistRow artist={artist()} />}
                     </List>
@@ -263,7 +269,7 @@ export function ArtistsPage() {
               <If
                 when={isListView()}
                 else={
-                  <Scroll class="flex-1" contentClass="px-6 pb-28">
+                  <Scroll class="flex-1" contentClass="px-6 pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
                     <RemoteCardsRow grid variant="artist" items={remoteGroups()} />
                   </Scroll>
                 }
@@ -274,6 +280,9 @@ export function ArtistsPage() {
                   estimatedItemSize={56}
                   class="flex-1"
                   contentClass="px-6 pb-28 gap-1.5"
+                  contentOffset={scroll.contentOffset}
+                  onScroll={scroll.onScroll}
+                  ref={scroll.ref}
                 >
                   {(group) => {
                     const g = () => group();

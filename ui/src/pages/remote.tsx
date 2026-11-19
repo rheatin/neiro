@@ -35,6 +35,7 @@ import {
   withRemotePath,
 } from "../state/remote";
 import { engine } from "../backend/engine";
+import { rememberScroll } from "../state/page-scroll";
 import { open, switchTo, HOME } from "../nav";
 import { focusRing, ActionButton, PlayButton } from "../components/ui/controls";
 import { setServerDialogOpen } from "../state/overlays";
@@ -162,6 +163,8 @@ export function RemotePage() {
 
   const q = () => remoteQuery().trim().toLowerCase();
   const filteredTracks = computed(() => filteredRemoteTracks());
+  // 切走 tab 再回来，停在原处（每台服务器各记各的）。
+  const scroll = rememberScroll(`remote:${srv()?.id ?? ""}`);
   const filteredAlbums = (): RemoteCardItem[] => {
     const term = q();
     const list = albumsList();
@@ -190,8 +193,8 @@ export function RemotePage() {
   };
 
   return (
-    <AppPage title={srv()?.label ?? "远程服务器"} testID="page-remote">
-      <Scroll class="flex-1" contentClass="pb-28">
+    <AppPage title={srv()?.label ?? "远程服务器"} testID="page-remote" scroll={scroll}>
+      <Scroll class="flex-1" contentClass="pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <If
           when={srv()}
           else={
@@ -441,10 +444,12 @@ export function RemotePlaylistPage(props: { id: string; name: string }) {
     return p && p.id === props.id ? p.tracks : [];
   };
   const first = () => rows()[0];
+  // 打开过的远程播放列表，回来时停在原处。
+  const scroll = rememberScroll(`remotePlaylist:${props.id}`);
 
   return (
-    <AppPage title={props.name || "播放列表"} testID={`page-remote-playlist-${props.id}`}>
-      <Scroll class="flex-1" contentClass="pb-28">
+    <AppPage title={props.name || "播放列表"} testID={`page-remote-playlist-${props.id}`} scroll={scroll}>
+      <Scroll class="flex-1" contentClass="pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <View class="px-6 pt-4 pb-4 flex-row items-center gap-5" role="header">
           <If when={first()}>
             <RemoteCover id={first()!.id} coverArt={first()!.coverArt} size={112} class="shadow-md" />
@@ -495,9 +500,10 @@ export function RemoteAlbumPage(props: { serverId: string; album: string; artist
     return exact.length > 0 ? exact : source.filter((track) => (track.album || "") === props.album);
   };
   const first = () => rows()[0];
+  const scroll = rememberScroll(`remoteAlbum:${props.serverId}\u0000${props.album}\u0000${props.artist}`);
   return (
-    <AppPage title={props.album} testID="page-remote-album">
-      <Scroll class="flex-1" contentClass="pb-28">
+    <AppPage title={props.album} testID="page-remote-album" scroll={scroll}>
+      <Scroll class="flex-1" contentClass="pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <View class="px-6 pt-4 pb-4 flex-row items-center gap-5" role="header">
           <If when={first()}>
             <RemoteCover id={first()!.id} coverArt={first()!.coverArt} size={112} class="shadow-md" />
@@ -550,9 +556,10 @@ export function RemoteArtistPage(props: { serverId: string; artist: string }) {
     return source.filter((track) => (track.artist || "") === props.artist);
   };
   const first = () => rows()[0];
+  const scroll = rememberScroll(`remoteArtist:${props.serverId}\u0000${props.artist}`);
   return (
-    <AppPage title={props.artist} testID="page-remote-artist">
-      <Scroll class="flex-1" contentClass="pb-28">
+    <AppPage title={props.artist} testID="page-remote-artist" scroll={scroll}>
+      <Scroll class="flex-1" contentClass="pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <View class="px-6 pt-4 pb-4 flex-row items-center gap-5" role="header">
           <If when={first()}>
             <RemoteCover id={first()!.id} coverArt={first()!.coverArt} size={112} round class="shadow-md" />

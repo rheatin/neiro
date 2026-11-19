@@ -1,9 +1,10 @@
-// The main content: the navigation stack of pages — or, while the engine
-// is not connected, the one page that says so with 重试.
+// The main content: one navigation stack per root, all kept alive, the
+// active one shown — or, while the engine is not connected, the one page
+// that says so with 重试.
 
 import { View } from "nsh";
 import { NavStack } from "nsh/base";
-import { nav, type Route } from "../nav";
+import { activeRootName, openedRoots, stackOf, type Route } from "../nav";
 import { AlbumsPage } from "../pages/albums";
 import { AlbumPage, ArtistPage } from "../pages/detail";
 import { ArtistsPage } from "../pages/artists";
@@ -61,9 +62,27 @@ export function MainStack(props: { class?: string }) {
         when={health().status !== "failed"}
         else={<EngineDownPage />}
       >
-        <NavStack state={nav} class="flex-1" testID="main">
-          {(route) => page(route)}
-        </NavStack>
+        <View class="relative min-h-0 flex-1">
+          {/* One layer per visited root: the others stay mounted (and laid
+              out) so a switch is only a visibility change — no rebuild, no
+              re-layout. 不用 display:none：它把子树移出布局，回来时整页重
+              排（大列表几百毫秒）。切换的剩余成本是 1–2 帧的首次呈现。 */}
+          <Each of={openedRoots()} key={(root) => root.name}>
+            {(root) => {
+              const shown = () => activeRootName() === root().name;
+              return (
+                <View
+                  class="absolute inset-0"
+                  style={{ visibility: shown() ? "visible" : "hidden" }}
+                >
+                  <NavStack state={stackOf(root())} class="min-h-0 flex-1" testID={`main-${root().name}`}>
+                    {(route) => page(route)}
+                  </NavStack>
+                </View>
+              );
+            }}
+          </Each>
+        </View>
       </If>
     </View>
   );

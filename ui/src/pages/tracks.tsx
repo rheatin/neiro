@@ -30,6 +30,7 @@ import { ActionButton, focusRing } from "../components/ui/controls";
 import { createListWave, enter, type ListWave } from "../components/ui/motion";
 import { currentRoute, rootOpens, switchTo, HOME } from "../nav";
 import { activeSource, ALL_ID, selectSource } from "../state/sources";
+import { rememberScroll, type PageScroll } from "../state/page-scroll";
 import { playAllRemote, queueRemoteFrom, remoteLoadingState, remoteTracks, retryRemote } from "../state/remote";
 import { RemoteTrackRow } from "./remote";
 import { barSize, wideTracks } from "../components/layout";
@@ -147,9 +148,8 @@ export function TracksPage() {
     dataEpoch();
     untracked(() => ensureTracks());
   });
-  // The rows' wave, played as the page is entered (rows scrolled to come
-  // in on their own).
-  const wave = createListWave({ isTop: () => currentRoute().name === "tracks", reenter: rootOpens });
+  // 切走 tab 再回来，停在原处（来源、文件夹各记各的）。
+  const scroll = rememberScroll(`tracks:${activeSource().kind}:${scopedRoot() ?? ""}`);
   const state = () => tracksState();
   const rawList = computed(() => homeTracks());
   const list = computed(() => sortAndFilterTracks(rawList(), { query: trackFilterQuery() }));
@@ -170,9 +170,12 @@ export function TracksPage() {
   const title = () => (rootName() === "" ? "全部曲目" : rootName());
   const paths = () => list().map((t) => t.path);
   const isScoped = () => scopedRoot() !== null;
+  // The rows' wave, played as the page is entered (rows scrolled to come
+  // in on their own; not when the page is returned to).
+  const wave = createListWave({ isTop: () => currentRoute().name === "tracks", reenter: rootOpens, quiet: scroll.restored });
 
   return (
-    <AppPage title={title()} testID="page-tracks">
+    <AppPage title={title()} testID="page-tracks" scroll={scroll}>
       <If
         when={isScoped()}
         else={
@@ -224,6 +227,9 @@ export function TracksPage() {
                 )}
                 class="flex-1"
                 contentClass="pb-28"
+                contentOffset={scroll.contentOffset}
+                onScroll={scroll.onScroll}
+                ref={scroll.ref}
               >
                 {(track, index) => (
                   <TrackRow
@@ -243,6 +249,9 @@ export function TracksPage() {
               estimatedItemSize={48}
               class="flex-1"
               contentClass="pb-28"
+              contentOffset={scroll.contentOffset}
+              onScroll={scroll.onScroll}
+              ref={scroll.ref}
               empty={() => (
                 <If
                   when={remoteLoadingState() === "error"}
@@ -294,7 +303,7 @@ export function TracksPage() {
           </If>
         }
       >
-        <ScopedFolderWorkspace root={scopedRoot()!} wave={wave} />
+        <ScopedFolderWorkspace root={scopedRoot()!} wave={wave} scroll={scroll} />
       </If>
       <If when={selectionActive()}>
         <SelectionBar allPaths={paths()} bottom={barSize() === "stacked" ? 128 : 96} />
@@ -303,7 +312,7 @@ export function TracksPage() {
   );
 }
 
-function ScopedFolderWorkspace(props: { root: string; wave: ListWave }) {
+function ScopedFolderWorkspace(props: { root: string; wave: ListWave; scroll: PageScroll }) {
   const root = props.root;
   const leaf = () => root.replace(/\\/g, "/").split("/").pop() || root;
   const query = signal("");
@@ -420,7 +429,7 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave }) {
     <If
       when={activeTab() === "tracks"}
       else={
-        <Scroll class="flex-1" contentClass="pb-28">
+        <Scroll class="flex-1" contentClass="pb-28" contentOffset={props.scroll.contentOffset} onScroll={props.scroll.onScroll} ref={props.scroll.ref}>
           {renderHeader(false)}
           <If when={activeTab() === "albums"}>
             <View class="px-6">
@@ -441,6 +450,9 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave }) {
         estimatedItemSize={48}
         class="flex-1"
         contentClass="pb-28"
+        contentOffset={props.scroll.contentOffset}
+        onScroll={props.scroll.onScroll}
+        ref={props.scroll.ref}
         empty={() => (
           <View class="py-12 items-center">
             <Text class="text-sm text-muted-foreground">没有曲目</Text>

@@ -18,6 +18,7 @@ import {
 } from "../state/catalog";
 
 import { activeSource } from "../state/sources";
+import { rememberScroll } from "../state/page-scroll";
 import { queueRemoteFrom, remoteAlbumGroups, remoteLoadingState, remoteTracks, retryRemote } from "../state/remote";
 import { playQueue } from "../state/player";
 import { RemoteAlbumRow, RemoteCardsRow } from "../components/library/remote-cards";
@@ -90,6 +91,8 @@ export function AlbumsPage() {
   };
 
   const isList = () => albumViewMode() === "list";
+  // 切走 tab 再回来，停在原处（本地 / 远程各记各的）。
+  const scroll = rememberScroll(`albums:${activeSource().kind}`);
 
   const renderToolbar = () => (
     <View class="gap-2.5 pb-4">
@@ -201,7 +204,7 @@ export function AlbumsPage() {
   );
 
   return (
-    <AppPage title="专辑" testID="page-albums">
+    <AppPage title="专辑" testID="page-albums" scroll={scroll}>
       <If
         when={remote()}
         else={
@@ -226,7 +229,7 @@ export function AlbumsPage() {
                 <If
                   when={isList()}
                   else={
-                    <Scroll class="flex-1" contentClass="px-6 pb-28">
+                    <Scroll class="flex-1" contentClass="px-6 pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
                       <Text role="header" class="pb-4 text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
                         专辑
                       </Text>
@@ -241,6 +244,9 @@ export function AlbumsPage() {
                     estimatedItemSize={56}
                     class="flex-1"
                     contentClass="px-6 pb-28 gap-1.5"
+                    contentOffset={scroll.contentOffset}
+                    onScroll={scroll.onScroll}
+                    ref={scroll.ref}
                     header={listHeader}
                   >
                     {(item) => <AlbumRow item={item()} />}
@@ -270,7 +276,7 @@ export function AlbumsPage() {
               <If
                 when={isList()}
                 else={
-                  <Scroll class="flex-1" contentClass="px-6 pb-28">
+                  <Scroll class="flex-1" contentClass="px-6 pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
                     <Text role="header" class="pb-4 text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
                       专辑
                     </Text>
@@ -285,6 +291,9 @@ export function AlbumsPage() {
                   estimatedItemSize={56}
                   class="flex-1"
                   contentClass="px-6 pb-28 gap-1.5"
+                  contentOffset={scroll.contentOffset}
+                  onScroll={scroll.onScroll}
+                  ref={scroll.ref}
                   header={listHeader}
                 >
                   {(item) => <RemoteAlbumRow item={item()} />}

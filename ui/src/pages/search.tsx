@@ -19,6 +19,7 @@ import {
   visibleArtists,
 } from "../state/catalog";
 import { activeSource } from "../state/sources";
+import { rememberScroll } from "../state/page-scroll";
 import {
   allRemoteTracks,
   playRemote,
@@ -132,10 +133,11 @@ export function SearchPage() {
   const remoteTotal = () => remoteSongs().length + remoteAlbumItems().length + remoteArtistItems().length;
   const remoteLoading = () => remoteLoadingState() === "loading" && remoteTracks().length === 0;
   const remotePartial = () => remoteFetching() && remoteTracks().length > 0;
+  const scroll = rememberScroll(`search:${activeSource().kind}`);
 
   return (
-    <AppPage title="搜索" testID="page-search">
-      <Scroll class="flex-1" contentClass={pageEnd()}>
+    <AppPage title="搜索" testID="page-search" scroll={scroll}>
+      <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <If
           when={term()}
           else={

@@ -19,7 +19,8 @@ export type IconName =
   | "dots" | "queue" | "settings"
   | "layout" | "wave" | "cloud" | "fileText" | "cpu" | "sliders"
   | "grid" | "list" | "sortAsc" | "sortDesc" | "layers"
-  | "puzzle" | "jellyfin" | "radio" | "cut" | "globe" | "headphones" | "mic";
+  | "puzzle" | "jellyfin" | "radio" | "cut" | "globe" | "headphones" | "mic"
+  | "arrowUp";
 
 // Tabler Icons, outline (1pt in the source files; drawn here at 1.5) and
 // filled for the transport. Each string is the inside of a 24×24 SVG.
@@ -78,6 +79,7 @@ export const BODY: Record<IconName, string> = {
   globe: '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0" /><path d="M3.6 9h16.8" /><path d="M3.6 15h16.8" /><path d="M11.5 3a17 17 0 0 0 0 18" /><path d="M12.5 3a17 17 0 0 1 0 18" />',
   headphones: '<path d="M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2z" /><path d="M15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2z" /><path d="M4 15v-3a8 8 0 0 1 16 0v3" />',
   mic: '<path d="M9 5a3 3 0 0 1 6 0v5a3 3 0 0 1 -6 0z" /><path d="M5 10a7 7 0 0 0 14 0" /><path d="M8 21h8" /><path d="M12 17v4" />',
+  arrowUp: '<path d="M12 5l0 14" /><path d="M18 11l-6 -6l-6 6" />',
 };
 
 /** The glyphs that draw themselves filled (the transport), the rest stroked. */

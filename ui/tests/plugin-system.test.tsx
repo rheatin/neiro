@@ -192,7 +192,7 @@ test("UI 渲染与交互验证：Grid插件矩阵、Jellyfin归一双模式与�
 test("矢量图标与颜色纯净性断言：BODY 中 100% 仅使用 path 标签，colorOf 规范化 8 位 Hex", () => {
   const disallowedTags = ["<rect", "<line", "<circle", "<polygon", "<polyline", "<ellipse"];
   const iconNames = Object.keys(BODY) as IconName[];
-  expect(iconNames.length).toBe(52);
+  expect(iconNames.length).toBe(53);
 
   for (const name of iconNames) {
     const svgBody = BODY[name];

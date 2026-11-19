@@ -286,14 +286,17 @@ export interface ListWave {
 
 /** Makes a list's wave. `isTop`: whether its page is the one shown
  * (tracked). `afterReveal`: its content took a skeleton's place, so the
- * first wave waits for the skeleton to half fade. */
-export function createListWave(options: { isTop: () => boolean; reenter?: () => number; afterReveal?: boolean }): ListWave {
+ * first wave waits for the skeleton to half fade. `quiet`: the page opens
+ * where it was left, so its first rows show at once rather than playing the
+ * wave again (a tab returned to, not a page opened afresh). */
+export function createListWave(options: { isTop: () => boolean; reenter?: () => number; afterReveal?: boolean; quiet?: boolean }): ListWave {
   const made = Date.now();
   //Entered when it first shows, and again when it is opened anew while or as
   // it shows (spotish 最新版的 `reenter`: 同一 root 被再选中时其列表重新进
   // 场；back 回到它不算重开).
   let seenOpens = untracked(() => options.reenter?.() ?? 0);
-  const entries = signal(untracked(options.isTop) ? 1 : 0);
+  const quiet = options.quiet ?? false;
+  const entries = signal(untracked(options.isTop) && !quiet ? 1 : 0);
   let windowStart = made;
   effect(() => {
     const top = options.isTop();
@@ -302,6 +305,8 @@ export function createListWave(options: { isTop: () => boolean; reenter?: () => 
       const opened = opens !== seenOpens;
       seenOpens = opens;
       if (!top) return;
+      // 回到停下的位置：这一进场不播 wave（同一 root 再点一次仍会有）。
+      if (quiet && !opened) return;
       if (entries() > 0 && !opened) return;
       windowStart = Date.now();
       entries.set(entries() + 1);

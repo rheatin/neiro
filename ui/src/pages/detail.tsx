@@ -27,6 +27,7 @@ import { Cover } from "../components/ui/cover";
 import { PlayButton } from "../components/ui/controls";
 import { createListWave, enter } from "../components/ui/motion";
 import { currentRoute } from "../nav";
+import { rememberScroll } from "../state/page-scroll";
 
 /** The album's page. */
 export function AlbumPage(props: { album: string; albumArtist: string }) {
@@ -34,6 +35,7 @@ export function AlbumPage(props: { album: string; albumArtist: string }) {
     <DetailPage
       title={props.album}
       kind="专辑"
+      scrollKey={`album:${props.album}\u0000${props.albumArtist}`}
       coverPath={() => albumCoverTrack(props.album, props.albumArtist)}
       rows={() => tracksOfAlbum(props.album, props.albumArtist)}
     />
@@ -46,23 +48,27 @@ export function ArtistPage(props: { artist: string }) {
     <DetailPage
       title={props.artist}
       kind="歌手"
+      scrollKey={`artist:${props.artist}`}
       coverPath={() => artistCoverTrack(props.artist)}
       rows={() => tracksOfArtist(props.artist)}
     />
   );
 }
 
-function DetailPage(props: { title: string; kind: "专辑" | "歌手"; coverPath: () => string; rows: () => Track[] }) {
+function DetailPage(props: { title: string; kind: "专辑" | "歌手"; scrollKey: string; coverPath: () => string; rows: () => Track[] }) {
   // The shared index: it is the page's data, both its table's rows and its
   // header's quality facts.
   effect(() => {
     untracked(() => ensureTracks());
   });
+  // 打开过的专辑 / 歌手页，回来时停在原处。
+  const scroll = rememberScroll(props.scrollKey);
   const wave = createListWave({
     isTop: () => {
       const route = currentRoute();
       return route.name === "album" || route.name === "artist";
     },
+    quiet: scroll.restored,
   });
   const complete = () => tracksState() === "complete" || visibleTracks().length > 0 || (rootsLoaded() && roots().length === 0);
   const count = () => props.rows().length;
@@ -72,8 +78,11 @@ function DetailPage(props: { title: string; kind: "专辑" | "歌手"; coverPath
   const showAlbum = wideTracks();
 
   return (
-    <AppPage title={props.title} testID={`page-${props.kind}`}>
+    <AppPage title={props.title} testID={`page-${props.kind}`} scroll={scroll}>
       <List
+        contentOffset={scroll.contentOffset}
+        onScroll={scroll.onScroll}
+        ref={scroll.ref}
         each={complete() ? props.rows() : []}
         keyExtractor={(t) => t.path}
         estimatedItemSize={48}

@@ -6,6 +6,7 @@
 import { Scroll, View } from "nsh";
 import { Button } from "nsh/base";
 import { AppPage } from "../components/page";
+import { rememberScroll } from "../state/page-scroll";
 import { pageEnd } from "../components/layout";
 import { RackEq } from "../components/player/surface/rack-eq";
 import { HARDWARE } from "../components/ui/hardware";
@@ -16,9 +17,10 @@ import { eqCameFromOutput, setEqOpenedFromOutput, setOutputOpen } from "../state
 import { Text } from "nsh";
 
 export function EqPage() {
+  const scroll = rememberScroll("eq");
   return (
-    <AppPage title="均衡器" testID="page-eq">
-      <Scroll class="flex-1" contentClass="px-6 pb-28">
+    <AppPage title="均衡器" testID="page-eq" scroll={scroll}>
+      <Scroll class="flex-1" contentClass="px-6 pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <View class="flex-row items-center gap-2 pt-2 pb-3">
           <Button
             accessibilityLabel="返回"

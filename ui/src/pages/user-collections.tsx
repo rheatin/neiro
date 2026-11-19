@@ -20,6 +20,7 @@ import { ensureTracks, roots, rootsLoaded, tracksState, visibleTracks } from "..
 import { isCurrentTrack, playQueue, playTrack, toggle } from "../state/player";
 import { openRenamePlaylist } from "../components/library/playlist-dialogs";
 import { AppPage } from "../components/page";
+import { rememberScroll } from "../state/page-scroll";
 import { barSize, pageEnd, wideTracks } from "../components/layout";
 import { SelectionBar } from "../components/library/selection-bar";
 import { selectionActive } from "../state/queue";
@@ -102,10 +103,12 @@ function CollectionPage(props: { title: string; kind: CollectionKind }) {
       if (props.kind.type === "playlist") loadPlaylistEntries(props.kind.id);
     });
   });
+  // 切走 tab 再回来，停在原处（收藏 / 每张曲单各记各的）。
+  const scroll = rememberScroll(props.kind.type === "liked" ? "liked" : `playlist:${props.kind.id}`);
   const wave = createListWave({ isTop: () => {
     const route = currentRoute();
     return route.name === "playlist" || route.name === "liked";
-  } });
+  }, quiet: scroll.restored });
   const liked = () => props.kind.type === "liked";
 
   const paths = () => (liked() ? [...favourites()] : playlistEntries(props.kind.type === "playlist" ? props.kind.id : null).map((entry) => entry.path));
@@ -131,10 +134,12 @@ function CollectionPage(props: { title: string; kind: CollectionKind }) {
   const totalTime = () => rows().reduce((sum, t) => sum + t.durationMs, 0);
   const first = () => rows()[0];
   const playingHere = () => !!first() && isCurrentTrack(first()!.path);
-
   return (
-    <AppPage title={props.title} testID={liked() ? "page-liked" : `page-playlist-${props.kind.type === "playlist" ? props.kind.id : ""}`}>
+    <AppPage title={props.title} testID={liked() ? "page-liked" : `page-playlist-${props.kind.type === "playlist" ? props.kind.id : ""}`} scroll={scroll}>
       <List
+        contentOffset={scroll.contentOffset}
+        onScroll={scroll.onScroll}
+        ref={scroll.ref}
         each={complete() ? rows() : []}
         keyExtractor={(t) => t.path}
         estimatedItemSize={48}

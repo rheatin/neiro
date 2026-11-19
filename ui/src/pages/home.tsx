@@ -55,6 +55,7 @@ import { CardsSkeleton, EmptyState, ErrorState, RowsSkeleton } from "../componen
 import { ActionButton, SectionTitle } from "../components/ui/controls";
 import { createListWave, enter, waveDelay, type ListWave } from "../components/ui/motion";
 import { currentRoute, open, rootOpens, REMOTE, TRACKS, switchTo } from "../nav";
+import { rememberScroll } from "../state/page-scroll";
 import { mostPlayed, refreshMostPlayed } from "../state/user-catalog";
 import { playTrack, isCurrentTrack, isPlaying } from "../state/player";
 import { Button } from "nsh/base";
@@ -96,12 +97,14 @@ export function HomePage() {
     });
   });
 
-  // The rows' wave, played as the page is entered.
-  const wave = createListWave({ isTop: () => currentRoute().name === "home", reenter: rootOpens });
+  // 切走 tab 再回来，停在原处（来源不同，位置各记各的）。
+  const scroll = rememberScroll(`home:${activeSource().kind}`);
+  // The rows' wave, played as the page is entered (not when it is returned to).
+  const wave = createListWave({ isTop: () => currentRoute().name === "home", reenter: rootOpens, quiet: scroll.restored });
 
   return (
-    <AppPage title="首页" testID="page-home">
-      <Scroll class="flex-1" contentClass={pageEnd()}>
+    <AppPage title="首页" testID="page-home" scroll={scroll}>
+      <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <Text role="header" class="px-6 pt-2 pb-4 text-4xl font-bold text-foreground" style={enter("fadeInUp")}>
           {greeting()}
         </Text>
