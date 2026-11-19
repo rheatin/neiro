@@ -1,4 +1,7 @@
-# macOS UI build: fetch the pinned neiro-core Release SDK and verify the UI crate & TSX.
+# macOS UI build: verify the UI crate & TSX. The neiro-core SDK lives in a
+# private repository: with a `CORE_RELEASE_TOKEN` secret this job also fetches
+# it and runs the engine integration test; without one the checks still run,
+# as `cargo check`, `cargo test --lib` and `nsh check` compile only.
 name: macos
 
 on:
@@ -10,7 +13,12 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
+    env:
+      # A token that can read the private rheatin/neiro-core release assets.
+      # The default GITHUB_TOKEN is scoped to this repository, so a download
+      # from neiro-core answers 404 ("release not found").
+      GH_TOKEN: ${{ secrets.CORE_RELEASE_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -18,17 +26,24 @@ jobs:
         run: rustup toolchain install stable-aarch64-apple-darwin --profile minimal
 
       - name: Fetch prebuilt neiro-core SDK
-        env:
-          GH_TOKEN: ${{ secrets.CORE_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        if: env.GH_TOKEN != ''
         run: |
           chmod +x scripts/fetch-core.sh
           ./scripts/fetch-core.sh
+
+      - name: SDK not fetched (no CORE_RELEASE_TOKEN)
+        if: env.GH_TOKEN == ''
+        run: echo "::notice::CORE_RELEASE_TOKEN is not set, so the private neiro-core SDK is not fetched. The checks below compile and run lib tests only; add the secret to also run engine_shutdown."
 
       - name: Check UI Rust crate
         run: cargo check --manifest-path ui/Cargo.toml
 
       - name: Test UI Rust crate (lib)
         run: cargo test --manifest-path ui/Cargo.toml --lib
+
+      - name: Test engine shutdown against the SDK
+        if: env.GH_TOKEN != ''
+        run: cargo test --manifest-path ui/Cargo.toml --test engine_shutdown
 
       - name: Check UI TSX (if nsh available)
         run: |
