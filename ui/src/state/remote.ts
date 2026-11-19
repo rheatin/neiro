@@ -5,10 +5,11 @@
 import { cleanup, computed, effect, signal, Storage, untracked } from "nsh";
 import { engine, registerRemoteTrackLookup, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
-import { playQueue, registerRemotePlayer, playTrack } from "./player";
+import { notifyRemoteFetchFailed, playAll, playQueue, registerRemotePlayer, playTrack } from "./player";
 import { registerRemoteCatalog } from "./catalog";
 import { ALL_ID } from "./sources";
 import { activeSourceId, registerRemoteActivator, registerRemoteDisconnector, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
+import { notify } from "./feedback";
 
 const CONFIG_KEY = "remote:config";
 
@@ -302,6 +303,12 @@ effect(() => {
 export function cachedRemoteTracks(serverId: string): RemoteTrack[] {
   cacheVersion();
   return serverCache.get(serverId) ?? [];
+}
+
+/** 只给测试注入某台服务器上次拉到的列表（真实数据来自 Storage）。 */
+export function setCachedRemoteTracksForTest(serverId: string, tracks: RemoteTrack[]): void {
+  serverCache.set(serverId, tracks);
+  cacheVersion.update((v) => v + 1);
 }
 
 export const allRemoteTracks = computed<RemoteTrack[]>(() => {
@@ -743,23 +750,6 @@ export function asLocalTrack(track: RemoteTrack, path: string): Track {
   };
 }
 
-/** 点击一行：`fetchRemote(id)` 进缓存，`remote_fetched` 带回 path，直
- * 接 `play(path)`。等待中给该行转圈。 */
-export function playRemote(track: RemoteTrack): void {
-  playIntent = track.id;
-  playTracks.set(track.id, track);
-  if (fetchingId(track.id)) return;
-  fetchingIds.update((set) => new Set(set).add(track.id));
-  try {
-    engine.fetchRemote(track.id);
-  } catch (error) {
-    reportEngineFailure(error, "取流失败");
-    if (playIntent === track.id) playIntent = null;
-    playTracks.delete(track.id);
-    unfetchId(track.id);
-  }
-}
-
 /** 点远程列表的第 `index` 首:取流播放,并在当前曲开始后只预取下一首。
  * 远程曲目在缓存里才有本地路径,而 Base 会整首下载;所以不再一次拉 10 首,
  * 只把下一首准备好,其余等真正播到时再取。 */
@@ -800,6 +790,8 @@ engine.subscribeRemoteFetched(({ track, path }) => {
       if (playIntent === track.id) playIntent = null;
       playTracks.delete(track.id);
       reportEngineFailure(new Error("E_REMOTE: 服务器没有回这个文件的缓存路径"), "取流失败");
+      // 播放上下文正等这一行时，让它跳到下一首能播的，而不是停死。
+      notifyRemoteFetchFailed(track.id);
       return;
     }
     fetchedPaths.set(track.id, path);
@@ -836,6 +828,68 @@ export function cachedRemotePath(track: RemoteTrack): string | null {
   return fetchedPaths.get(track.id) ?? null;
 }
 
+/** 一行远程曲目属于哪台服务器：当前实时列表优先，其次各服务器的缓存。 */
+function ownerServerOf(track: RemoteTrack): string | null {
+  if (remoteTracks().some((row) => row.id === track.id)) return activeEngineServerId || null;
+  for (const [serverId, list] of serverCache) {
+    if (list.some((row) => row.id === track.id)) return serverId;
+  }
+  return null;
+}
+
+/** 引擎此刻是否真的连着这台服务器：`fetchRemote(id)` 只会问它。 */
+function engineServes(serverId: string): boolean {
+  const server = servers().find((s) => s.id === serverId);
+  if (!server) return false;
+  const status = engine.remoteStatus();
+  return status.configured && status.baseUrl === server.baseUrl;
+}
+
+/** A fetch waiting for its server to become the one the engine talks to. */
+interface DeferredRemoteFetch {
+  owner: string;
+  track: RemoteTrack;
+  /** null plays the row (last click wins); otherwise the path goes here. */
+  then: ((path: string) => void) | null;
+}
+
+const deferredFetches: DeferredRemoteFetch[] = [];
+const DEFERRED_FETCH_TIMEOUT = 15_000;
+let deferredTimer: ReturnType<typeof setTimeout> | null = null;
+
+function armDeferredTimer(): void {
+  if (deferredTimer) return;
+  deferredTimer = setTimeout(() => {
+    deferredTimer = null;
+    if (deferredFetches.length === 0) return;
+    deferredFetches.length = 0;
+    reportEngineFailure(new Error("E_REMOTE: 切换服务器超时"), "取流失败");
+  }, DEFERRED_FETCH_TIMEOUT);
+}
+
+/** A row from a server the engine is not connected to would be fetched from
+ * the wrong server (same id, different file). Switch to its server first and
+ * finish the fetch once that server is the engine's. Returns true when the
+ * call was deferred. */
+function waitForOwner(track: RemoteTrack, then: ((path: string) => void) | null): boolean {
+  const owner = ownerServerOf(track);
+  if (!owner || engineServes(owner)) return false;
+  if (then === null) {
+    // A new row was clicked: drop the playback intent that never landed.
+    for (let i = deferredFetches.length - 1; i >= 0; i--) {
+      if (deferredFetches[i].then === null) deferredFetches.splice(i, 1);
+    }
+  }
+  deferredFetches.push({ owner, track, then });
+  armDeferredTimer();
+  if (activeEngineServerId !== owner) {
+    const label = servers().find((s) => s.id === owner)?.label ?? "远程服务器";
+    notify(`正在切换到 ${label}…`);
+    void activateServer(owner);
+  }
+  return true;
+}
+
 /** Drops this run's known remote cache paths and pending playback intents:
  * after a disk clean the old paths are facts no longer. */
 export function forgetFetchedRemotePaths(): void {
@@ -844,6 +898,11 @@ export function forgetFetchedRemotePaths(): void {
   playIntent = null;
   playTracks.clear();
   fetchingIds.set(new Set());
+  deferredFetches.length = 0;
+  if (deferredTimer) {
+    clearTimeout(deferredTimer);
+    deferredTimer = null;
+  }
 }
 
 /** Fetches a remote row and runs `then` with the cached path (no play).
@@ -855,6 +914,7 @@ export function withRemotePath(track: RemoteTrack, then: (path: string) => void)
     then(cached);
     return;
   }
+  if (waitForOwner(track, then)) return;
   const current = fetchedActions.get(track.id) ?? [];
   current.push(then);
   fetchedActions.set(track.id, current);
@@ -888,7 +948,7 @@ effect(() => {
 });
 
 registerRemoteCatalog(
-  () => remoteTracks().map(remoteAsTrack),
+  () => allRemoteTracks().map(remoteAsTrack),
   (path) => {
     const rt = remoteTrackForCachePath(path);
     return rt ? asLocalTrack(rt, path) : undefined;
@@ -915,5 +975,66 @@ registerRemotePlayer({
   },
   cancelPlayIntent: () => {
     playIntent = null;
+    for (let i = deferredFetches.length - 1; i >= 0; i--) {
+      if (deferredFetches[i].then === null) deferredFetches.splice(i, 1);
+    }
   },
+});
+
+/** 点击一行：`fetchRemote(id)` 进缓存，`remote_fetched` 带回 path，直
+ * 接 `play(path)`。等待中给该行转圈。 */
+export function playRemote(track: RemoteTrack): void {
+  playIntent = track.id;
+  playTracks.set(track.id, track);
+  if (waitForOwner(track, null)) return;
+  if (fetchingId(track.id)) return;
+  fetchingIds.update((set) => new Set(set).add(track.id));
+  try {
+    engine.fetchRemote(track.id);
+  } catch (error) {
+    reportEngineFailure(error, "取流失败");
+    if (playIntent === track.id) playIntent = null;
+    playTracks.delete(track.id);
+    unfetchId(track.id);
+  }
+}
+
+/** “播放全部”的远程入口:共享 shuffleMode,随机时首曲也随机。 */
+export function playAllRemote(rows: RemoteTrack[]): void {
+  playAll(rows.map(remoteAsTrack));
+}
+
+// 服务器切好了：把之前推迟的取流接着做完。切到别处则作废（最后一次点击
+// 为准），连接失败也立即清掉，不让回调悬空。
+effect(() => {
+  const status = engine.remoteStatus();
+  remoteTracks();
+  remoteLoadingState();
+  servers();
+  if (deferredFetches.length === 0) return;
+  untracked(() => {
+    for (let i = deferredFetches.length - 1; i >= 0; i--) {
+      if (deferredFetches[i].owner !== activeEngineServerId) deferredFetches.splice(i, 1);
+    }
+    const owner = activeEngineServerId;
+    const server = servers().find((s) => s.id === owner);
+    if (!owner || !server) return;
+    if (remoteLoadingState() === "error") {
+      for (let i = deferredFetches.length - 1; i >= 0; i--) {
+        if (deferredFetches[i].owner === owner) deferredFetches.splice(i, 1);
+      }
+      return;
+    }
+    if (!status.configured || status.baseUrl !== server.baseUrl) return;
+    const ready = deferredFetches.filter((entry) => entry.owner === owner);
+    if (ready.length === 0) return;
+    for (const entry of ready) {
+      const at = deferredFetches.indexOf(entry);
+      if (at >= 0) deferredFetches.splice(at, 1);
+    }
+    for (const entry of ready) {
+      if (entry.then) withRemotePath(entry.track, entry.then);
+      else if (playIntent === entry.track.id) playRemote(entry.track);
+    }
+  });
 });

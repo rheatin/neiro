@@ -1117,6 +1117,11 @@ export class Engine implements Backend {
   setPlayerForTest(p: Partial<Player>): void {
     playerSig.update((prev) => ({ ...prev, ...p }));
   }
+
+  /** Tests: pretend the engine is (or is no longer) configured for a server. */
+  setRemoteStatusForTest(status: RemoteStatus): void {
+    remoteStatusSig.set(status);
+  }
 }
 
 /** The engine the stores share: made once (the slot keeps a hot update from

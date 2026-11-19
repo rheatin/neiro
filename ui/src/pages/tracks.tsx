@@ -4,7 +4,7 @@
 // files restarts the load.
 // 包含 Hi-Fi 格式过滤胶囊栏（全部/Hi-Res/DSD/无损/喜欢）、批量管理模式联动、播放全部与随机播放。
 
-import { effect, List, Scroll, signal, Text, token, untracked, View } from "nsh";
+import { computed, effect, List, Scroll, signal, Text, token, untracked, View } from "nsh";
 import { Button, Input } from "nsh/base";
 import {
   addRoot,
@@ -24,19 +24,18 @@ import {
 } from "../state/catalog";
 import { AppPage } from "../components/page";
 import { TrackHeader, TrackRow } from "../components/library/tracks";
-import { playFromRows, playQueue } from "../state/player";
+import { playAll, playFromRows, shuffleMode } from "../state/player";
 import { EmptyState, ErrorState, RowsSkeleton } from "../components/ui/feedback";
 import { ActionButton, focusRing } from "../components/ui/controls";
 import { createListWave, enter, type ListWave } from "../components/ui/motion";
 import { currentRoute, rootOpens, switchTo, HOME } from "../nav";
 import { activeSource, ALL_ID, selectSource } from "../state/sources";
-import { queueRemoteFrom, remoteLoadingState, remoteTracks, retryRemote } from "../state/remote";
+import { playAllRemote, queueRemoteFrom, remoteLoadingState, remoteTracks, retryRemote } from "../state/remote";
 import { RemoteTrackRow } from "./remote";
 import { barSize, wideTracks } from "../components/layout";
 import { SelectionBar } from "../components/library/selection-bar";
 import { beginSelection, endSelection, selectionActive } from "../state/queue";
 import { CardGrid } from "../components/library/cards";
-import { shuffled } from "../state/shuffle";
 import { engine } from "../backend/engine";
 import { Icon } from "../components/ui/icons";
 import { albumKey, type Album, type Artist, type RemoteTrack, type Track } from "../backend/types";
@@ -49,8 +48,7 @@ import {
 } from "../state/library-prefs";
 
 function TrackToolbar(props: {
-  onPlayAll: () => void;
-  onShuffle: () => void;
+  play: () => void;
 }) {
   const currentPill = () => trackFilterPill();
   const PILLS: { key: TrackFilterPill; label: string; icon?: "heart" }[] = [
@@ -68,8 +66,12 @@ function TrackToolbar(props: {
       {/* Action Buttons & Filter Pills Row */}
       <View class="flex-row flex-wrap items-center justify-between gap-2">
         <View class="flex-row items-center gap-1.5">
-          <ActionButton label="播放全部" icon="play" onPress={props.onPlayAll} />
-          <ActionButton label="随机播放" icon="shuffle" variant="outline" onPress={props.onShuffle} />
+          <ActionButton
+            label={shuffleMode() ? "随机播放" : "顺序播放"}
+            icon={shuffleMode() ? "shuffle" : "play"}
+            selected={shuffleMode()}
+            onPress={props.play}
+          />
           <ActionButton
             label={selecting() ? "完成管理" : "批量管理"}
             icon="check"
@@ -149,13 +151,13 @@ export function TracksPage() {
   // in on their own).
   const wave = createListWave({ isTop: () => currentRoute().name === "tracks", reenter: rootOpens });
   const state = () => tracksState();
-  const rawList = () => homeTracks();
-  const list = () => sortAndFilterTracks(rawList());
+  const rawList = computed(() => homeTracks());
+  const list = computed(() => sortAndFilterTracks(rawList(), { query: trackFilterQuery() }));
   const showAlbum = wideTracks();
 
   const remote = () => activeSource().kind === "remote";
-  const rawRemote = () => remoteTracks();
-  const filteredRemote = () => sortAndFilterRemoteTracks(rawRemote());
+  const rawRemote = computed(() => remoteTracks());
+  const filteredRemote = computed(() => sortAndFilterRemoteTracks(rawRemote(), { query: trackFilterQuery() }));
 
   /** A folder picked in the sidebar is this page's subject: it says which one
    * instead of claiming to be every track. */
@@ -208,8 +210,7 @@ export function TracksPage() {
                       <Text class="px-6 pb-2 text-xs text-muted-foreground">远程库未连上</Text>
                     </If>
                     <TrackToolbar
-                      onPlayAll={() => playFromRows(list(), 0)}
-                      onShuffle={() => playQueue(shuffled(list()), 0)}
+                      play={() => playAll(list())}
                     />
                     <TrackHeader showAlbum={showAlbum} />
                   </View>
@@ -269,8 +270,7 @@ export function TracksPage() {
                     </Text>
                   </View>
                   <TrackToolbar
-                    onPlayAll={() => queueRemoteFrom(filteredRemote(), 0)}
-                    onShuffle={() => queueRemoteFrom(shuffled(filteredRemote()), 0)}
+                    play={() => playAllRemote(filteredRemote())}
                   />
                   <TrackHeader showAlbum={showAlbum} />
                 </View>
@@ -314,9 +314,7 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave }) {
   const sourceArtists = () => homeArtists();
 
   const q = () => query().trim().toLowerCase();
-  const filteredTracks = (): Track[] => {
-    return sortAndFilterTracks(sourceTracks(), { query: q() });
-  };
+  const filteredTracks = computed(() => sortAndFilterTracks(sourceTracks(), { query: q() }));
   const filteredAlbums = (): Album[] => {
     const term = q();
     if (!term) return sourceAlbums();
@@ -344,11 +342,11 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave }) {
           {sourceTracks().length} 首曲目 · {sourceAlbums().length} 张专辑 · {sourceArtists().length} 位歌手
         </Text>
         <View class="flex-row flex-wrap items-center gap-2 pt-1">
-          <ActionButton label="播放全部" onPress={() => playFromRows(sourceTracks(), 0)} />
           <ActionButton
-            label="随机播放"
-            variant="outline"
-            onPress={() => playQueue(shuffled(sourceTracks()), 0)}
+            label={shuffleMode() ? "随机播放" : "顺序播放"}
+            icon={shuffleMode() ? "shuffle" : "play"}
+            selected={shuffleMode()}
+            onPress={() => playAll(sourceTracks())}
           />
           <ActionButton label="重新扫描" variant="outline" onPress={() => engine.scanFolder(root)} />
           <ActionButton

@@ -150,11 +150,13 @@ export function ActionButton(props: {
   label: string;
   icon?: IconName;
   variant?: "primary" | "outline";
+  selected?: boolean;
   disabled?: boolean;
   testID?: string;
   onPress: () => void;
 }) {
-  const primary = () => props.variant === "primary";
+  const selected = () => props.selected ?? false;
+  const primary = () => props.variant === "primary" || selected();
   // A new label comes in (not the first: that one just shows).
   const labelMotion = lazyMotion();
   let shown = untracked(() => props.label);
@@ -169,6 +171,7 @@ export function ActionButton(props: {
       testID={props.testID}
       accessibilityLabel={props.label}
       disabled={props.disabled ?? false}
+      selected={selected()}
       onPress={props.onPress}
       class={`group h-9 flex-row items-center justify-center gap-1.5 overflow-hidden rounded-full px-4 ${PRESS} ${PRESSED} disabled:opacity-40 ${focusRing} ${
         primary() ? "bg-foreground shadow-sm hover:shadow-md" : "border border-border bg-secondary hover:border-muted-foreground"

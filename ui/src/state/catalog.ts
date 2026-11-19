@@ -34,7 +34,7 @@ function currentSourceKind(): "all" | "local" | "remote" {
   return sourceKindFn?.() ?? "all";
 }
 
-/** 当前已连接/已加载的那台远程服务器映射成的曲库 Track 列表。 */
+/** 已注册的远程目录映射成的曲库 Track 列表（「全部」包含所有服务器）。 */
 export const activeRemoteTracks: Accessor<Track[]> = computed(() => remoteTracksAccessor().get());
 
 registerTrackLookup((path) => trackForPath(path));
@@ -216,7 +216,7 @@ export const visibleTracks: Accessor<Track[]> = computed(() =>
   rootsLoaded() ? allTracks().filter((t) => underRoots(t.path)) : allTracks(),
 );
 
-/** 「全部」= 本地曲库 + 当前已连接/已加载的远程列表（不拼所有服务器缓存）。 */
+/** 「全部」= 本地曲库 + 所有已配置远程服务器的实时或缓存列表。 */
 export const allLibraryTracks: Accessor<Track[]> = computed(() => {
   if (currentSourceKind() !== "all") return visibleTracks();
   const merged = new Map<string, Track>();
