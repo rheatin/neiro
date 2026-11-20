@@ -171,27 +171,36 @@ export function CardRow(props: { title?: string; items: LibraryItem[]; class?: s
   );
 }
 
-/** Cards that wrap into a filling grid (a page's or an artist's list). */
+/** Cards that wrap into a filling grid (a page's or an artist's list).
+ * Virtualized: it lays out at its full length in the page's `Scroll`
+ * (`viewport="parent"`) and only the rows near the viewport exist, so a
+ * library of thousands of albums opens as fast as one of ten. */
 export function CardGrid(props: { items: LibraryItem[]; class?: string; wave?: ListWave; delay?: number }) {
   const wave = untracked(() => props.wave?.child(props.delay ?? 0));
   const minWidth = CARD_WIDTH;
   // As many columns as fit at a card's width, widened to share the row out
   // so no room is left at its end. The width one card gets is worked out
-  // for its play button.
+  // for its play button, and the row's height from that card.
   const room = signal(0);
+  const columns = () => {
+    const w = room();
+    return w > 0 ? Math.max(1, Math.floor(w / minWidth)) : 4;
+  };
   const cardWidth = () => {
     const w = room();
-    return w > 0 ? w / Math.max(1, Math.floor(w / minWidth)) : minWidth;
+    return w > 0 ? w / columns() : minWidth;
   };
   return (
-    <View
-      class={props.class ?? "grid"}
-      style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${minWidth}px, 1fr))` }}
-      onLayout={(e) => room.set(e.bounds.size.width)}
-    >
-      <Each of={props.items} key={cardKey}>
+    <View class={props.class} onLayout={(e) => room.set(e.bounds.size.width)}>
+      <List
+        viewport="parent"
+        numColumns={columns()}
+        each={props.items}
+        keyExtractor={cardKey}
+        estimatedItemSize={rowHeight(cardWidth())}
+      >
         {(item, index) => <Card item={item()} index={index()} wave={wave} width={cardWidth()} fill />}
-      </Each>
+      </List>
     </View>
   );
 }
