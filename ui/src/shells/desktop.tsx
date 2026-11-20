@@ -2,8 +2,8 @@
 // panels on wide ones) down the left, and the pages on the right with the
 // player bar floating over their bottom, a pill the pages scroll behind.
 
-import { token, View } from "nsh";
-import { barSize, measureShell, railSidebar, sidebarShown, sidebarWidth } from "../components/layout";
+import { token, View, type ViewRef } from "nsh";
+import { measureShell, railSidebar, sidebarShown, sidebarWidth } from "../components/layout";
 import { animateLayoutOn } from "../components/ui/motion";
 import { Sidebar } from "../components/library/sidebar";
 import { PlayerBar } from "../components/player/player-bar";
@@ -15,9 +15,12 @@ import { NavControls, TrailingControls } from "../components/header";
 /** The pages' shell. The sidebar folds away entirely (remembered across
  * runs); the player bar hides under Now Playing, which covers it. */
 export function DesktopShell() {
-  // Crossing a breakpoint (the sidebar opening or narrows, the bar
-  // rearranging), what moves glides there.
-  animateLayoutOn(() => `${sidebarWidth()}|${barSize()}`);
+  // The sidebar opening or narrowing moves the pages: what moves glides
+  // there. The player bar rearranges itself (its own scope). Scoped to the
+  // shell's row: only the frames that change move, not every frame of the
+  // commit.
+  let shell: ViewRef | undefined;
+  animateLayoutOn(() => shell, () => `${sidebarWidth()}`);
   return (
     <View class="flex-1" style={{ backgroundColor: token("background") }}>
       {/* The header's controls, after the name: Back/Forward and the
@@ -30,6 +33,9 @@ export function DesktopShell() {
         </View>
       </TitleBar>
       <View
+        ref={(node) => {
+          shell = node;
+        }}
         class="flex-1 flex-row gap-2 px-2 pb-2"
         style={{ paddingTop: titleBarArea().height > 0 ? 0 : 8 }}
         onLayout={(e) => measureShell(e.bounds.size.width)}

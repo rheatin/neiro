@@ -2,7 +2,7 @@
 // the page, its rim faint and its shadow small. Houses what plays and its
 // controls (transport, seek, volume, shuffle, repeat, queue, and output drawer).
 
-import { View } from "nsh";
+import { View, type ViewRef } from "nsh";
 import { IconButton } from "../ui/controls";
 import { animateLayoutOn, enter } from "../ui/motion";
 import { barSize } from "../layout";
@@ -42,11 +42,17 @@ function PlaybarHeart() {
  * what fits rather than running out of the pill. */
 export function PlayerBar() {
   // Crossing a bar-size breakpoint, the contents glide to their new
-  // arrangement.
-  animateLayoutOn(() => barSize());
+  // arrangement. Scoped to the bar: hidden pages are not animated with it.
+  let bar: ViewRef | undefined;
+  animateLayoutOn(() => bar, () => barSize());
   const stacked = () => barSize() === "stacked";
   return (
-    <View style={enter("fadeInUp", 120)}>
+    <View
+      ref={(node) => {
+        bar = node;
+      }}
+      style={enter("fadeInUp", 120)}
+    >
       <View class={stacked() ? "relative rounded-[36px] shadow-xl" : "relative rounded-full shadow-xl"}>
         {/* PlayerGlass: pill 的表面 + 一层低强度的同一光（PlayerGlass 的
             strength 0.6；surface token player 不透明）——照 spotish。 */}

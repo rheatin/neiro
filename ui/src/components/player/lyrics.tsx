@@ -6,7 +6,7 @@
 // the engine has answered, the panel says it is reading rather than showing an
 // empty box that could be mistaken for "no lyrics".
 
-import { effect, Scroll, signal, Text, token, untracked, View } from "nsh";
+import { effect, Scroll, signal, Text, token, untracked, View, type ViewRef } from "nsh";
 import { animateLayoutOn } from "../ui/motion";
 import { player } from "../../state/player";
 import {
@@ -63,8 +63,10 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
   });
   const active = () => activeLine(lyrics().lines, player().positionMs + lyricOffset());
   // Each new active line moves the window by one row; the layout animation is
-  // what makes that read as the words sliding rather than jumping.
-  animateLayoutOn(() => `${active()}|${lyrics().synced}|${lyrics().path}`);
+  // what makes that read as the words sliding rather than jumping. Scoped to
+  // the panel: the rest of the sheet (and the hidden pages) do not animate.
+  let panel: ViewRef | undefined;
+  animateLayoutOn(() => panel, () => `${active()}|${lyrics().synced}|${lyrics().path}`);
   /** The lines in view: the one playing, centred, with four either side. A
    * timestamped file follows the playback this way instead of scrolling a
    * wall of text; an untimestamped one has no centre to follow, so it shows
@@ -91,6 +93,9 @@ export function LyricsPanel(props: { large?: boolean; hideLabel?: boolean }) {
   };
   return (
     <View
+      ref={(node) => {
+        panel = node;
+      }}
       class={`min-h-24 flex-1 justify-start ${props.large ? "gap-3" : "gap-1.5"}`}
       accessibilityLabel="歌词"
       onWheel={(e: { delta: { x: number; y: number }; deltaMode: string }) => {

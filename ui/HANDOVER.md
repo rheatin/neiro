@@ -241,6 +241,35 @@ bit-perfect / bypassed / Policy / Output 等**保留英文原文**，中文只�
   `.iss`（缺 ISCC 时只警告，`.nsh/out/Neiro` 与 zip 仍产出）——部署双击版
   仍拷 `Neiro.exe`+`nsh/`+引擎 DLL。
 
+## NSH 0.6.1 升级（2026-11-20）
+
+- **版本对齐**：CLI `0.5.0 (61a11d5 nightly 2026-11-12)` → `0.6.1`；
+  `Cargo.toml` 的 nsh-core/nsh-base 从 nightly `4aeefa8`（0.6.0）改为
+  `tag = "v0.6.1"`，CLI、生成的 host 与 crate 同一版本。
+- **布局动画改作用域**：`animateLayoutOn` 从全局 `LayoutAnimation.configureNext`
+  改为 `ViewRef.animateLayout`，四处调用（桌面壳 / 播放条 / Now Playing
+  内容 / 歌词）各自带 ref。只动画真正变化的帧，不再把常驻的隐藏 tab 层一起
+  送进布局动画；插入/删除不再由它淡入，出现的内容由自身入场负责。
+- **Now Playing 弹簧**：内容入场用 `MotionSpec.spring`（stiffness 420 /
+  damping 40），歌词与封面重排用 `animateLayout({ type: "spring",
+  stiffness: 320, damping: 34 })`；Sheet 自身滑入仍是 NSH 的。
+- **顺带获得**（不改代码）：`Each`/List 只更新保留行、一行一个 cell、keyed
+  行按 identity 保留 cell 与尺寸、`numColumns` 变化锚定首个可见项、窗口
+  resize 保持滚动可见项、macOS 隐藏视图不抢键盘焦点；0.6.1 修了释放中的
+  memo、keyed 行索引、文本内容保留和复合动画取消。
+- **测量**（macOS 真窗口，800 首 / 160 专辑）：已建层的 tab 切换同步
+  `0.13–0.23ms`、12 帧内最大间隔 `16.9–18.8ms`（约一帧）；首次进专辑网格
+  `2.93ms` + 首帧 `292.7ms`，首次进曲目页 `2.85ms` + `201.1ms`。
+- **验证**：`nsh check` 通过；`cargo test --lib` 24 通过；`nsh test` 92 项
+  88 通过，4 个失败与升级前一致（dither-policy / info-drawer-play /
+  player-bar / share-mode，均为测试 host 无引擎时 `debugPlay` 后 `暂停`
+  不出现）。
+- **环境**：本机 stable 工具链缺 `rustc` 二进制，`rustup update stable`
+  修复到 rustc/cargo 1.100.0；不修则 `nsh check` 的 cargo 调用失败。
+- **iOS（以后）**：0.6 起有系统 Switch/DateTimePicker、系统菜单/分享、
+  sheet detents、SplitView 自适应列、reactive size class 等；iOS 布局未定，
+  暂不接，但共享 TSX 不要写死 macOS 假设。
+
 ## 曲单"新建没反应/不能加歌"（2026-11-13）
 
 两个 UI 冻结快照的 bug：

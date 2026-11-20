@@ -3,7 +3,7 @@
 // it). A flat near-black sheet: the cover carries what colour there is;
 // the controls are quiet.
 
-import { cleanup, createMotion, effect, signal, token, View, windowSize } from "nsh";
+import { cleanup, createMotion, effect, signal, token, View, windowSize, type MotionSpec, type ViewRef } from "nsh";
 import { MusicLight } from "../ui/toolbar-fx";
 import { lightEffect } from "../../state/visual";
 import { isPlayingSpectrum } from "../../state/visualiser";
@@ -50,10 +50,17 @@ function NowPlayingHeart(props: { size?: number }) {
  * opened the words and then closed them on the next frame. */
 const lyricsOpen = signal(false);
 
-/** Now Playing, open while the overlay store says so. */
+/** Now Playing, open while the overlay store says so. Its content rises on a
+ * spring (the sheet's own slide is NSH's), so opening it settles rather than
+ * stopping. */
+const SPRING_OPEN: MotionSpec = {
+  keyframes: { opacity: [0, 1], translateY: [24, 0] },
+  spring: { stiffness: 420, damping: 40 },
+};
+
 export function NowPlayingSheet() {
   return (
-    <AppSheet open={nowPlayingOpen()} onOpenChange={setNowPlayingOpen} side="bottom" full testID="now-playing">
+    <AppSheet open={nowPlayingOpen()} onOpenChange={setNowPlayingOpen} side="bottom" full testID="now-playing" entrance={SPRING_OPEN}>
       <NowPlayingContent />
     </AppSheet>
   );
@@ -87,8 +94,15 @@ function NowPlayingContent() {
    * Narrower than this, the words take the whole sheet. */
   const TWO_COLUMN = 880;
   const lyricsOnly = () => lyricsOpen() && windowSize().width < TWO_COLUMN;
-  // Rearranging (above / beside / no cover), it glides there.
-  animateLayoutOn(() => `${side()}|${coverSize() > 0}|${lyricsOpen()}|${lyricsOnly()}`);
+  // Rearranging (above / beside / no cover, the words coming or going), it
+  // springs there. Scoped to the sheet's content: the hidden pages behind it
+  // are laid out too, but their frames are not animated.
+  let content: ViewRef | undefined;
+  animateLayoutOn(
+    () => content,
+    () => `${side()}|${coverSize() > 0}|${lyricsOpen()}|${lyricsOnly()}`,
+    { type: "spring", stiffness: 320, damping: 34 },
+  );
 
   const track = () => trackForPath(player().path ?? "");
   const openAlbum = () => {
@@ -154,7 +168,12 @@ function NowPlayingContent() {
   );
 
   return (
-    <View class="relative flex-1 bg-sidebar pb-[env(safe-area-inset-bottom)]">
+    <View
+      ref={(node) => {
+        content = node;
+      }}
+      class="relative flex-1 bg-sidebar pb-[env(safe-area-inset-bottom)]"
+    >
       {/* The music light: the page's background, rising from the bottom and
           driven by the engine's own frames. It runs only while playing and is
           still otherwise. */}
