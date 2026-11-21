@@ -25,10 +25,31 @@ let remoteHooks: {
   playRemoteByPath: (path: string) => boolean;
   withRemotePathByPath: (path: string, then: (fetched: string) => void) => boolean;
   resolveRemotePath?: (path: string) => string | null;
+  /** Whether the provider serves this row's bytes as it plays, so there is
+   * nothing to download first. Answered by the provider's own declaration,
+   * not by a list kept here. */
+  playsSource?: (path: string) => boolean;
   cancelPlayIntent?: () => void;
 } | null = null;
 export function registerRemotePlayer(hooks: NonNullable<typeof remoteHooks>): void {
   remoteHooks = hooks;
+}
+
+/** The path to play for a row: a remote row already in the cache plays from
+ * that file (it works offline, and its bytes are local), anything else keeps
+ * the path it was given. */
+function playablePath(path: string): string {
+  if (!path.startsWith("remote://")) return path;
+  return remoteHooks?.resolveRemotePath?.(path) ?? path;
+}
+
+/** Whether a remote row has to be downloaded before it can play: no cached
+ * file, and a provider with no source form. A row served by its provider is
+ * played from its own URL, and a local path never needs a fetch. */
+function needsRemoteFetch(path: string): boolean {
+  if (!path.startsWith("remote://")) return false;
+  if (remoteHooks?.resolveRemotePath?.(path)) return false;
+  return !(remoteHooks?.playsSource?.(path) ?? false);
 }
 
 // ---- The player as shown ----------------------------------------------------
@@ -387,7 +408,7 @@ export function cyclePlaybackMode(): void {
 }
 
 export function playNextTrack(track: Track): void {
-  if (track.path.startsWith("remote://")) {
+  if (needsRemoteFetch(track.path)) {
     if (
       remoteHooks?.withRemotePathByPath(track.path, (cachedPath) => {
         playNextTrack({ ...track, path: cachedPath });
@@ -396,12 +417,12 @@ export function playNextTrack(track: Track): void {
       return;
     }
   }
-  engine.playNext([trackToQueueItem(track)]);
+  engine.playNext([trackToQueueItem({ ...track, path: playablePath(track.path) })]);
   notify(`已设为下一首播放：${track.title || "曲目"}`);
 }
 
 export function playLaterTrack(track: Track): void {
-  if (track.path.startsWith("remote://")) {
+  if (needsRemoteFetch(track.path)) {
     if (
       remoteHooks?.withRemotePathByPath(track.path, (cachedPath) => {
         playLaterTrack({ ...track, path: cachedPath });
@@ -410,7 +431,7 @@ export function playLaterTrack(track: Track): void {
       return;
     }
   }
-  engine.playLater([trackToQueueItem(track)]);
+  engine.playLater([trackToQueueItem({ ...track, path: playablePath(track.path) })]);
   notify(`已设为稍后播放：${track.title || "曲目"}`);
 }
 
@@ -421,7 +442,7 @@ export function playTrack(track: Track): void {
   // A new play supersedes a remote fetch still on its way: that answer must
   // not take over the track the listener just chose.
   remoteHooks?.cancelPlayIntent?.();
-  if (track.path.startsWith("remote://")) {
+  if (needsRemoteFetch(track.path)) {
     if (
       remoteHooks?.withRemotePathByPath(track.path, (cachedPath) => {
         playTrack({ ...track, path: cachedPath });
@@ -431,9 +452,10 @@ export function playTrack(track: Track): void {
     }
   }
   const at = Date.now();
+  const path = playablePath(track.path);
   send(
     {
-      path: track.path,
+      path,
       title: track.title,
       artist: track.artist,
       album: track.album,
@@ -443,7 +465,7 @@ export function playTrack(track: Track): void {
       at,
     },
     () => {
-      engine.playContext([trackToQueueItem(track)], 0);
+      engine.playContext([trackToQueueItem({ ...track, path })], 0);
     },
     "播放失败",
   );
@@ -484,9 +506,10 @@ export function playAll(rows: Track[]): void {
   playQueue(rows, start);
 }
 
-/** Plays the clicked row immediately and fills its context in order. An
- * uncached remote row is fetched before queueing, and one fill stops at the
- * first such row: the next one is fetched when playback reaches it. */
+/** Plays the clicked row immediately and fills its context in order. A
+ * remote row whose provider serves its bytes is queued as it is; one from a
+ * provider without a source form is fetched first, and one fill stops at the
+ * first such row: the next is fetched when playback reaches it. */
 export function playQueue(rows: Track[], firstIndex = 0): void {
   if (rows.length === 0) return;
   const idx = Math.min(Math.max(firstIndex, 0), rows.length - 1);
@@ -508,7 +531,7 @@ export function playQueue(rows: Track[], firstIndex = 0): void {
     inFlight: new Set(),
   };
 
-  if (first.path.startsWith("remote://") && !remoteHooks?.resolveRemotePath?.(first.path)) {
+  if (needsRemoteFetch(first.path)) {
     const context = playContext;
     const startRemote = () => {
       context.inFlight.add(first.path);
@@ -560,7 +583,7 @@ function fillPlayContext(): void {
       const row = context.rows[context.cursor];
       const isRemote = row.path.startsWith("remote://");
       const cached = isRemote ? remoteHooks?.resolveRemotePath?.(row.path) ?? null : null;
-      if (isRemote && !cached) {
+      if (isRemote && !cached && needsRemoteFetch(row.path)) {
         if (context.inFlight.has(row.path)) return;
         context.inFlight.add(row.path);
         const handled = remoteHooks?.withRemotePathByPath(row.path, (cachedPath) => {

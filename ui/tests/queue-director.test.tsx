@@ -153,6 +153,38 @@ test("Remote 虚拟路径拦截：playTrack 拦截 remote:// 前缀并通过钩�
   }
 });
 
+test("Remote source form：源直读的曲目按虚拟路径播放，不下载", () => {
+  const paths = ["remote://a.flac", "remote://b.flac", "remote://c.flac"];
+  const rows = paths.map((path, i) => createDummyTrack(path, `Source ${i}`, "Artist", "Album", 100000));
+  let fetchCalls = 0;
+  registerRemotePlayer({
+    playRemoteByPath: () => true,
+    withRemotePathByPath: () => {
+      fetchCalls += 1;
+      return true;
+    },
+    resolveRemotePath: () => null,
+    playsSource: (path) => path.startsWith("remote://"),
+  });
+
+  const played: string[] = [];
+  const later: string[] = [];
+  const originalPlayContext = (engine as any).playContext.bind(engine);
+  const originalPlayLater = (engine as any).playLater.bind(engine);
+  (engine as any).playContext = (items: any[]) => { played.push(items[0].path); };
+  (engine as any).playLater = (items: any[]) => later.push(...items.map((item: any) => item.path));
+
+  try {
+    playQueue(rows, 0);
+    expect(played).toEqual(["remote://a.flac"]);
+    expect(later).toEqual(["remote://b.flac", "remote://c.flac"]);
+    expect(fetchCalls).toBe(0);
+  } finally {
+    (engine as any).playContext = originalPlayContext;
+    (engine as any).playLater = originalPlayLater;
+  }
+});
+
 test("远程上下文：当前曲推进后按原序补齐整张列表，同时只取流一首", () => {
   const remotePaths = Array.from({ length: 6 }, (_, i) => `remote://song-${i}.flac`);
   const rows = remotePaths.map((path, i) => createDummyTrack(path, `Remote ${i}`, "Artist", "Album", 120000 + i));

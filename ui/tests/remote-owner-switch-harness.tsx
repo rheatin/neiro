@@ -4,6 +4,7 @@ import { signal, Text, View, mount } from "nsh";
 import { Button } from "nsh/base";
 import { engine } from "../src/backend/engine";
 import { servers } from "../src/state/sources";
+import { remoteProviders } from "../src/state/plugins";
 import { remoteTracks, playRemote, setCachedRemoteTracksForTest, withRemotePath } from "../src/state/remote";
 
 remoteTracks.set([]);
@@ -33,8 +34,10 @@ setCachedRemoteTracksForTest("srv-b", [
 const fetches = signal<string[]>([]);
 const switches = signal<string[]>([]);
 const fetched = signal("");
+const played = signal("");
 
 (engine as any).fetchRemote = (id: string) => fetches.update((xs) => [...xs, id]);
+(engine as any).playContext = (items: any[]) => played.set(items[0]?.path ?? "");
 (engine as any).listRemote = () => {};
 (engine as any).setRemote = (_kind: string, params: Record<string, string>) => {
   switches.update((xs) => [...xs, params.base_url ?? ""]);
@@ -50,6 +53,7 @@ function Harness() {
       <Text>{`Fetches: ${fetches().join(",") || "none"}`}</Text>
       <Text>{`Switched: ${switches().join(",") || "none"}`}</Text>
       <Text>{`Fetched: ${fetched() || "none"}`}</Text>
+      <Text>{`Played: ${played() || "none"}`}</Text>
       <Button
         accessibilityLabel="播放 B 服务器的曲目"
         onPress={() => withRemotePath(track, (path) => fetched.set(path))}
@@ -63,6 +67,15 @@ function Harness() {
         class="rounded bg-secondary px-3 py-1"
       >
         play b2
+      </Button>
+      <Button
+        accessibilityLabel="声明 source 形式"
+        onPress={() =>
+          remoteProviders.set([{ id: "jellyfin", name: "Jellyfin", fields: [], source: true }])
+        }
+        class="rounded bg-secondary px-3 py-1"
+      >
+        source
       </Button>
       <Button
         accessibilityLabel="模拟 B 服务器就绪"

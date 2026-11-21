@@ -39,7 +39,7 @@ The UI host must remain backward and forward compatible across `neiro-core` SDK 
 
 - **`remote://` Virtual Paths**:
   Tracks originating from remote sources (Jellyfin, Navidrome, WebDAV) carry virtual paths in the format `remote://{id}.{ext}`.
-  The host player MUST intercept `path.startsWith("remote://")` before dispatching to the native playback engine. The first track must resolve to a valid local cache path via `withRemotePath` / `playRemoteByPath`; subsequent items in context queues must resolve to cached local files or be deferred until cached, preventing C++ decoders from opening raw virtual URIs.
+  Base intercepts them: `open_path` opens the provider's byte-range source instead of a local file, so the host dispatches the virtual path directly and no URI reaches a C++ decoder. The host must only do so for a provider whose descriptor declares `source: true` (`ui/src/state/remote.ts`, `servesSource`); a provider without a source form, and a row already in the cache, are still resolved to a local path via `withRemotePath` before playback. Context queues may carry virtual paths as they are.
 - **Callback Array & Epoch Guards**:
   In `ui/src/state/remote.ts`, `fetchedActions` must hold an array of callbacks (`Array<(path: string) => void>`) so concurrent requests for the same track do not drop handlers. All pagination must verify `listEpoch` to discard outdated page responses.
 

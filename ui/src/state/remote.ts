@@ -1,12 +1,14 @@
 // 远程库的状态: 服务器会话 (一组凭据，仅保存在 Storage 中 — 它们不进源码),
 // `remote_listed` 数据已合并完整 (搜索会在本地过滤)，封面已连接至共享的
-// artwork 栈, 流程 设为 fetch→fetched→play。
+// artwork 栈。有 source 形式的服务器 (描述符里的 `source`) 直接按虚拟路径
+// 播放，Base 边播边读；没有的走 fetch→fetched→play。
 
 import { cleanup, computed, effect, signal, Storage, untracked } from "nsh";
 import { engine, registerRemoteTrackLookup, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
 import { notifyRemoteFetchFailed, playAll, playQueue, registerRemotePlayer, playTrack } from "./player";
 import { registerRemoteCatalog } from "./catalog";
+import { remoteProviders } from "./plugins";
 import { ALL_ID } from "./sources";
 import { activeSourceId, registerRemoteActivator, registerRemoteDisconnector, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
 import { notify } from "./feedback";
@@ -723,12 +725,33 @@ export const remoteTrackForPath = remoteTrackForCachePath;
 // cached file's own tags, which a stale/preloaded analysis can get wrong.
 registerRemoteTrackLookup((path) => remoteTrackForCachePath(path) ?? undefined);
 
-// ---- 播放：fetch → fetched → play --------------------------------------------
+// ---- 播放：source 直读，或 fetch → fetched → play -----------------------------
 
 export function remoteAsTrack(rt: RemoteTrack): Track {
-  const ext = (rt.container || "flac").toLowerCase();
-  const path = cachedRemotePath(rt) ?? `remote://${rt.id}.${ext}`;
+  const path = cachedRemotePath(rt) ?? virtualPathOf(rt);
   return asLocalTrack(rt, path);
+}
+
+/** The address Base opens when it plays a row without downloading it. */
+function virtualPathOf(track: RemoteTrack): string {
+  const ext = (track.container || "flac").toLowerCase();
+  return `remote://${track.id}.${ext}`;
+}
+
+/** Whether Base can serve this row's bytes itself. The provider declares it in
+ * its descriptor, so the host keeps no list of its own; a provider that only
+ * answers with a download reports false and the row is fetched first. The
+ * declaration is about the provider, not the row: the caller still has to be
+ * pointed at the server the row belongs to. */
+function servesSource(track: RemoteTrack): boolean {
+  const owner = ownerServerOf(track);
+  const kind = owner
+    ? servers().find((s) => s.id === owner)?.kind
+    : remoteConfig()?.kind ?? "";
+  if (!kind) return false;
+  // The descriptor list merges the two Jellyfin forms into one entry.
+  const id = kind === "jellyfin_token" ? "jellyfin" : kind;
+  return remoteProviders().some((provider) => provider.id === id && provider.source === true);
 }
 
 /** 把远程行变成播放意图所需的形状（path 是引擎缓存后的本地文件路径）。 */
@@ -750,9 +773,9 @@ export function asLocalTrack(track: RemoteTrack, path: string): Track {
   };
 }
 
-/** 点远程列表的第 `index` 首:取流播放,并在当前曲开始后只预取下一首。
- * 远程曲目在缓存里才有本地路径,而 Base 会整首下载;所以不再一次拉 10 首,
- * 只把下一首准备好,其余等真正播到时再取。 */
+/** 点远程列表的第 `index` 首:曲目原地播放,后面按列表顺序进队列。
+ * 有 source 形式的服务器(Base 直接按 Range 读)不产生下载;没有的才在
+ * 轮到它之前取流,所以两种服务器共用这一条路径。 */
 export function queueRemoteFrom(rows: RemoteTrack[], index: number): void {
   const at = Math.min(Math.max(index, 0), Math.max(rows.length - 1, 0));
   if (rows.length === 0) return;
@@ -851,6 +874,9 @@ interface DeferredRemoteFetch {
   track: RemoteTrack;
   /** null plays the row (last click wins); otherwise the path goes here. */
   then: ((path: string) => void) | null;
+  /** The callback wants the row's own address, not a downloaded file: once
+   * the server is up it is handed the virtual path and nothing is fetched. */
+  source: boolean;
 }
 
 const deferredFetches: DeferredRemoteFetch[] = [];
@@ -871,7 +897,11 @@ function armDeferredTimer(): void {
  * the wrong server (same id, different file). Switch to its server first and
  * finish the fetch once that server is the engine's. Returns true when the
  * call was deferred. */
-function waitForOwner(track: RemoteTrack, then: ((path: string) => void) | null): boolean {
+function waitForOwner(
+  track: RemoteTrack,
+  then: ((path: string) => void) | null,
+  source: boolean = false,
+): boolean {
   const owner = ownerServerOf(track);
   if (!owner || engineServes(owner)) return false;
   if (then === null) {
@@ -880,7 +910,7 @@ function waitForOwner(track: RemoteTrack, then: ((path: string) => void) | null)
       if (deferredFetches[i].then === null) deferredFetches.splice(i, 1);
     }
   }
-  deferredFetches.push({ owner, track, then });
+  deferredFetches.push({ owner, track, then, source });
   armDeferredTimer();
   if (activeEngineServerId !== owner) {
     const label = servers().find((s) => s.id === owner)?.label ?? "远程服务器";
@@ -966,12 +996,23 @@ registerRemotePlayer({
   withRemotePathByPath: (path, then) => {
     const rt = remoteTrackForCachePath(path);
     if (!rt) return false;
+    // A provider with a source form hands the row's own address to the
+    // caller; the switch to its server, when one is needed, is the only wait.
+    if (!cachedRemotePath(rt) && servesSource(rt)) {
+      if (waitForOwner(rt, then, true)) return true;
+      then(path);
+      return true;
+    }
     withRemotePath(rt, then);
     return true;
   },
   resolveRemotePath: (path) => {
     const rt = remoteTrackForCachePath(path);
     return rt ? cachedRemotePath(rt) : null;
+  },
+  playsSource: (path) => {
+    const rt = remoteTrackForCachePath(path);
+    return rt ? servesSource(rt) : false;
   },
   cancelPlayIntent: () => {
     playIntent = null;
@@ -987,6 +1028,13 @@ export function playRemote(track: RemoteTrack): void {
   playIntent = track.id;
   playTracks.set(track.id, track);
   if (waitForOwner(track, null)) return;
+  if (servesSource(track)) {
+    // Nothing to fetch: Base reads the track from the server as it plays.
+    playIntent = null;
+    playTracks.delete(track.id);
+    playTrack(remoteAsTrack(track));
+    return;
+  }
   if (fetchingId(track.id)) return;
   fetchingIds.update((set) => new Set(set).add(track.id));
   try {
@@ -1033,7 +1081,8 @@ effect(() => {
       if (at >= 0) deferredFetches.splice(at, 1);
     }
     for (const entry of ready) {
-      if (entry.then) withRemotePath(entry.track, entry.then);
+      if (entry.then && entry.source) entry.then(virtualPathOf(entry.track));
+      else if (entry.then) withRemotePath(entry.track, entry.then);
       else if (playIntent === entry.track.id) playRemote(entry.track);
     }
   });

@@ -350,6 +350,9 @@ export interface ProviderDescriptor {
   id: string;
   name: string;
   fields: ProviderField[];
+  /** The provider serves a track's bytes itself: its rows play from
+   * `remote://{id}.{ext}` without a download. Absent from an older Base. */
+  source?: boolean;
 }
 
 /** Open string for any dynamically registered remote provider plugin. */
