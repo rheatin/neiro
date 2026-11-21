@@ -10,12 +10,15 @@ publish = false
 #
 # The `nsh-*` crates are taken from the same release as this repository's
 # `nsh` CLI (v0.6.1), so the app and the generated hosts share one `nsh-core`.
+# Base is opened at run time on desktop, never linked: the DLL sits beside the
+# binary and the UI still builds where the engine was never built. On iOS the
+# core is linked at build time, so the loader is not compiled there at all.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+libloading = "0.8"
+
 [dependencies]
 nsh-core = { git = "https://github.com/longbridge/nsh", tag = "v0.6.1" }
 nsh-base = { git = "https://github.com/longbridge/nsh", tag = "v0.6.1" }
-# Base is opened at run time, never linked: the DLL sits beside the binary and
-# the UI still builds where the engine was never built.
-libloading = "0.8"
 # The online lyrics search. Base uses the same client for the remote server, so
 # the version matches and the lock file gains nothing new.
 ureq = { version = "3.5.1", features = ["rustls"] }

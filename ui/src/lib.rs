@@ -2285,6 +2285,20 @@ impl Base {
         serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
     }
 
+    /// The linked core's ABI version on iOS; `0` elsewhere, where the core is
+    /// loaded at run time and has no link-time version. The Stage 0 spike
+    /// displays it to prove the host → Rust → C link.
+    pub fn base_abi_version(&self) -> u32 {
+        #[cfg(target_os = "ios")]
+        {
+            crate::engine::ios::abi_version()
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            0
+        }
+    }
+
     /// Deletes one cache bucket's files (`all` = every bucket), keeps the
     /// directories, and answers the stats as they are after the clean.
     pub fn clear_cache(&self, kind: String) -> Result<String, String> {

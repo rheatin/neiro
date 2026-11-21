@@ -929,6 +929,18 @@ export class Engine implements Backend {
     }
   }
 
+  /** The linked core's ABI version on iOS; 0 where the core is loaded at run time. */
+  baseAbiVersion(): number {
+    const base = this.#base;
+    if (!base) return 0;
+    try {
+      return base.baseAbiVersion();
+    } catch (error) {
+      console.warn("neiro: core ABI 版本读不出来:", String(error));
+      return 0;
+    }
+  }
+
   /** Deletes one cache bucket; the answer is the stats after the clean. */
   clearCache(kind: string): string | null {
     const base = this.#base;

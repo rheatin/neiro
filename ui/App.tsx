@@ -3,7 +3,7 @@
 // shows over every shell — Now Playing, the 输出信息 drawer, the toasts —
 // with the keyboard shortcuts. Pages and stores live under `src/`.
 
-import { effect, host, keymap, mount, untracked, View } from "nsh";
+import { effect, host, keymap, mount, platform, Text, untracked, View } from "nsh";
 import { engine } from "./src/backend/engine";
 import { health } from "./src/state/engine";
 import { layout, UnsupportedPage } from "./src/components/layout";
@@ -131,7 +131,7 @@ function App() {
 
   return (
     <View class="flex-1 bg-sidebar">
-      <If when={layout() === "desktop"} else={<UnsupportedPage />}>
+      <If when={layout() === "desktop"} else={platform.os === "ios" ? <IosSpikePage /> : <UnsupportedPage />}>
         <If when={isStudioMinimalShell()} else={<DesktopShell />}>
           <StudioMinimalShell />
         </If>
@@ -147,6 +147,18 @@ function App() {
       <ContextMenuHost />
       <Toaster bottomOffset={96} />
       <Shortcuts />
+    </View>
+  );
+}
+
+/** Stage 0 only: proves host → Rust → C on iOS before the shell exists. */
+function IosSpikePage() {
+  return (
+    <View class="flex-1 items-center justify-center gap-3 bg-sidebar px-8">
+      <Text class="text-2xl font-bold text-foreground">Neiro iOS spike</Text>
+      <Text class="text-sm text-muted-foreground">
+        core ABI {engine.baseAbiVersion()} · engine {health().status}
+      </Text>
     </View>
   );
 }
