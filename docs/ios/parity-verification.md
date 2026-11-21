@@ -29,6 +29,8 @@ iOS 与 macOS 共用同一份 `ui/src/**`（组件、页面、状态、格式化
 | 无动态引擎 | 通过 | `otool -L` 无 `neiro_base` 动态库条目，只有系统框架（UIKit、Metal、Foundation 等） |
 | 无 `libloading` | 通过 | iOS target 下找不到任何 `libloading` 产物；残留的 `_dlopen/_dlsym` 来自 `nsh-platform-ios`、`nsh-platform-apple`、`objc2`，与引擎加载无关 |
 | 链接 ABI 与启动 | 通过 | 模拟器（iPhone 18 Pro · iOS 27.2）启动，页面显示 **core ABI 2 · engine ready**，截图 `ios-spike-simulator.png` |
+| 设备 target 编译 | 通过 | `cargo check --manifest-path ui/Cargo.toml --target aarch64-apple-ios` 通过（真机切片，37 秒） |
+| 缺产物即失败 | 通过 | 把 `NEIRO_BASE_IOS_XC` 指向不存在的路径，构建立刻失败并点名 `ios-arm64/libneiro_base.a`，不再退化成符号缺失报错 |
 
 `nsh run --target ios` 在模拟器上的实测：
 
