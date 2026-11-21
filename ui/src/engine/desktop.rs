@@ -33,7 +33,7 @@ pub(super) fn open(library: &Path) -> Result<(Engine, std::sync::mpsc::Receiver<
     let mut tried = Vec::new();
     let all_candidates = dll_candidates(exe_dir.as_deref());
     // Prefer a candidate that exports the full plugin C ABI (`NAE_BaseListPlugins`)
-    // when a local `../neiro-core` build is newer than a cached v0.2.0 prebuilt.
+    // when a local `../neiro-core` build is newer than a cached prebuilt.
     let mut ordered = Vec::with_capacity(all_candidates.len());
     let mut legacy = Vec::new();
     for c in all_candidates {
