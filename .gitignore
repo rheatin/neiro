@@ -46,6 +46,9 @@ desktop.ini
 # scripts/build-ffmpeg-lgpl-macos.sh. Large, and reproducible from a URL.
 vendor/
 
+# Toolchain and package-manager directories. Never part of the source.
+node_modules/
+
 # Runtime libraries staged beside Base for the Windows host.
 base/*.dll
 base/*.wav
