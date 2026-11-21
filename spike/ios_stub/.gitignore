@@ -1,0 +1,3 @@
+# Rebuilt by `build-xcframework.sh`; the spike ships the C source, not the
+# archives it produces.
+neiro_base.xcframework/
