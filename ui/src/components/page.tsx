@@ -9,14 +9,29 @@
 import { type JSX, View } from "nsh";
 import { NavPage } from "nsh/base";
 import { pageAnimation } from "../nav";
+import { layout } from "./layout";
 import type { PageScroll } from "../state/page-scroll";
 import { selectionActive } from "../state/queue";
 import { BackToTop } from "./ui/back-to-top";
+import { MobileSettingsButton } from "./header";
 
-export function AppPage(props: { title: string; testID: string; children: JSX.Element; scroll?: PageScroll }) {
+export function AppPage(props: {
+  title: string;
+  testID: string;
+  children: JSX.Element;
+  scroll?: PageScroll;
+  /** A tab root: iOS shows the gear in its system header, which is the only
+   * chrome the mobile shell draws above the pages. */
+  gear?: boolean;
+}) {
   return (
-    <NavPage title={props.title} testID={props.testID} animation={pageAnimation()}>
-      <View class="absolute inset-0 bg-sidebar">
+    <NavPage
+      title={props.title}
+      testID={props.testID}
+      animation={pageAnimation()}
+      headerRight={props.gear && layout() === "mobile" ? <MobileSettingsButton /> : undefined}
+    >
+      <View class="min-h-0 flex-1 bg-sidebar">
         {props.children}
         {/* 多选时批量条占着同一个角落，回到顶部让开。 */}
         <If when={(props.scroll?.showTop() ?? false) && !selectionActive()}>

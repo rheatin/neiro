@@ -9,6 +9,7 @@ import { AlbumsPage } from "../pages/albums";
 import { AlbumPage, ArtistPage } from "../pages/detail";
 import { ArtistsPage } from "../pages/artists";
 import { HomePage } from "../pages/home";
+import { LibraryPage } from "../pages/library";
 import { RemoteAlbumPage, RemoteArtistPage, RemotePage, RemotePlaylistPage } from "../pages/remote";
 import { LikedPage, PlaylistPage, PlaylistsPage } from "../pages/user-collections";
 import { EqPage } from "../pages/eq";
@@ -22,6 +23,8 @@ function page(route: Route) {
   switch (route.name) {
     case "home":
       return <HomePage />;
+    case "library":
+      return <LibraryPage />;
     case "search":
       return <SearchPage />;
     case "albums":

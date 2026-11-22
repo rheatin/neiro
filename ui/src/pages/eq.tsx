@@ -20,7 +20,7 @@ export function EqPage() {
   const scroll = rememberScroll("eq");
   return (
     <AppPage title="均衡器" testID="page-eq" scroll={scroll}>
-      <Scroll class="flex-1" contentClass="px-6 pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
+      <Scroll class="flex-1" contentClass={`px-6 ${pageEnd()}`} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <View class="flex-row items-center gap-2 pt-2 pb-3">
           <Button
             accessibilityLabel="返回"

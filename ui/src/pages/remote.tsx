@@ -50,7 +50,7 @@ import { AppPage } from "../components/page";
 import { enter } from "../components/ui/motion";
 import { Icon } from "../components/ui/icons";
 import { TrackHeader } from "../components/library/tracks";
-import { wideTracks } from "../components/layout";
+import { layout, pageEnd, wideTracks } from "../components/layout";
 import { RemoteCardsRow, type RemoteCardItem } from "../components/library/remote-cards";
 import { shuffleMode } from "../state/player";
 import { selectSource, ALL_ID } from "../state/sources";
@@ -193,12 +193,19 @@ export function RemotePage() {
   };
 
   return (
-    <AppPage title={srv()?.label ?? "远程服务器"} testID="page-remote" scroll={scroll}>
-      <Scroll class="flex-1" contentClass="pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
+    <AppPage title={srv()?.label ?? "远程服务器"} testID="page-remote" scroll={scroll} gear>
+      <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <If
           when={srv()}
           else={
-            <EmptyState title="没有连接的服务器" detail="在侧栏或设置中连接一个服务器；凭据只留在本机。">
+            <EmptyState
+              title="没有连接的服务器"
+              detail={
+                layout() === "mobile"
+                  ? "在设置中连接一个服务器；凭据只留在本机。"
+                  : "在侧栏或设置中连接一个服务器；凭据只留在本机。"
+              }
+            >
               <ActionButton label="连接服务器…" onPress={() => setServerDialogOpen(true)} />
             </EmptyState>
           }
@@ -449,7 +456,7 @@ export function RemotePlaylistPage(props: { id: string; name: string }) {
 
   return (
     <AppPage title={props.name || "播放列表"} testID={`page-remote-playlist-${props.id}`} scroll={scroll}>
-      <Scroll class="flex-1" contentClass="pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
+      <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <View class="px-6 pt-4 pb-4 flex-row items-center gap-5" role="header">
           <If when={first()}>
             <RemoteCover id={first()!.id} coverArt={first()!.coverArt} size={112} class="shadow-md" />
@@ -503,7 +510,7 @@ export function RemoteAlbumPage(props: { serverId: string; album: string; artist
   const scroll = rememberScroll(`remoteAlbum:${props.serverId}\u0000${props.album}\u0000${props.artist}`);
   return (
     <AppPage title={props.album} testID="page-remote-album" scroll={scroll}>
-      <Scroll class="flex-1" contentClass="pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
+      <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <View class="px-6 pt-4 pb-4 flex-row items-center gap-5" role="header">
           <If when={first()}>
             <RemoteCover id={first()!.id} coverArt={first()!.coverArt} size={112} class="shadow-md" />
@@ -559,7 +566,7 @@ export function RemoteArtistPage(props: { serverId: string; artist: string }) {
   const scroll = rememberScroll(`remoteArtist:${props.serverId}\u0000${props.artist}`);
   return (
     <AppPage title={props.artist} testID="page-remote-artist" scroll={scroll}>
-      <Scroll class="flex-1" contentClass="pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
+      <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <View class="px-6 pt-4 pb-4 flex-row items-center gap-5" role="header">
           <If when={first()}>
             <RemoteCover id={first()!.id} coverArt={first()!.coverArt} size={112} round class="shadow-md" />

@@ -22,6 +22,7 @@ import { activeRemoteServer, queueRemoteFrom, remoteArtistGroups, remoteLoadingS
 import { open } from "../nav";
 import { RemoteCardsRow } from "../components/library/remote-cards";
 import { AppPage } from "../components/page";
+import { pageEnd } from "../components/layout";
 import { CardGrid } from "../components/library/cards";
 import { CardsSkeleton, EmptyState, ErrorState } from "../components/ui/feedback";
 import { ActionButton, focusRing } from "../components/ui/controls";
@@ -222,7 +223,7 @@ export function ArtistsPage() {
                   <If
                     when={isListView()}
                     else={
-                      <Scroll class="flex-1" contentClass="px-6 pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
+                      <Scroll class="flex-1" contentClass={`px-6 ${pageEnd()}`} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
                         <CardGrid items={items()} />
                       </Scroll>
                     }
@@ -232,7 +233,7 @@ export function ArtistsPage() {
                       keyExtractor={(a) => a.artist}
                       estimatedItemSize={56}
                       class="flex-1"
-                      contentClass="px-6 pb-28 gap-1.5"
+                      contentClass={`px-6 gap-1.5 ${pageEnd()}`}
                       contentOffset={scroll.contentOffset}
                       onScroll={scroll.onScroll}
                       ref={scroll.ref}
@@ -269,7 +270,7 @@ export function ArtistsPage() {
               <If
                 when={isListView()}
                 else={
-                  <Scroll class="flex-1" contentClass="px-6 pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
+                  <Scroll class="flex-1" contentClass={`px-6 ${pageEnd()}`} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
                     <RemoteCardsRow grid variant="artist" items={remoteGroups()} />
                   </Scroll>
                 }
@@ -279,7 +280,7 @@ export function ArtistsPage() {
                   keyExtractor={(g) => g.key}
                   estimatedItemSize={56}
                   class="flex-1"
-                  contentClass="px-6 pb-28 gap-1.5"
+                  contentClass={`px-6 gap-1.5 ${pageEnd()}`}
                   contentOffset={scroll.contentOffset}
                   onScroll={scroll.onScroll}
                   ref={scroll.ref}

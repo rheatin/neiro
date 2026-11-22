@@ -3,12 +3,13 @@
 // shows over every shell — Now Playing, the 输出信息 drawer, the toasts —
 // with the keyboard shortcuts. Pages and stores live under `src/`.
 
-import { effect, host, keymap, mount, platform, Text, untracked, View } from "nsh";
+import { effect, host, keymap, mount, untracked, View } from "nsh";
 import { engine } from "./src/backend/engine";
 import { health } from "./src/state/engine";
 import { layout, UnsupportedPage } from "./src/components/layout";
 import { DesktopShell } from "./src/shells/desktop";
 import { StudioMinimalShell } from "./src/shells/studio-minimal";
+import { MobileShell } from "./src/shells/mobile";
 import { PluginManagerDialog } from "./src/components/ui/plugin-dialog";
 import { NowPlayingSheet } from "./src/components/player/now-playing";
 import { OutputSheet } from "./src/components/player/output-drawer";
@@ -23,7 +24,6 @@ import { QueueSheet } from "./src/components/player/queue-sheet";
 import {
   bumpVolume,
   next,
-  player,
   seek,
   toggle as togglePlayback,
 } from "./src/state/player";
@@ -137,7 +137,7 @@ function App() {
 
   return (
     <View class="flex-1 bg-sidebar">
-      <If when={layout() === "desktop"} else={platform.os === "ios" ? <IosSpikePage /> : <UnsupportedPage />}>
+      <If when={layout() === "desktop"} else={layout() === "mobile" ? <MobileShell /> : <UnsupportedPage />}>
         <If when={isStudioMinimalShell()} else={<DesktopShell />}>
           <StudioMinimalShell />
         </If>
@@ -151,35 +151,8 @@ function App() {
       <LyricsWriteDialog />
       <PlaylistDialogs />
       <ContextMenuHost />
-      <Toaster bottomOffset={96} />
+      <Toaster bottomOffset={layout() === "mobile" ? 72 : 96} />
       <Shortcuts />
-    </View>
-  );
-}
-
-/** Stage 0 only: proves host → Rust → C on iOS before the shell exists. */
-function IosSpikePage() {
-  return (
-    <View class="flex-1 items-center justify-center gap-3 bg-sidebar px-8">
-      <Text class="text-2xl font-bold text-foreground">Neiro iOS spike</Text>
-      <Text class="text-sm text-muted-foreground">
-        core ABI {engine.baseAbiVersion()} · engine {health().status}
-      </Text>
-      <Text class="text-sm text-muted-foreground">状态 {player().state}</Text>
-      <View
-        class="rounded-full bg-foreground px-6 py-3 active:opacity-70"
-        accessibilityLabel="播放测试音 / Play test tone"
-        role="button"
-        onPress={() => {
-          try {
-            engine.playTone();
-          } catch (error) {
-            console.error("neiro: play tone failed:", error);
-          }
-        }}
-      >
-        <Text class="text-sm font-bold text-background">播放测试音 / Play test tone</Text>
-      </View>
     </View>
   );
 }

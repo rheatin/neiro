@@ -33,7 +33,7 @@ import { activeSource, ALL_ID, selectSource } from "../state/sources";
 import { rememberScroll, type PageScroll } from "../state/page-scroll";
 import { playAllRemote, queueRemoteFrom, remoteLoadingState, remoteTracks, retryRemote } from "../state/remote";
 import { RemoteTrackRow } from "./remote";
-import { barSize, wideTracks } from "../components/layout";
+import { barSize, pageEnd, wideTracks } from "../components/layout";
 import { SelectionBar } from "../components/library/selection-bar";
 import { beginSelection, endSelection, selectionActive } from "../state/queue";
 import { CardGrid } from "../components/library/cards";
@@ -226,7 +226,7 @@ export function TracksPage() {
                   </If>
                 )}
                 class="flex-1"
-                contentClass="pb-28"
+                contentClass={pageEnd()}
                 contentOffset={scroll.contentOffset}
                 onScroll={scroll.onScroll}
                 ref={scroll.ref}
@@ -248,7 +248,7 @@ export function TracksPage() {
               keyExtractor={(t) => t.id}
               estimatedItemSize={48}
               class="flex-1"
-              contentClass="pb-28"
+              contentClass={pageEnd()}
               contentOffset={scroll.contentOffset}
               onScroll={scroll.onScroll}
               ref={scroll.ref}
@@ -429,7 +429,7 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave; scroll: Pa
     <If
       when={activeTab() === "tracks"}
       else={
-        <Scroll class="flex-1" contentClass="pb-28" contentOffset={props.scroll.contentOffset} onScroll={props.scroll.onScroll} ref={props.scroll.ref}>
+        <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={props.scroll.contentOffset} onScroll={props.scroll.onScroll} ref={props.scroll.ref}>
           {renderHeader(false)}
           <If when={activeTab() === "albums"}>
             <View class="px-6">
@@ -449,7 +449,7 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave; scroll: Pa
         keyExtractor={(t) => t.path}
         estimatedItemSize={48}
         class="flex-1"
-        contentClass="pb-28"
+        contentClass={pageEnd()}
         contentOffset={props.scroll.contentOffset}
         onScroll={props.scroll.onScroll}
         ref={props.scroll.ref}
