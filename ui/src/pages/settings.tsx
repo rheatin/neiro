@@ -12,7 +12,14 @@ import { engine } from "../backend/engine";
 import { gaplessEnabled, setGaplessEnabled } from "../state/player";
 import { setOutputOpen, setPluginDialogOpen, setServerDialogOpen, sidebarCollapsed, toggleSidebar } from "../state/overlays";
 import { open, switchTo, REMOTE, TRACKS } from "../nav";
-import { addRoot, removeRootById, repairRoot, rootRecords, setHomeRoot } from "../state/catalog";
+import {
+  addRoot,
+  removeRootById,
+  repairRoot,
+  rootRecords,
+  scan,
+  setHomeRoot,
+} from "../state/catalog";
 import { servers, selectSource } from "../state/sources";
 import { cachedRemoteTracks, reconnectServer, removeServerById } from "../state/remote";
 import { EFFECT_NAMES, TOOLBAR_EFFECTS } from "../components/ui/toolbar-fx";
@@ -47,6 +54,11 @@ export function SettingsPage() {
   const gapless = () => gaplessEnabled();
   const serverList = () => servers();
   const localRoots = () => rootRecords();
+  const scanLabel = () => {
+    const at = scan().at;
+    if (at === null) return "";
+    return new Date(at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  };
   // 切走 tab 再回来，停在原处。
   const scroll = rememberScroll("settings");
 
@@ -303,6 +315,17 @@ export function SettingsPage() {
                     )}
                   </Each>
                 </View>
+              </If>
+
+              {/* 上一次扫描的结果：iOS 没有 watcher，这里的行是唯一能说明
+                  曲库是否还跟得上文件夹的地方。 */}
+              <If when={scan().running}>
+                <Text class="text-[11px] text-muted-foreground">正在扫描…</Text>
+              </If>
+              <If when={!scan().running && scan().at !== null}>
+                <Text class="text-[11px] text-muted-foreground">
+                  {`上次扫描 ${scanLabel()} · 变动 ${scan().lastAdded ?? 0} 个文件`}
+                </Text>
               </If>
             </View>
 

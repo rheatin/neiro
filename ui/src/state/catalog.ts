@@ -140,7 +140,11 @@ function parseStored(raw: unknown): { paths: string[]; records: LibraryRoot[] } 
 export const rootsLoaded = signal(false);
 /** Whether a scan is running, and how many tracks the last one added
  * (the 扫描中 line's count). */
-export const scan = signal<{ running: boolean; lastAdded: number | null }>({ running: false, lastAdded: null });
+export const scan = signal<{ running: boolean; lastAdded: number | null; at: number | null }>({
+  running: false,
+  lastAdded: null,
+  at: null,
+});
 
 /** Bumped when the index changed (a scan found or lost files): the pages
  * that already asked ask again. */
@@ -398,6 +402,35 @@ export function rescanAll(): void {
   }
 }
 
+/** Files a scan reported gone. They stay listed as unavailable until a scan
+ * finds them again (or the root they were under leaves the library): a
+ * folder on a card can disappear, and dropping the row would hide that. */
+const lostTracks = signal<Map<string, Track>>(new Map());
+
+/** The lost files still under a current root, in the order only lost ones
+ * have: the pages that render file rows append them. */
+export const missingTracks: Accessor<Track[]> = computed(() =>
+  [...lostTracks().values()].filter((track) => underRoots(track.path)),
+);
+
+/** What a finished scan leaves lost: `added` and `modified` came back, and
+ * `removed` rows are kept when the index still had them to show. Pure, so
+ * the rule is tested without an engine. */
+export function lostAfterScan(
+  before: Track[],
+  lost: Map<string, Track>,
+  event: { added: string[]; modified: string[]; removed: string[] },
+): Map<string, Track> {
+  const next = new Map(lost);
+  for (const path of event.added) next.delete(path);
+  for (const path of event.modified) next.delete(path);
+  for (const path of event.removed) {
+    const track = before.find((row) => row.path === path);
+    if (track) next.set(path, track);
+  }
+  return next;
+}
+
 function handleScan(event: { kind: string; added: string[]; modified: string[]; removed: string[]; rescan: boolean }): void {
   if (event.kind === "started") {
     scan.update((s) => ({ ...s, running: true }));
@@ -405,7 +438,8 @@ function handleScan(event: { kind: string; added: string[]; modified: string[]; 
   }
   if (event.kind === "done") {
     const changed = event.added.length + event.modified.length + event.removed.length;
-    scan.set({ running: false, lastAdded: changed });
+    scan.set({ running: false, lastAdded: changed, at: Date.now() });
+    lostTracks.update((lost) => lostAfterScan(untracked(allTracks), lost, event));
     if (changed > 0) dataEpoch.update((n) => n + 1);
     return;
   }
