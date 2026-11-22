@@ -21,6 +21,26 @@ use serde::Deserialize;
 pub mod engine;
 pub mod lyrics_providers;
 pub mod audio_session;
+#[cfg(target_os = "ios")]
+pub mod ios;
+
+/// A folder the user picked: the path to scan now, the bookmark to store,
+/// and the folder's own name.
+#[derive(Debug, Clone, Default, PartialEq, JsObject)]
+pub struct PickedFolderInfo {
+    pub path: String,
+    pub bookmark: String,
+    pub label: String,
+}
+
+/// A stored bookmark resolved for this launch: the path now, the bookmark
+/// to keep (a fresh one when the stored one was stale), and whether it was.
+#[derive(Debug, Clone, Default, PartialEq, JsObject)]
+pub struct FolderAccessInfo {
+    pub path: String,
+    pub bookmark: String,
+    pub stale: bool,
+}
 
 use crate::engine::{Analysis, Engine, RenderPath, Snapshot, WireEvent};
 
@@ -2845,7 +2865,81 @@ impl Base {
         paths.first().map(|path| path.to_string_lossy().into_owned())
     }
 
-    // ---- helpers -----------------------------------------------------------
+    /// Shows the system's folder picker and returns the folder with a
+    /// security-scoped bookmark of it. A picked folder's path is only valid
+    /// until the app is relaunched, so iOS keeps the folder by bookmark and
+    /// resolves it each launch (`resolve_folder_bookmark`); the desktop has
+    /// no such rule, and `pick_folder` is its own door. `None` when the user
+    /// cancelled.
+    pub async fn pick_folder_bookmark(
+        this: Instance<Self>,
+    ) -> Result<Option<PickedFolderInfo>, String> {
+        let _ = &this;
+        #[cfg(target_os = "ios")]
+        {
+            let Some(url) = ios::picker::pick_folder()? else {
+                return Ok(None);
+            };
+            let path = url
+                .path()
+                .map(|path| path.to_string())
+                .ok_or_else(|| "E_BOOKMARK: 选中的文件夹没有路径".to_owned())?;
+            let label = url
+                .lastPathComponent()
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| path.rsplit('/').next().unwrap_or_default().to_owned());
+            let bookmark = ios::bookmarks::create(&url)?;
+            Ok(Some(PickedFolderInfo {
+                path,
+                bookmark,
+                label,
+            }))
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            Err("E_BOOKMARK: 当前平台不支持文件夹书签，请用 pickFolder".to_owned())
+        }
+    }
+
+    /// Resolves a stored bookmark to the folder's path for this launch and
+    /// opens the app's access to it. `None` when the bookmark no longer
+    /// resolves: the user has to pick the folder again. The desktop stores
+    /// paths, not bookmarks, so there the stored value is the path.
+    pub fn resolve_folder_bookmark(&self, bookmark: String) -> Result<Option<FolderAccessInfo>, String> {
+        #[cfg(target_os = "ios")]
+        {
+            match ios::bookmarks::resolve(&bookmark) {
+                Ok(resolved) => Ok(Some(FolderAccessInfo {
+                    path: resolved.path,
+                    bookmark: resolved.bookmark,
+                    stale: resolved.stale,
+                })),
+                Err(error) => {
+                    // A stale folder is a state the user repairs, not a
+                    // failure of the call: the page says 需要重新选择.
+                    eprintln!("neiro: 书签解析失败：{error}");
+                    Ok(None)
+                }
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            Ok(Some(FolderAccessInfo {
+                path: bookmark.clone(),
+                bookmark,
+                stale: false,
+            }))
+        }
+    }
+
+    /// Stops the app's access to a folder that left the library (iOS); the
+    /// desktop keeps none.
+    pub fn release_folder_bookmark(&self, bookmark: String) {
+        #[cfg(target_os = "ios")]
+        ios::bookmarks::release(&bookmark);
+        #[cfg(not(target_os = "ios"))]
+        let _ = bookmark;
+    }
 
     /// Registers `listener` and posts the cached value, in one place: every
     /// listener with a current value behaves the same.

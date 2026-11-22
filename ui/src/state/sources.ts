@@ -9,7 +9,14 @@
 
 import { computed, effect, signal, Storage } from "nsh";
 import type { RemoteKind } from "../backend/types";
-import { addRoot, registerSourceKind, roots, rootsLoaded, scopedRoot, setHomeRoot } from "./catalog";
+import {
+  addRoot,
+  registerSourceKind,
+  rootRecords,
+  rootsLoaded,
+  scopedRoot,
+  setHomeRoot,
+} from "./catalog";
 import { isRemoteKindEnabled, registerPluginToggleHook } from "./plugins";
 import { notify } from "./feedback";
 
@@ -57,13 +64,15 @@ function serverSource(server: RemoteServer): Source {
   return { id: `remote:${server.id}`, kind: "remote", label: server.label, serverId: server.id };
 }
 
-/** 本地来源：全部 + 每个根目录（根目录 basename 作 label）。 */
+/** 本地来源：全部 + 每个解析出来的根目录。id 跟随记录（iOS 是 uuid，
+ * 桌面是路径），label 是用户选目录时看到的名字。没解析出来的根
+ * （书签失效）不出现在来源里：它没有可浏览的内容。 */
 export const localSources = computed<Source[]>(() => {
   const list: Source[] = [ALL, LOCAL_ALL];
   if (rootsLoaded()) {
-    for (const root of roots()) {
-      const base = root.replace(/\\/g, "/").split("/").pop() || root;
-      list.push({ id: `local:${root}`, kind: "local", label: base, root });
+    for (const record of rootRecords()) {
+      if (record.path === null) continue;
+      list.push({ id: `local:${record.id}`, kind: "local", label: record.label, root: record.path });
     }
   }
   return list;
@@ -213,7 +222,8 @@ effect(() => {
       const activeId = storedId === LOCAL_ALL_ID ? ALL_ID : storedId;
       activeSourceId.set(activeId);
       if (activeId.startsWith("local:") && activeId !== LOCAL_ALL_ID) {
-        setHomeRoot(activeId.slice("local:".length));
+        const record = rootRecords().find((row) => `local:${row.id}` === activeId);
+        setHomeRoot(record?.path ?? null);
       } else if (scopedRoot() === null) {
         // Nothing picked since boot: the stored choice stands. A folder picked
         // while this read was in flight is the newer fact, not this one.
@@ -227,9 +237,17 @@ effect(() => {
   })();
 });
 
+/** 本地来源在启动时可能比根目录记录先恢复（记录等引擎就绪才读）。记录
+ * 到了之后把作用域补上：来源 id 是 `local:{id}`，路径只在内存里。 */
+effect(() => {
+  const id = activeSourceId();
+  if (!id.startsWith("local:") || id === LOCAL_ALL_ID) return;
+  const record = rootRecords().find((row) => `local:${row.id}` === id);
+  if (record?.path && scopedRoot() === null) setHomeRoot(record.path);
+});
+
 /** 新增本地根（首页 Tab 的 + 文件夹），并切到它的来源。 */
 export async function pickAndAddRoot(): Promise<void> {
-  const before = roots().length;
-  await addRoot();
-  if (roots().length > before) selectSource(`local:${roots()[roots().length - 1]}`);
+  const added = await addRoot();
+  if (added) selectSource(`local:${added.id}`);
 }

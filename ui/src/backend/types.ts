@@ -436,6 +436,24 @@ export interface RemoteArtwork {
 
 // ---- The contract -----------------------------------------------------------
 
+/** A folder the user picked on iOS: the path to scan now, the
+ * security-scoped bookmark that keeps the folder across launches, and its
+ * own name. The path is memory-only; the bookmark is what is stored. */
+export interface PickedFolder {
+  path: string;
+  bookmark: string;
+  label: string;
+}
+
+/** A stored bookmark resolved for this launch. `stale` means iOS asked for a
+ * new bookmark, which comes back in `bookmark`; `null` from
+ * `resolveFolderBookmark` means the folder must be picked again. */
+export interface FolderAccess {
+  path: string;
+  bookmark: string;
+  stale: boolean;
+}
+
 /** What plays the music over the one Base the process owns (`engine.ts`).
  * Requests are sync: they throw `E_*` when the engine is gone. */
 export interface Backend {
@@ -489,6 +507,14 @@ export interface Backend {
   unwatchFolder(root: string): void;
   setReconcileInterval(seconds: number): void;
   pickFolder(): Promise<string | null>;
+  /** iOS: the folder picker with a security-scoped bookmark; the desktop
+   * rejects, because a path alone already survives there. */
+  pickFolderBookmark(): Promise<PickedFolder | null>;
+  /** iOS: resolve a stored bookmark and open access to the folder; the
+   * desktop returns the stored path as it is. `null` = pick again. */
+  resolveFolderBookmark(bookmark: string): FolderAccess | null;
+  /** iOS: stop the app's access to a folder that left the library. */
+  releaseFolderBookmark(bookmark: string): void;
 
   // Data requests and their events (the fire-and-forget round trip).
   listTracks(offset: number, limit: number): void;

@@ -12,7 +12,7 @@ import { engine } from "../backend/engine";
 import { gaplessEnabled, setGaplessEnabled } from "../state/player";
 import { setOutputOpen, setPluginDialogOpen, setServerDialogOpen, sidebarCollapsed, toggleSidebar } from "../state/overlays";
 import { open, switchTo, REMOTE, TRACKS } from "../nav";
-import { addRoot, removeRoot, roots, setHomeRoot } from "../state/catalog";
+import { addRoot, removeRootById, repairRoot, rootRecords, setHomeRoot } from "../state/catalog";
 import { servers, selectSource } from "../state/sources";
 import { cachedRemoteTracks, reconnectServer, removeServerById } from "../state/remote";
 import { EFFECT_NAMES, TOOLBAR_EFFECTS } from "../components/ui/toolbar-fx";
@@ -46,7 +46,7 @@ export function SettingsPage() {
   const res = () => resolvedPath();
   const gapless = () => gaplessEnabled();
   const serverList = () => servers();
-  const localRoots = () => roots();
+  const localRoots = () => rootRecords();
   // 切走 tab 再回来，停在原处。
   const scroll = rememberScroll("settings");
 
@@ -248,18 +248,24 @@ export function SettingsPage() {
               >
                 <View class="gap-2 pt-1">
                   <Each of={localRoots()}>
-                    {(root) => {
-                      const leaf = () => root().replace(/\\/g, "/").split("/").pop() || root();
-                      return (
-                        <View class="flex-row items-center justify-between rounded-(--radius) bg-secondary/50 px-3 py-2">
-                          <View class="min-w-0 flex-1 pr-3">
-                            <Text class="text-sm font-medium text-foreground truncate">{leaf()}</Text>
-                            <Text class="text-[11px] font-mono text-muted-foreground truncate">{root()}</Text>
-                          </View>
-                          <View class="flex-row items-center gap-1.5 shrink-0">
+                    {(record) => (
+                      <View class="flex-row items-center justify-between rounded-(--radius) bg-secondary/50 px-3 py-2">
+                        <View class="min-w-0 flex-1 pr-3">
+                          <Text class="text-sm font-medium text-foreground truncate">{record().label}</Text>
+                          <If
+                            when={record().path !== null}
+                            else={
+                              <Text class="text-[11px] text-destructive truncate">需要重新选择</Text>
+                            }
+                          >
+                            <Text class="text-[11px] font-mono text-muted-foreground truncate">{record().path}</Text>
+                          </If>
+                        </View>
+                        <View class="flex-row items-center gap-1.5 shrink-0">
+                          <If when={record().path !== null}>
                             <Button
                               onPress={() => {
-                                setHomeRoot(root());
+                                setHomeRoot(record().path);
                                 switchTo(TRACKS);
                               }}
                               class={`h-7 items-center justify-center rounded-(--radius) bg-secondary px-3 hover:bg-row-hover active:scale-95 ${focusRing}`}
@@ -267,21 +273,34 @@ export function SettingsPage() {
                               <Text class="text-center text-xs font-medium leading-none text-foreground">进入管理</Text>
                             </Button>
                             <Button
-                              onPress={() => engine.scanFolder(root())}
+                              onPress={() => {
+                                const path = record().path;
+                                if (path !== null) engine.scanFolder(path);
+                              }}
                               class={`h-7 items-center justify-center rounded-(--radius) bg-secondary px-3 hover:bg-row-hover active:scale-95 ${focusRing}`}
                             >
                               <Text class="text-center text-xs font-medium leading-none text-foreground">重新扫描</Text>
                             </Button>
+                          </If>
+                          <If when={record().path === null}>
                             <Button
-                              onPress={() => removeRoot(root())}
-                              class={`h-7 items-center justify-center rounded-(--radius) px-3 hover:bg-destructive/10 active:scale-95 ${focusRing}`}
+                              accessibilityLabel={`重新选择 ${record().label}`}
+                              onPress={() => void repairRoot(record().id)}
+                              class={`h-7 items-center justify-center rounded-(--radius) bg-secondary px-3 hover:bg-row-hover active:scale-95 ${focusRing}`}
                             >
-                              <Text class="text-center text-xs font-medium leading-none text-destructive">移除</Text>
+                              <Text class="text-center text-xs font-medium leading-none text-foreground">重新选择</Text>
                             </Button>
-                          </View>
+                          </If>
+                          <Button
+                            accessibilityLabel={`移除 ${record().label}`}
+                            onPress={() => removeRootById(record().id)}
+                            class={`h-7 items-center justify-center rounded-(--radius) px-3 hover:bg-destructive/10 active:scale-95 ${focusRing}`}
+                          >
+                            <Text class="text-center text-xs font-medium leading-none text-destructive">移除</Text>
+                          </Button>
                         </View>
-                      );
-                    }}
+                      </View>
+                    )}
                   </Each>
                 </View>
               </If>

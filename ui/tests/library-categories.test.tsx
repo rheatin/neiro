@@ -9,7 +9,9 @@ async function library(): Promise<TestApp> {
     platform: "ios",
     width: 390,
     height: 844,
-    storage: { "library:roots": JSON.stringify(["/music"]) },
+    storage: {
+      "library:roots": JSON.stringify([{ id: "root-1", bookmark: "/music", label: "music" }]),
+    },
   });
   await app.waitFor("id:mobile-tab-bar");
   await app.press("label:资料库");

@@ -51,8 +51,10 @@ import {
   type DirectoryListing,
   type EqBand,
   type Favourites,
+  type FolderAccess,
   type Health,
   type MostPlayed,
+  type PickedFolder,
   type Player,
   type Playlist,
   type PlaylistEntriesPage,
@@ -866,6 +868,34 @@ export class Engine implements Backend {
     const base = this.#base;
     if (!base) throw new Error("E_ENGINE: 引擎未连接");
     return base.pickFolder();
+  }
+
+  /** iOS's folder picker, with the security-scoped bookmark the library
+   * keeps instead of a path; `null` when the user cancelled. */
+  async pickFolderBookmark(): Promise<PickedFolder | null> {
+    const base = this.#base;
+    if (!base) throw new Error("E_ENGINE: 引擎未连接");
+    const picked = await base.pickFolderBookmark();
+    return picked
+      ? { path: text(picked.path), bookmark: text(picked.bookmark), label: text(picked.label) }
+      : null;
+  }
+
+  /** Resolves a stored bookmark and opens the app's access to the folder;
+   * `null` when it no longer resolves (pick it again). */
+  resolveFolderBookmark(bookmark: string): FolderAccess | null {
+    const base = this.#base;
+    if (!base) throw new Error("E_ENGINE: 引擎未连接");
+    const access = base.resolveFolderBookmark(bookmark);
+    return access
+      ? { path: text(access.path), bookmark: text(access.bookmark), stale: access.stale }
+      : null;
+  }
+
+  /** Stops the access a resolved bookmark opened; nothing to do without an
+   * engine (its process held no access). */
+  releaseFolderBookmark(bookmark: string): void {
+    this.#base?.releaseFolderBookmark(bookmark);
   }
 
   listTracks(offset: number, limit: number): void {

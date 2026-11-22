@@ -11,7 +11,9 @@ async function folded(): Promise<TestApp> {
     platform: "ios",
     width: 390,
     height: 844,
-    storage: { "library:roots": JSON.stringify(["/music"]) },
+    storage: {
+      "library:roots": JSON.stringify([{ id: "root-1", bookmark: "/music", label: "music" }]),
+    },
   });
   await app.waitFor("id:mobile-tab-bar");
   return app;
@@ -74,7 +76,9 @@ test("unfolded: the sidebar beside the pages, Settings pushed and popped", async
     platform: "ios",
     width: 900,
     height: 800,
-    storage: { "library:roots": JSON.stringify(["/music"]) },
+    storage: {
+      "library:roots": JSON.stringify([{ id: "root-1", bookmark: "/music", label: "music" }]),
+    },
   });
   await app.waitFor("id:mobile-sidebar");
   expect(app.shows("id:mobile-tab-bar")).toBe(false);

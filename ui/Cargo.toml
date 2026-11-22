@@ -23,7 +23,27 @@ objc2-avf-audio = "0.3.2"
 # come from Foundation. Both are already in the graph through avf-audio, so
 # naming them here adds no new download.
 block2 = "0.6"
-objc2-foundation = "0.3"
+# The folder picker is a UIKit view controller, and its bookmark is NSURL
+# data. `dispatch2` already reaches this build through nsh, so the main-queue
+# hop adds no download either.
+objc2-ui-kit = { version = "0.3.2", features = [
+    "UIApplication",
+    "UIPresentationController",
+    "UIResponder",
+    "UIView",
+    "UIViewController",
+    "UIWindow",
+    "UIDocumentPickerViewController",
+    "block2",
+] }
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSData",
+    "NSError",
+    "NSString",
+    "NSURL",
+] }
+dispatch2 = "0.3"
 
 [dependencies]
 nsh-core = { git = "https://github.com/longbridge/nsh", tag = "v0.6.1" }
