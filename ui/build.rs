@@ -51,9 +51,15 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", slice_dir.display());
     println!("cargo:rustc-link-lib=static=neiro_base");
+    println!("cargo:rustc-link-lib=z");
+    println!("cargo:rustc-link-lib=bz2");
+    println!("cargo:rustc-link-lib=c++");
+    println!("cargo:rustc-link-lib=framework=AudioToolbox");
+    println!("cargo:rustc-link-lib=framework=AVFoundation");
+    println!("cargo:rustc-link-lib=framework=CoreFoundation");
 
-    // FFmpeg ships beside the engine as a dynamic framework, for the LGPL
-    // reason in the contract. A slice without it links only the engine.
+    // The static archive already contains FFmpeg. The optional framework is
+    // for a host that ships the dynamic variant instead.
     if slice_dir.join("FFmpeg.framework").is_dir() {
         println!("cargo:rustc-link-lib=framework=FFmpeg");
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/Frameworks");
