@@ -20,6 +20,8 @@ use serde::Deserialize;
 /// [`Engine`]: ../src/engine.rs.html
 pub mod engine;
 pub mod lyrics_providers;
+#[cfg(target_os = "ios")]
+pub mod audio_session;
 
 use crate::engine::{Analysis, Engine, RenderPath, Snapshot, WireEvent};
 
@@ -738,6 +740,45 @@ fn clear_cache_in(root: &std::path::Path, kind: &str) -> Result<String, String> 
     }
     let stats = cache_stats_in(root);
     serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
+}
+
+/// Writes an 8-second 44100 Hz stereo 16-bit PCM WAV containing a 440 Hz sine
+/// at -12 dBFS. Platform-neutral so its byte layout can be tested anywhere,
+/// but only iOS plays it, so elsewhere it exists for the test alone.
+#[cfg(any(target_os = "ios", test))]
+fn write_test_tone(path: &std::path::Path) -> Result<(), String> {
+    const SAMPLE_RATE: u32 = 44100;
+    const CHANNELS: u16 = 2;
+    const SECONDS: u32 = 8;
+    const SAMPLES: u32 = SAMPLE_RATE * SECONDS;
+    const DATA_BYTES: u32 = SAMPLES * CHANNELS as u32 * 2;
+    const AMPLITUDE: f64 = (0.25 * (i16::MAX as f64)) as f64;
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("E_TONE: 无法创建目录 {}：{e}", dir.display()))?;
+    }
+    let mut bytes = Vec::with_capacity(44 + DATA_BYTES as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + DATA_BYTES).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&CHANNELS.to_le_bytes());
+    bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    bytes.extend_from_slice(&(SAMPLE_RATE * CHANNELS as u32 * 2).to_le_bytes());
+    bytes.extend_from_slice(&(CHANNELS * 2).to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&DATA_BYTES.to_le_bytes());
+    for sample_index in 0..SAMPLES {
+        let sample =
+            (std::f64::consts::TAU * 440.0 * sample_index as f64 / SAMPLE_RATE as f64).sin();
+        let value = (sample * AMPLITUDE) as i16;
+        bytes.extend_from_slice(&value.to_le_bytes());
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("E_TONE: 无法写入 {}：{e}", path.display()))
 }
 
 /// The cache's ceiling. A 300 KB cover is ~1750 files at this budget; the
@@ -1531,6 +1572,9 @@ impl Base {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("E_ENGINE: 无法创建数据目录 {}：{e}", dir.display()))?;
         }
+        #[cfg(target_os = "ios")]
+        audio_session::activate()
+            .map_err(|e| format!("E_ENGINE: 无法激活音频会话：{e}"))?;
         let (engine, receiver) = Engine::open(&library)?;
         // The snapshot is a synchronous read: the listeners about to register
         // get the whole current state before any event arrives, so the first
@@ -2305,6 +2349,22 @@ impl Base {
         clear_cache_in(&data_root(), &kind)
     }
 
+    /// Writes the iOS test tone once, then plays it through the core.
+    pub fn play_tone(&self) -> Result<(), String> {
+        #[cfg(target_os = "ios")]
+        {
+            let path = data_root().join("Neiro").join("tone.wav");
+            if !path.exists() {
+                write_test_tone(&path)?;
+            }
+            self.play(path.to_string_lossy().into_owned())
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            Err("E_PLATFORM: play_tone 只在 iOS 上可用".to_string())
+        }
+    }
+
     // ---- playback: each is a queued command; the state changes as an event -
 
     /// Replaces the queue with this one track and starts it.
@@ -2864,6 +2924,26 @@ mod cover_cache_tests {
         assert_eq!(std::fs::read_dir(&dir).expect("read").count(), 1);
         assert!(dir.join("c").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod test_tone_tests {
+    use super::*;
+
+    #[test]
+    fn test_tone_has_a_valid_riff_header_and_byte_count() {
+        let file = std::env::temp_dir().join(format!("neiro-tone-{}.wav", std::process::id()));
+        write_test_tone(&file).expect("write tone");
+        let bytes = std::fs::read(&file).expect("read tone");
+        assert_eq!(bytes.len(), 44 + 44100 * 8 * 2 * 2);
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(&bytes[12..16], b"fmt ");
+        assert_eq!(&bytes[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 44 + 44100 * 8 * 2 * 2 - 8);
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 44100 * 8 * 2 * 2);
+        let _ = std::fs::remove_file(&file);
     }
 }
 

@@ -941,6 +941,11 @@ export class Engine implements Backend {
     }
   }
 
+  /** The iOS test tone: writes it once, then plays it through the core. */
+  playTone(): void {
+    this.#command((base) => base.playTone());
+  }
+
   /** Deletes one cache bucket; the answer is the stats after the clean. */
   clearCache(kind: string): string | null {
     const base = this.#base;

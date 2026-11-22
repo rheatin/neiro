@@ -20,7 +20,13 @@ import { LyricsWriteDialog } from "./src/components/player/lyrics-write-dialog";
 import { PlaylistDialogs } from "./src/components/library/playlist-dialogs";
 import { ContextMenuHost } from "./src/components/ui/context-menu";
 import { QueueSheet } from "./src/components/player/queue-sheet";
-import { bumpVolume, next, seek, toggle as togglePlayback } from "./src/state/player";
+import {
+  bumpVolume,
+  next,
+  player,
+  seek,
+  toggle as togglePlayback,
+} from "./src/state/player";
 import { loadAdoptedLyrics, loadAutoLyricsSetting, subscribeLyrics } from "./src/state/lyrics";
 import { outputOpen, setOutputOpen, setPluginDialogOpen } from "./src/state/overlays";
 import {
@@ -159,6 +165,21 @@ function IosSpikePage() {
       <Text class="text-sm text-muted-foreground">
         core ABI {engine.baseAbiVersion()} · engine {health().status}
       </Text>
+      <Text class="text-sm text-muted-foreground">状态 {player().state}</Text>
+      <View
+        class="rounded-full bg-foreground px-6 py-3 active:opacity-70"
+        accessibilityLabel="播放测试音 / Play test tone"
+        role="button"
+        onPress={() => {
+          try {
+            engine.playTone();
+          } catch (error) {
+            console.error("neiro: play tone failed:", error);
+          }
+        }}
+      >
+        <Text class="text-sm font-bold text-background">播放测试音 / Play test tone</Text>
+      </View>
     </View>
   );
 }
