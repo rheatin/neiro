@@ -85,6 +85,7 @@ const PLACES: { root: Route; icon: IconName; label: string }[] = [
 function TabBar() {
   return (
     <View
+      testID="mobile-tab-bar"
       class="flex-row items-stretch border-t border-border bg-sidebar px-1"
       style={{ paddingBottom: safeArea().bottom }}
     >
@@ -98,6 +99,7 @@ function TabBar() {
 function Sidebar() {
   return (
     <View
+      testID="mobile-sidebar"
       class="w-56 shrink-0 gap-1 border-r border-border bg-sidebar px-2 pb-2"
       style={{ paddingLeft: safeArea().left + 8 }}
     >

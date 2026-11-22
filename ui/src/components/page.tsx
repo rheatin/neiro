@@ -9,7 +9,7 @@
 import { type JSX, View } from "nsh";
 import { NavPage } from "nsh/base";
 import { pageAnimation } from "../nav";
-import { layout } from "./layout";
+import { layout, mobileShell } from "./layout";
 import type { PageScroll } from "../state/page-scroll";
 import { selectionActive } from "../state/queue";
 import { BackToTop } from "./ui/back-to-top";
@@ -29,7 +29,14 @@ export function AppPage(props: {
       title={props.title}
       testID={props.testID}
       animation={pageAnimation()}
-      headerRight={props.gear && layout() === "mobile" ? <MobileSettingsButton /> : undefined}
+      headerRight={
+        // The gear is the folded shell's only way to Settings: unfolded, the
+        // sidebar lists Settings itself, and two of them would be a choice
+        // between the same page.
+        props.gear && layout() === "mobile" && mobileShell() === "folded" ? (
+          <MobileSettingsButton />
+        ) : undefined
+      }
     >
       <View class="min-h-0 flex-1 bg-sidebar">
         {props.children}
