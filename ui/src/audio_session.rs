@@ -20,13 +20,23 @@ pub enum Interruption {
     Ended { should_resume: bool },
 }
 
+/// The format iOS granted the session, in the terms the engine's reinitialize
+/// takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Granted {
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
 /// One thing the host does about an interruption. The order of a slice is the
 /// order it is done in: a resume against a session iOS has deactivated renders
-/// nothing, so the session is activated first.
+/// nothing, so the session is activated first, and the engine rebuilds its
+/// output side before the resume reaches it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     Pause,
     Activate,
+    Reinitialize,
     Resume,
 }
 
@@ -46,7 +56,7 @@ pub fn begun_steps(playing: bool) -> &'static [Step] {
 /// stays paused even though it was playing before the interruption.
 pub fn ended_steps(should_resume: bool, was_playing: bool) -> &'static [Step] {
     if should_resume && was_playing {
-        &[Step::Activate, Step::Resume]
+        &[Step::Activate, Step::Reinitialize, Step::Resume]
     } else {
         &[]
     }
@@ -54,7 +64,7 @@ pub fn ended_steps(should_resume: bool, was_playing: bool) -> &'static [Step] {
 
 #[cfg(target_os = "ios")]
 mod platform {
-    use super::Interruption;
+    use super::{Granted, Interruption};
 
     use std::ptr::NonNull;
     use std::sync::{Arc, Mutex, Once};
@@ -76,12 +86,12 @@ mod platform {
     static HANDLER: Mutex<Option<Arc<Handler>>> = Mutex::new(None);
     static REGISTER: Once = Once::new();
 
-    /// Activates the playback category and reports the granted output format.
-    /// Calling this again is valid: the same category and activation are
-    /// idempotent. iOS also deactivates the session when an interruption
+    /// Activates the playback category and reports the format the session
+    /// grants. Calling this again is valid: the same category and activation
+    /// are idempotent. iOS also deactivates the session when an interruption
     /// begins, so resuming after one without calling this again would render
     /// into a session the system has turned off.
-    pub fn activate() -> Result<String, String> {
+    pub fn activate() -> Result<Granted, String> {
         let session = unsafe { AVAudioSession::sharedInstance() };
         let (category, mode) = unsafe {
             (
@@ -97,11 +107,10 @@ mod platform {
             session
                 .setActive_error(true)
                 .map_err(|error| format!("{error}"))?;
-            let sample_rate = session.sampleRate();
-            let channels = session.outputNumberOfChannels();
-            Ok(format!(
-                "AVAudioSession active: sample_rate={sample_rate:.0}, channels={channels}"
-            ))
+            Ok(Granted {
+                sample_rate: session.sampleRate().max(0.0) as u32,
+                channels: session.outputNumberOfChannels().clamp(0, u16::MAX as isize) as u16,
+            })
         }
     }
 
@@ -201,8 +210,9 @@ mod tests {
     fn an_interruption_ends_with_activation_before_the_resume() {
         assert_eq!(
             ended_steps(true, true),
-            &[Step::Activate, Step::Resume],
-            "iOS deactivates the session when the interruption begins"
+            &[Step::Activate, Step::Reinitialize, Step::Resume],
+            "iOS deactivates the session when the interruption begins, and the \
+             engine has to rebuild its output side before it is resumed"
         );
     }
 

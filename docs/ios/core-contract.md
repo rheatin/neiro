@@ -54,7 +54,7 @@ On desktop these are optional and the host falls back to `play` / `enqueue` / `s
 | --- | --- | --- |
 | `NAE_BaseAbiVersion` | `() -> u32` | returns the ABI version; the host requires **2** |
 | `NAE_BaseAudioCapabilities` | `() -> *mut c_char` | JSON capability object, freed by `NAE_BaseFreeString` |
-| `NAE_BaseReinitializeAudio` | `(sample_rate: u32, channels: u16) -> i32` | rebuild the output unit after a route change or media-services reset |
+| `NAE_BaseReinitializeAudio` | `(sample_rate: u32, channels: u16) -> i32` | rebuild the output unit after a route change or media-services reset; `0` = accepted, `-3` = no Base is running, `-5` = no session object on this platform |
 
 **Capability object** (`NAE_BaseAudioCapabilities`):
 

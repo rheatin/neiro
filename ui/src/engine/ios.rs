@@ -132,7 +132,6 @@ pub(crate) fn capabilities_json() -> Option<String> {
 
 /// Rebuilds the output unit after a route change or media-services reset.
 /// The session ordering that precedes it is in `docs/ios/core-contract.md`.
-#[allow(dead_code)]
 pub(crate) fn reinitialize_audio(sample_rate: u32, channels: u16) -> Result<(), String> {
     let code = unsafe { NAE_BaseReinitializeAudio(sample_rate, channels) };
     if code == 0 {

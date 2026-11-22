@@ -1585,6 +1585,8 @@ fn answer_interruption(
             audio_session::ended_steps(should_resume, was)
         }
     };
+    #[cfg(target_os = "ios")]
+    let mut granted: Option<audio_session::Granted> = None;
     for step in steps {
         let result = match step {
             audio_session::Step::Pause => {
@@ -1594,20 +1596,39 @@ fn answer_interruption(
             // interruptions there; the arm exists so the decision table is
             // one piece of code on every build.
             #[cfg(target_os = "ios")]
-            audio_session::Step::Activate => audio_session::activate().map(|_| ()),
+            audio_session::Step::Activate => match audio_session::activate() {
+                Ok(granted_format) => {
+                    granted = Some(granted_format);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
             #[cfg(not(target_os = "ios"))]
             audio_session::Step::Activate => Ok(()),
+            #[cfg(target_os = "ios")]
+            audio_session::Step::Reinitialize => match granted {
+                Some(granted_format) => crate::engine::ios::reinitialize_audio(
+                    granted_format.sample_rate,
+                    granted_format.channels,
+                ),
+                None => Ok(()),
+            },
+            #[cfg(not(target_os = "ios"))]
+            audio_session::Step::Reinitialize => Ok(()),
             audio_session::Step::Resume => {
                 send_command(engine, &serde_json::json!({ "command": "resume" }))
             }
         };
         // A notification has no call to return an error to; the page's usual
-        // error surface is what tells the user the resume did not happen.
+        // error surface is what tells the user the resume did not happen. The
+        // remaining steps are dropped: resuming into a session that would not
+        // activate is the failure this reports, not a recovery.
         if let Err(message) = result {
             lock(inner).on_error.post(&EngineError {
                 op: "interruption".to_owned(),
                 message,
             });
+            break;
         }
     }
 }
@@ -1638,9 +1659,15 @@ impl Base {
                 .map_err(|e| format!("E_ENGINE: 无法创建数据目录 {}：{e}", dir.display()))?;
         }
         #[cfg(target_os = "ios")]
-        audio_session::activate()
+        let granted = audio_session::activate()
             .map_err(|e| format!("E_ENGINE: 无法激活音频会话：{e}"))?;
         let (engine, receiver) = Engine::open(&library)?;
+        // The contract's first-play order: activate, then tell the core the
+        // format the route granted, then open. Nothing is stale this early, so
+        // a refusal here is not fatal -- a core that predates this call (it
+        // answers -5) still reads the route itself when it opens.
+        #[cfg(target_os = "ios")]
+        let _ = crate::engine::ios::reinitialize_audio(granted.sample_rate, granted.channels);
         // The snapshot is a synchronous read: the listeners about to register
         // get the whole current state before any event arrives, so the first
         // paint is the engine's, not an empty page.

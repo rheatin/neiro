@@ -10,7 +10,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version_file="$repo_root/NEIRO_CORE_VERSION"
-default_version="v0.3.0"
+default_version="v0.3.1"
 if [ -f "$version_file" ]; then
     default_version="$(tr -d '[:space:]' < "$version_file")"
 fi
