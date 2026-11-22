@@ -19,6 +19,11 @@ libloading = "0.8"
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6.5"
 objc2-avf-audio = "0.3.2"
+# The interruption observer is a block; its notification and number types
+# come from Foundation. Both are already in the graph through avf-audio, so
+# naming them here adds no new download.
+block2 = "0.6"
+objc2-foundation = "0.3"
 
 [dependencies]
 nsh-core = { git = "https://github.com/longbridge/nsh", tag = "v0.6.1" }

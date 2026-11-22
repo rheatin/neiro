@@ -20,7 +20,6 @@ use serde::Deserialize;
 /// [`Engine`]: ../src/engine.rs.html
 pub mod engine;
 pub mod lyrics_providers;
-#[cfg(target_os = "ios")]
 pub mod audio_session;
 
 use crate::engine::{Analysis, Engine, RenderPath, Snapshot, WireEvent};
@@ -1530,7 +1529,16 @@ async fn lyrics_pump(
 /// the core, waking every 30 ms: the events are low-rate (state changes, one
 /// position event per track tick), so a poll costs nothing next to a
 /// cross-thread wakeup primitive this crate does not have.
-async fn pump(engine: Shared, receiver: std::sync::mpsc::Receiver<String>, inner: Arc<Mutex<Inner>>) {
+async fn pump(
+    engine: Shared,
+    receiver: std::sync::mpsc::Receiver<String>,
+    inner: Arc<Mutex<Inner>>,
+    interruptions: Option<std::sync::mpsc::Receiver<audio_session::Interruption>>,
+) {
+    // Whether the track was playing when the interruption began: the ended
+    // notification says whether playback may continue, not what it should
+    // continue from.
+    let mut was_playing = false;
     loop {
         match receiver.try_recv() {
             Ok(line) => {
@@ -1541,8 +1549,65 @@ async fn pump(engine: Shared, receiver: std::sync::mpsc::Receiver<String>, inner
             Err(std::sync::mpsc::TryRecvError::Empty) => timer(std::time::Duration::from_millis(30)).await,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
         }
+        if let Some(interruptions) = &interruptions {
+            while let Ok(event) = interruptions.try_recv() {
+                answer_interruption(&engine, &inner, event, &mut was_playing);
+            }
+        }
         if engine.lock().map(|guard| guard.is_none()).unwrap_or(true) {
             break;
+        }
+    }
+}
+
+/// Carries out one interruption on the thread that owns [`Inner`], the one the
+/// listeners may be called from.
+fn answer_interruption(
+    engine: &Shared,
+    inner: &Arc<Mutex<Inner>>,
+    event: audio_session::Interruption,
+    was_playing: &mut bool,
+) {
+    let steps = match event {
+        audio_session::Interruption::Began => {
+            // Inner is what the UI is showing, and the pump has absorbed every
+            // engine event before this one.
+            let playing = lock(inner)
+                .player
+                .as_ref()
+                .map(|player| player.state == "playing")
+                .unwrap_or(false);
+            *was_playing = playing;
+            audio_session::begun_steps(playing)
+        }
+        audio_session::Interruption::Ended { should_resume } => {
+            let was = std::mem::replace(was_playing, false);
+            audio_session::ended_steps(should_resume, was)
+        }
+    };
+    for step in steps {
+        let result = match step {
+            audio_session::Step::Pause => {
+                send_command(engine, &serde_json::json!({ "command": "pause" }))
+            }
+            // There is no session to activate off iOS, and nothing sends
+            // interruptions there; the arm exists so the decision table is
+            // one piece of code on every build.
+            #[cfg(target_os = "ios")]
+            audio_session::Step::Activate => audio_session::activate().map(|_| ()),
+            #[cfg(not(target_os = "ios"))]
+            audio_session::Step::Activate => Ok(()),
+            audio_session::Step::Resume => {
+                send_command(engine, &serde_json::json!({ "command": "resume" }))
+            }
+        };
+        // A notification has no call to return an error to; the page's usual
+        // error surface is what tells the user the resume did not happen.
+        if let Err(message) = result {
+            lock(inner).on_error.post(&EngineError {
+                op: "interruption".to_owned(),
+                message,
+            });
         }
     }
 }
@@ -1593,6 +1658,29 @@ impl Base {
             r#"{"command":"set_policy","policy":{"rate":{"mode":"device"},"quality":"very_high","share":"shared"}}"#,
         );
         let engine = Arc::new(Mutex::new(Some(engine)));
+        // An interruption is a session event, so the host answers it: pause
+        // what was playing, and after the system says playback may continue,
+        // reactivate the deactivated session and resume. The notification
+        // arrives on an AVFoundation thread, which must not touch `Inner`
+        // (its listeners are not Send), so it only forwards the event and the
+        // pump -- the thread that already owns `Inner` -- decides and acts.
+        let interruptions = {
+            let (send, receive) = std::sync::mpsc::channel::<audio_session::Interruption>();
+            #[cfg(target_os = "ios")]
+            {
+                audio_session::install(move |event| {
+                    let _ = send.send(event);
+                })
+                .map_err(|e| format!("E_ENGINE: 无法监听音频中断：{e}"))?;
+                Some(receive)
+            }
+            #[cfg(not(target_os = "ios"))]
+            {
+                let _ = (send, receive);
+                None
+            }
+        };
+
         let pump_engine = engine.clone();
         let pump_inner = inner.clone();
         cx.start(async move {
@@ -1604,7 +1692,7 @@ impl Base {
                 *slot = Some(lyrics_send);
             }
             spawn(lyrics_pump(lyrics_receive, pump_inner.clone()));
-            pump(pump_engine, receiver, pump_inner).await;
+            pump(pump_engine, receiver, pump_inner, interruptions).await;
         });
         Ok(Base { engine, inner })
     }
@@ -2757,13 +2845,21 @@ impl Base {
 
     /// Sends one command to Base; a refused command throws with `E_ENGINE`.
     fn command(&self, json: &serde_json::Value) -> Result<(), String> {
-        let line =
-            serde_json::to_string(json).map_err(|e| format!("E_ENGINE: command 无法序列化：{e}"))?;
-        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
-        match engine.as_ref() {
-            Some(engine) => engine.command(&line),
-            None => Err("E_ENGINE: 引擎已释放".to_owned()),
-        }
+        send_command(&self.engine, json)
+    }
+}
+
+/// Sends one command to Base through its shared handle. Split out of
+/// [`Base::command`] because the interruption handler has no `Base`: it runs on
+/// the thread that posted the notification and reaches the engine only through
+/// the handle Base left behind.
+fn send_command(engine: &Shared, json: &serde_json::Value) -> Result<(), String> {
+    let line =
+        serde_json::to_string(json).map_err(|e| format!("E_ENGINE: command 无法序列化：{e}"))?;
+    let engine = engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+    match engine.as_ref() {
+        Some(engine) => engine.command(&line),
+        None => Err("E_ENGINE: 引擎已释放".to_owned()),
     }
 }
 
