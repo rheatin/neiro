@@ -105,7 +105,13 @@ export const wideTracks = () => (measuredShellWidth() || windowSize().width) > A
  * part of the column (mini player and tab bar below the content), so the page
  * only needs its own margin and the shell owns the rest. */
 export const pageEnd = () =>
-  layout() === "mobile" ? "pb-6" : barSize() === "stacked" ? "pb-36" : "pb-28";
+  layout() === "mobile"
+    ? mobileShell() === "folded"
+      ? "pb-40"
+      : "pb-24"
+    : barSize() === "stacked"
+      ? "pb-36"
+      : "pb-28";
 
 /** The one page every non-desktop idiom gets: honest, no fake UI. */
 export function UnsupportedPage(): JSX.Element {

@@ -15,7 +15,7 @@
 // `nav.ts`), which is the one thing the desktop's `openRoot` deliberately
 // does not do.
 
-import { safeArea, Text, View } from "nsh";
+import { platform, safeArea, Text, View } from "nsh";
 import { Button } from "nsh/base";
 import { Icon, type IconName } from "../components/ui/icons";
 import { IconButton, focusRing } from "../components/ui/controls";
@@ -28,9 +28,20 @@ import { hasTrack, next, player, toggle as togglePlayback } from "../state/playe
 /** What plays, and the two controls a phone needs without leaving the page:
  * play/pause and next. The summary opens Now Playing. */
 function MiniPlayer() {
+  const isIos = platform.os === "ios";
   return (
     <If when={hasTrack()}>
-      <View class="mx-2 mb-2 h-14 flex-row items-center gap-1 rounded-(--radius-panel) border border-border bg-card pl-1.5 pr-1">
+      <View
+        class={`mx-5 mb-2.5 h-14 flex-row items-center gap-1 rounded-full pl-2 pr-1.5 ${
+          isIos ? "" : "border border-border bg-card/90"
+        }`}
+        style={{
+          glassEffect: "regular",
+          backdropFilter: "blur(20px)",
+          boxShadow: [{ x: 0, y: 8, blur: 24, color: "#00000018" }],
+        }}
+        ios={{ backdropMaterial: "ultraThin" }}
+      >
         <NowPlayingSummary openable round cover={40} />
         <IconButton
           name={player().state === "playing" ? "pause" : "play"}
@@ -65,9 +76,11 @@ function Place(props: { root: Route; icon: IconName; label: string; sidebar?: bo
     <Button
       accessibilityLabel={props.label}
       onPress={() => activateTab(props.root)}
-      class="flex-1 items-center gap-1 py-1.5 active:opacity-60"
+      class={`flex-1 items-center justify-center gap-0.5 rounded-full py-1.5 active:opacity-60 ${
+        selected() ? "bg-foreground/10" : ""
+      }`}
     >
-      <Icon name={props.icon} size={22} color={selected() ? "foreground" : "muted-foreground"} />
+      <Icon name={props.icon} size={20} color={selected() ? "foreground" : "muted-foreground"} />
       <Text class={`text-[10px] ${selected() ? "font-semibold text-foreground" : "text-muted-foreground"}`}>
         {props.label}
       </Text>
@@ -83,11 +96,19 @@ const PLACES: { root: Route; icon: IconName; label: string }[] = [
 ];
 
 function TabBar() {
+  const isIos = platform.os === "ios";
   return (
     <View
       testID="mobile-tab-bar"
-      class="flex-row items-stretch border-t border-border bg-sidebar px-1"
-      style={{ paddingBottom: safeArea().bottom }}
+      class={`mx-5 flex-row items-stretch rounded-full p-1.5 ${
+        isIos ? "" : "border border-border bg-sidebar/90"
+      }`}
+      style={{
+        glassEffect: "regular",
+        backdropFilter: "blur(20px)",
+        boxShadow: [{ x: 0, y: 8, blur: 24, color: "#00000018" }],
+      }}
+      ios={{ backdropMaterial: "ultraThin" }}
     >
       <Each of={PLACES}>
         {(place) => <Place root={place().root} icon={place().icon} label={place().label} />}
@@ -129,18 +150,34 @@ export function MobileShell() {
       <If
         when={mobileShell() === "unfolded"}
         else={
-          <View class="min-h-0 flex-1">
+          <View class="relative min-h-0 flex-1">
             <MainStack />
-            <MiniPlayer />
-            <TabBar />
+            <View
+              class="absolute inset-x-0 bottom-0"
+              style={{
+                pointerEvents: "box-none",
+                paddingBottom: Math.max(12, safeArea().bottom),
+              }}
+            >
+              <MiniPlayer />
+              <TabBar />
+            </View>
           </View>
         }
       >
         <View class="min-h-0 flex-1 flex-row" style={{ paddingRight: safeArea().right }}>
           <Sidebar />
-          <View class="min-w-0 flex-1" style={{ paddingBottom: safeArea().bottom }}>
+          <View class="relative min-w-0 flex-1">
             <MainStack />
-            <MiniPlayer />
+            <View
+              class="absolute inset-x-0 bottom-0"
+              style={{
+                pointerEvents: "box-none",
+                paddingBottom: Math.max(8, safeArea().bottom),
+              }}
+            >
+              <MiniPlayer />
+            </View>
           </View>
         </View>
       </If>
