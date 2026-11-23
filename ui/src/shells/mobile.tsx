@@ -100,8 +100,12 @@ function Sidebar() {
   return (
     <View
       testID="mobile-sidebar"
-      class="w-56 shrink-0 gap-1 border-r border-border bg-sidebar px-2 pb-2"
-      style={{ paddingLeft: safeArea().left + 8 }}
+      class="w-56 shrink-0 gap-1 border-r border-border bg-sidebar px-2"
+      style={{
+        paddingTop: safeArea().top + 8,
+        paddingBottom: safeArea().bottom + 8,
+        paddingLeft: safeArea().left + 8,
+      }}
     >
       <Each of={PLACES}>
         {(place) => <Place root={place().root} icon={place().icon} label={place().label} sidebar />}
@@ -134,7 +138,7 @@ export function MobileShell() {
       >
         <View class="min-h-0 flex-1 flex-row" style={{ paddingRight: safeArea().right }}>
           <Sidebar />
-          <View class="min-w-0 flex-1">
+          <View class="min-w-0 flex-1" style={{ paddingBottom: safeArea().bottom }}>
             <MainStack />
             <MiniPlayer />
           </View>
