@@ -69,6 +69,10 @@ fn drop_does_not_wait_for_a_stuck_remote_request() {
     });
     let elapsed = rx.recv_timeout(Duration::from_secs(10)).expect("drop never returned");
     assert!(
+        elapsed >= Duration::from_millis(400),
+        "drop returned in {elapsed:?} — it should have waited for the 500ms shutdown timeout rather than skipping shutdown"
+    );
+    assert!(
         elapsed < Duration::from_secs(5),
         "dropping the engine waited {elapsed:?} for a stuck remote request"
     );
@@ -78,7 +82,7 @@ fn drop_does_not_wait_for_a_stuck_remote_request() {
 fn a_quiet_engine_shuts_down_within_the_wait() {
     let dir = std::env::temp_dir().join(format!("neiro-quiet-stop-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let (engine, _rx) = match Engine::open(&dir.join("library.db")) {
+    let (engine, rx) = match Engine::open(&dir.join("library.db")) {
         Ok(opened) => opened,
         Err(error) => {
             eprintln!("skip: engine not openable: {error}");
@@ -92,5 +96,12 @@ fn a_quiet_engine_shuts_down_within_the_wait() {
     assert!(
         elapsed < Duration::from_millis(450),
         "a quiet shutdown took {elapsed:?}: it should finish inside the 500ms wait"
+    );
+    assert!(
+        matches!(
+            rx.recv_timeout(Duration::from_millis(200)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ),
+        "dropping the engine must unsubscribe and drop the event sender"
     );
 }

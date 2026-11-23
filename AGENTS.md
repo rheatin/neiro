@@ -93,5 +93,6 @@ cargo check --manifest-path ui/Cargo.toml --target aarch64-apple-ios-sim
 
 # iOS: package the simulator app and verify its plist and privacy manifest
 (cd ui && nsh package --target ios-simulator)
+./scripts/ios-prepare.sh ui/.nsh/out/Neiro.app
 ./scripts/ios-prepare.sh --check ui/.nsh/out/Neiro.app
 ```

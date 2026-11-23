@@ -8,8 +8,10 @@
 //! own.
 
 use std::cell::RefCell;
-use std::sync::mpsc;
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -22,9 +24,77 @@ use objc2_ui_kit::{UIApplication, UIDocumentPickerViewController, UIViewControll
 #[allow(deprecated)]
 use objc2_ui_kit::UIDocumentPickerMode;
 
+type PickResult = Result<Option<Retained<NSURL>>, String>;
+
+struct OneshotState {
+    result: Option<PickResult>,
+    waker: Option<Waker>,
+}
+
+// SAFETY: `Retained<NSURL>` is an immutable Foundation value URL; once created
+// by UIKit on the main thread it is safe to transfer to the awaiting task.
+unsafe impl Send for OneshotState {}
+
+#[derive(Clone)]
+struct OneshotSender {
+    state: Arc<Mutex<OneshotState>>,
+}
+
+impl OneshotSender {
+    fn send(self, value: PickResult) {
+        let waker = {
+            let mut guard = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if guard.result.is_none() {
+                guard.result = Some(value);
+            }
+            guard.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+struct OneshotReceiver {
+    state: Arc<Mutex<OneshotState>>,
+}
+
+impl Future for OneshotReceiver {
+    type Output = PickResult;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut guard = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(result) = guard.result.take() {
+            Poll::Ready(result)
+        } else {
+            guard.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+fn oneshot() -> (OneshotSender, OneshotReceiver) {
+    let state = Arc::new(Mutex::new(OneshotState {
+        result: None,
+        waker: None,
+    }));
+    (
+        OneshotSender {
+            state: Arc::clone(&state),
+        },
+        OneshotReceiver { state },
+    )
+}
+
 /// What one picker answers: the folder picked, `None` when the user
 /// cancelled (a button, a swipe), or why it could not be shown.
-type Answer = mpsc::Sender<Result<Option<Retained<NSURL>>, String>>;
+type Answer = OneshotSender;
 
 // The pickers on show (a picker holds its delegate weakly).
 thread_local! {
@@ -71,18 +141,19 @@ impl FolderPickerDelegate {
             .unwrap_or_else(|poison| poison.into_inner())
             .take();
         if let Some(sender) = sender {
-            let _ = sender.send(Ok(url));
+            sender.send(Ok(url));
         }
         let this: *const Self = self;
         SHOWN.with_borrow_mut(|shown| shown.retain(|shown| !std::ptr::eq(&**shown, this)));
     }
 }
 
-/// Shows the system's folder picker and waits for the folder the user chose.
+/// Shows the system's folder picker and awaits the folder the user chose
+/// without blocking the main/executor thread.
 /// `Ok(None)` when the user cancelled; `Err` when the picker cannot be shown
 /// (no window yet, no root controller).
-pub fn pick_folder() -> Result<Option<Retained<NSURL>>, String> {
-    let (sender, receiver) = mpsc::channel();
+pub async fn pick_folder() -> Result<Option<Retained<NSURL>>, String> {
+    let (sender, receiver) = oneshot();
     // UIKit presents on the main thread only; a task of the engine may run
     // elsewhere. `exec_sync` runs inline when it is already the main thread.
     if MainThreadMarker::new().is_some() {
@@ -90,18 +161,16 @@ pub fn pick_folder() -> Result<Option<Retained<NSURL>>, String> {
     } else {
         DispatchQueue::main().exec_sync(move || present(sender));
     }
-    receiver
-        .recv()
-        .map_err(|_| "E_PICKER: 文件夹选择框没有回复".to_owned())?
+    receiver.await
 }
 
 fn present(sender: Answer) {
     let Some(mtm) = MainThreadMarker::new() else {
-        let _ = sender.send(Err("E_PICKER: 不在主线程".to_owned()));
+        sender.send(Err("E_PICKER: 不在主线程".to_owned()));
         return;
     };
     let Some(top) = top_controller(mtm) else {
-        let _ = sender.send(Err("E_PICKER: 找不到可以呈现的窗口".to_owned()));
+        sender.send(Err("E_PICKER: 找不到可以呈现的窗口".to_owned()));
         return;
     };
     let folder = NSString::from_str("public.folder");

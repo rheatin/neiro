@@ -3111,7 +3111,7 @@ impl Base {
         let _ = &this;
         #[cfg(target_os = "ios")]
         {
-            let Some(url) = ios::picker::pick_folder()? else {
+            let Some(url) = ios::picker::pick_folder().await? else {
                 return Ok(None);
             };
             let path = url
@@ -3122,7 +3122,12 @@ impl Base {
                 .lastPathComponent()
                 .map(|name| name.to_string())
                 .unwrap_or_else(|| path.rsplit('/').next().unwrap_or_default().to_owned());
-            let bookmark = ios::bookmarks::create(&url)?;
+            let started = unsafe { url.startAccessingSecurityScopedResource() };
+            let bookmark = ios::bookmarks::create(&url);
+            if started {
+                unsafe { url.stopAccessingSecurityScopedResource() };
+            }
+            let bookmark = bookmark?;
             Ok(Some(PickedFolderInfo {
                 path,
                 bookmark,

@@ -674,6 +674,50 @@ impl Prepared {
     }
 }
 
+/// How long a drop waits for Base to stop before leaving its worker to the
+/// process. Base's shutdown joins its worker, and that worker may sit in a
+/// remote request (a page still listing, a fetch from a server that stopped
+/// answering): waiting for the network there froze the window on quit.
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        unsafe {
+            // The unsubscribe guarantees the callback never runs again, so
+            // freeing the context afterwards is safe; `-4` only says there
+            // was nothing to drop.
+            (self.unsubscribe)(self.base);
+            if !self.ctx.is_null() {
+                drop(Box::from_raw(self.ctx));
+            }
+            let base = self.base as usize;
+            let shutdown = self.shutdown;
+            let (done, finished) = std::sync::mpsc::channel::<()>();
+            let stopped = match std::thread::Builder::new()
+                .name("neiro-base-shutdown".into())
+                .spawn(move || {
+                    (shutdown)(base as *mut c_void);
+                    let _ = done.send(());
+                }) {
+                Ok(_) => finished.recv_timeout(SHUTDOWN_WAIT).is_ok(),
+                // No thread to wait on: shut down here, as before.
+                Err(_) => {
+                    (self.shutdown)(self.base);
+                    true
+                }
+            };
+            if !stopped {
+                // Base is still inside the DLL: leak the handle rather than
+                // unload it under running code. The process exit finishes
+                // what the shutdown wait could not.
+                if let Some(library) = self._library.take() {
+                    std::mem::forget(library);
+                }
+            }
+        }
+    }
+}
+
 
 fn fallback_disabled_set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static DISABLED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =

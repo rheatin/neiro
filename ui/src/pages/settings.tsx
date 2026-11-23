@@ -20,7 +20,7 @@ import {
   scan,
   setHomeRoot,
 } from "../state/catalog";
-import { secretsInKeychain, servers, selectSource } from "../state/sources";
+import { readServerSecret, secretsInKeychain, servers, selectSource, type RemoteServer } from "../state/sources";
 import { cachedRemoteTracks, reconnectServer, removeServerById } from "../state/remote";
 import { EFFECT_NAMES, TOOLBAR_EFFECTS } from "../components/ui/toolbar-fx";
 import { lightEffect, setLight } from "../state/visual";
@@ -54,6 +54,11 @@ export function SettingsPage() {
   const gapless = () => gaplessEnabled();
   const serverList = () => servers();
   const localRoots = () => rootRecords();
+  const needsSecret = (s: RemoteServer): boolean => {
+    if (!secretsInKeychain) return false;
+    if (s.hasSecret) return Object.keys(readServerSecret(s)).length === 0;
+    return s.kind === "jellyfin" || s.kind === "jellyfin_token" || s.kind === "navidrome";
+  };
   const scanLabel = () => {
     const at = scan().at;
     if (at === null) return "";
@@ -358,7 +363,7 @@ export function SettingsPage() {
                                   <Text class="text-[10px] font-bold text-amber-500">插件已停用</Text>
                                 </View>
                               </If>
-                              <If when={secretsInKeychain && !srv().hasSecret}>
+                              <If when={needsSecret(srv())}>
                                 <View class="rounded px-1.5 py-0.5 bg-destructive/15">
                                   <Text class="text-[10px] font-bold text-destructive">凭据需重新输入</Text>
                                 </View>
