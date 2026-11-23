@@ -701,42 +701,62 @@ fn remember_session_fetch(path: &str) {
     }
 }
 
-/// Keeps downloaded audio under `budget`, oldest first, dropping 10% past
-/// the ceiling so the next download does not walk the directory again.
-/// Subdirectories (artwork, catalog) and half-written `.part` files are not
-/// counted here. Returns how many files were removed.
-fn prune_remote_audio_cache_in(root: &std::path::Path, budget: u64) -> usize {
-    let dir = remote_cache_dir_in(root);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return 0;
+fn collect_remote_audio_files_in(
+    dir: &std::path::Path,
+    recursive: bool,
+    session: &[String],
+    total: &mut u64,
+    files: &mut Vec<(std::path::PathBuf, u64, std::time::SystemTime)>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
-    let session: Vec<String> = SESSION_FETCHED
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone();
-    let mut files: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = Vec::new();
-    let mut total = 0u64;
     for entry in entries.flatten() {
-        let Ok(metadata) = entry.metadata() else {
+        let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        if !metadata.is_file() {
+        let path = entry.path();
+        if file_type.is_dir() {
+            if recursive {
+                collect_remote_audio_files_in(&path, true, session, total, files);
+            }
             continue;
         }
-        let path = entry.path();
+        if !file_type.is_file() {
+            continue;
+        }
         if path.extension().and_then(|ext| ext.to_str()) == Some("part") {
             continue;
         }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
         if session.iter().any(|kept| std::path::Path::new(kept) == path) {
             continue;
         }
-        total = total.saturating_add(metadata.len());
+        *total = total.saturating_add(metadata.len());
         files.push((
             path,
             metadata.len(),
             metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
         ));
     }
+}
+
+/// Keeps downloaded audio under `budget`, oldest first, dropping 10% past
+/// the ceiling so the next download does not walk the directory again.
+/// Subdirectories (artwork, catalog) and half-written `.part` files are not
+/// counted here. Returns how many files were removed.
+fn prune_remote_audio_cache_in(root: &std::path::Path, budget: u64) -> usize {
+    let dir = remote_cache_dir_in(root);
+    let session: Vec<String> = SESSION_FETCHED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let mut files: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total = 0u64;
+    collect_remote_audio_files_in(&dir.join("audio"), true, &session, &mut total, &mut files);
+    collect_remote_audio_files_in(&dir, false, &session, &mut total, &mut files);
     if total <= budget {
         return 0;
     }
@@ -780,14 +800,9 @@ fn remove_part_files_in(root: &std::path::Path) -> usize {
 /// `<id>.<ext>.part`, which no later fetch can use, and the audio bucket may
 /// have grown past its ceiling. Returns how many files were removed.
 fn reconcile_remote_cache_in(root: &std::path::Path) -> usize {
-    // The desktop's WebDAV fetch resumes the part an earlier run left behind,
-    // so it is not junk there. iOS ships the whole-file fetch only: a part is
-    // always the remains of an interrupted download.
-    #[cfg(target_os = "ios")]
-    let removed = remove_part_files_in(root);
-    #[cfg(not(target_os = "ios"))]
-    let removed = 0;
-    removed + prune_remote_audio_cache_in(root, REMOTE_AUDIO_CACHE_BUDGET)
+    // Both desktop and iOS now resume `.part` prefixes via HttpRangeSource,
+    // so partial files are kept across launches and only the budget is enforced.
+    prune_remote_audio_cache_in(root, REMOTE_AUDIO_CACHE_BUDGET)
 }
 
 // ---- Local cover cache -----------------------------------------------------
@@ -890,13 +905,17 @@ struct CacheStats {
     remote_catalog_files: u64,
     local_artwork_bytes: u64,
     local_artwork_files: u64,
+    #[serde(default)]
+    analysis_cache_bytes: u64,
+    #[serde(default)]
+    analysis_cache_entries: u64,
 }
 
-/// The four buckets, under one app-data root. `audio` is Base's flat remote
-/// directory; the other two are named subdirectories.
+/// The cache buckets under one app-data root. `audio` includes both the
+/// per-server `remote/audio/<hash>/` tree and legacy flat files in `remote/`.
 fn cache_stats_in(root: &std::path::Path) -> CacheStats {
     let remote = remote_cache_dir_in(root);
-    let audio = CacheBucket::walk(&remote, false);
+    let audio = CacheBucket::walk(&remote.join("audio"), true) + CacheBucket::walk(&remote, false);
     let artwork = CacheBucket::walk(&remote.join("artwork"), true);
     let catalog = CacheBucket::walk(&remote.join("catalog"), true);
     let local = CacheBucket::walk(&local_cover_cache_dir_in(root), false);
@@ -909,6 +928,8 @@ fn cache_stats_in(root: &std::path::Path) -> CacheStats {
         remote_catalog_files: catalog.files,
         local_artwork_bytes: local.bytes,
         local_artwork_files: local.files,
+        analysis_cache_bytes: 0,
+        analysis_cache_entries: 0,
     }
 }
 
@@ -918,32 +939,39 @@ fn parse_cache_kind(kind: &str) -> Result<&'static str, String> {
         "remote-artwork" => Ok("remote-artwork"),
         "remote-catalog" => Ok("remote-catalog"),
         "local-artwork" => Ok("local-artwork"),
+        "analysis" => Ok("analysis"),
         "all" => Ok("all"),
         _ => Err(format!("E_CACHE: 未知缓存类型 {kind}")),
     }
 }
 
 /// Clears one known bucket under `root`, keeping its directory alive. "All"
-/// means all four buckets. The returned stats are the caller's truth.
+/// means all buckets. The returned stats are the caller's truth.
 fn clear_cache_in(root: &std::path::Path, kind: &str) -> Result<String, String> {
     parse_cache_kind(kind)?;
     let remote = remote_cache_dir_in(root);
+    let audio_dir = remote.join("audio");
     let artwork_dir = remote.join("artwork");
     let catalog_dir = remote.join("catalog");
     let local_dir = local_cover_cache_dir_in(root);
     match kind {
-        "remote-audio" => { CacheBucket::clear(&remote, false); }
+        "remote-audio" => {
+            CacheBucket::clear(&audio_dir, true);
+            CacheBucket::clear(&remote, false);
+        }
         "remote-artwork" => { CacheBucket::clear(&artwork_dir, true); }
         "remote-catalog" => { CacheBucket::clear(&catalog_dir, true); }
         "local-artwork" => { CacheBucket::clear(&local_dir, false); }
+        "analysis" => {}
         _ => {
+            let _ = CacheBucket::clear(&audio_dir, true);
             let _ = CacheBucket::clear(&remote, false);
             let _ = CacheBucket::clear(&artwork_dir, true);
             let _ = CacheBucket::clear(&catalog_dir, true);
             let _ = CacheBucket::clear(&local_dir, false);
         }
     }
-    for dir in [remote.join("artwork"), remote.join("catalog"), local_dir] {
+    for dir in [audio_dir, remote.join("artwork"), remote.join("catalog"), local_dir] {
         let shown = dir.display().to_string();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             if !dir.is_dir() {
@@ -2694,7 +2722,18 @@ impl Base {
     /// formats for people.
     pub fn cache_stats(&self) -> Result<String, String> {
         let root = cache_root();
-        let stats = cache_stats_in(&root);
+        let mut stats = cache_stats_in(&root);
+        if let Some(eng) = self
+            .engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            if let Ok(snap) = eng.snapshot() {
+                stats.analysis_cache_entries = snap.analysis_cache_entries;
+                stats.analysis_cache_bytes = snap.analysis_cache_bytes;
+            }
+        }
         serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
     }
 
@@ -2715,7 +2754,42 @@ impl Base {
     /// Deletes one cache bucket's files (`all` = every bucket), keeps the
     /// directories, and answers the stats as they are after the clean.
     pub fn clear_cache(&self, kind: String) -> Result<String, String> {
-        clear_cache_in(&cache_root(), &kind)
+        let root = cache_root();
+        let cleared_json = clear_cache_in(&root, &kind)?;
+        if kind == "analysis" || kind == "all" {
+            let _ = self.command(&serde_json::json!({ "command": "clear_analysis_cache" }));
+            return Ok(cleared_json);
+        }
+        let mut stats: CacheStats = serde_json::from_str(&cleared_json)
+            .map_err(|e| format!("E_CACHE: 统计结果解析失败：{e}"))?;
+        if let Some(eng) = self
+            .engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            if let Ok(snap) = eng.snapshot() {
+                stats.analysis_cache_entries = snap.analysis_cache_entries;
+                stats.analysis_cache_bytes = snap.analysis_cache_bytes;
+            }
+        }
+        serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
+    }
+
+    /// Sets the remote audio disk cache budget (`0` = stream-only, `null` = unlimited)
+    /// and prunes any older cached files past the new ceiling.
+    pub fn set_audio_cache_budget(&self, budget_bytes: Option<f64>) -> Result<(), String> {
+        let budget = budget_bytes.map(|v| v.max(0.0) as u64);
+        let _ = self.command(&serde_json::json!({
+            "command": "set_cache_policy",
+            "audio_budget_bytes": budget,
+        }));
+        if let Some(limit) = budget {
+            if limit > 0 {
+                let _ = prune_remote_audio_cache_in(&cache_root(), limit);
+            }
+        }
+        Ok(())
     }
 
     /// Writes the iOS test tone once, then plays it through the core.

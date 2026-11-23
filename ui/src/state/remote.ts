@@ -1,9 +1,7 @@
 // 远程库的状态: 服务器会话 (一组凭据 — 桌面存 Storage，iOS 存钥匙串, 它们
 // 都不进源码),
-// `remote_listed` 数据已合并完整 (搜索会在本地过滤)，封面已连接至共享的
-// artwork 栈。桌面上有 source 形式的服务器 (描述符里的 `source`) 直接按虚拟
-// 路径播放，Base 边播边读；没有的走 fetch→fetched→play。iOS 一律走整文件
-// 下载：这一版没有 Range 来源，也没有边下边播。
+// 桌面上和 iOS 上有 source 形式的服务器（Base 直接按 Range 边播边缓）均不走整文件预下载；
+// 没有 source 形式的服务器才在轮到它之前整文件取流。
 
 import { cleanup, computed, effect, platform, signal, Storage, untracked } from "nsh";
 import { engine, registerRemoteTrackLookup, reportEngineFailure } from "../backend/engine";
@@ -749,17 +747,10 @@ function virtualPathOf(track: RemoteTrack): string {
   return `remote://${track.id}.${ext}`;
 }
 
-/** Whether Base can serve this row's bytes itself. The provider declares it in
- * its descriptor, so the host keeps no list of its own; a provider that only
- * answers with a download reports false and the row is fetched first. The
- * declaration is about the provider, not the row: the caller still has to be
- * pointed at the server the row belongs to.
- *
- * iOS is the exception for this release: the app ships the whole-file fetch
- * only, with no byte-range path, so every row is downloaded before it plays
- * no matter what the provider's descriptor says. */
+/** Whether Base can serve this row's bytes itself. Both desktop and iOS use the
+ * same Range stream-and-cache path when the provider declares `source: true`;
+ * a provider without a source form reports false and the row is fetched first. */
 function servesSource(track: RemoteTrack): boolean {
-  if (platform.os === "ios") return false;
   const owner = ownerServerOf(track);
   const kind = owner
     ? servers().find((s) => s.id === owner)?.kind

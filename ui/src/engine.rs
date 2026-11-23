@@ -1185,6 +1185,12 @@ pub struct Snapshot {
     pub queue_snapshot: Option<serde_json::Value>,
     pub analysis: Option<Analysis>,
     pub settings: Option<Settings>,
+    /// Number of entries currently stored in the persisted analysis cache.
+    #[serde(default)]
+    pub analysis_cache_entries: u64,
+    /// Estimated byte size of the persisted analysis cache.
+    #[serde(default)]
+    pub analysis_cache_bytes: u64,
     /// The engine's resolved path for this track, as a diagnostics JSON of
     /// its own contract (`NAE_ResolvedPath`), refreshed on open and on a
     /// gapless track change — carried through, never parsed twice.

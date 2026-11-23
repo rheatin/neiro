@@ -64,7 +64,7 @@ test("声明了 source 形式的服务器：曲目直接按虚拟路径播放，
   expect(app.shows("text:Fetches: none")).toBe(true);
 }, 60_000);
 
-test("iOS 上即使声明了 source 形式也整文件取流，不按虚拟路径播", async () => {
+test("iOS 上声明了 source 形式的服务器也直接按虚拟路径边播边缓，不整文件预取流", async () => {
   const app = await open("./remote-owner-switch-harness.tsx", {
     platform: "ios",
     width: 390,
@@ -77,6 +77,6 @@ test("iOS 上即使声明了 source 形式也整文件取流，不按虚拟路�
   await app.press("label:模拟 B 服务器就绪");
   await app.press("label:播放 B 服务器第二首");
 
-  await app.waitFor("text:Fetches: b-2", { timeout: 10_000 });
-  expect(app.shows("text:Played: none")).toBe(true);
+  await app.waitFor("text:Played: remote://b-2.flac", { timeout: 10_000 });
+  expect(app.shows("text:Fetches: none")).toBe(true);
 }, 60_000);

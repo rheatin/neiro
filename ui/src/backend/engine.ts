@@ -989,6 +989,17 @@ export class Engine implements Backend {
     }
   }
 
+  /** Sets the remote audio disk cache budget (`0` = stream-only, `null` = unlimited). */
+  setAudioCacheBudget(budgetBytes: number | null): void {
+    const base = this.#base;
+    if (!base) return;
+    try {
+      base.setAudioCacheBudget(budgetBytes);
+    } catch (error) {
+      console.warn("neiro: 设置缓存上限失败:", String(error));
+    }
+  }
+
   // ---- 远程库（v2，契约：缓存目录由 Rust 固定，不传参） --------------------------
 
   /** This install's remote identity. A probe can run with no Base loaded

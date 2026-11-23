@@ -1,6 +1,6 @@
 // 设置页面：音频与输出策略、曲库与来源管理、外观与交互体验的一致化设置中心。
 
-import { effect, signal, untracked, Scroll, Text, View } from "nsh";
+import { effect, platform, signal, untracked, Scroll, Text, View } from "nsh";
 import { Button } from "nsh/base";
 import { AppPage } from "../components/page";
 import { pageEnd } from "../components/layout";
@@ -28,11 +28,14 @@ import { isStreamBitPerfect, resolvedPath } from "../state/resolved";
 import { activeShellId, isRemoteKindEnabled, plugins } from "../state/plugins";
 import { autoLyricsEnabled, setAutoLyricsEnabled } from "../state/lyrics";
 import {
+  AUDIO_CACHE_PRESETS,
+  audioCacheBudget,
   cacheBusy,
   cacheStats,
   clearCache,
   formatCacheSize,
   refreshCacheStats,
+  setAudioCacheBudget,
   type CacheKind,
 } from "../state/cache";
 import { AppDialog } from "../components/ui/overlays";
@@ -43,10 +46,11 @@ const CACHE_ROWS: {
   name: string;
   detail: string;
 }[] = [
-  { kind: "remote-audio", name: "远程音频", detail: "已取流的服务器曲目缓存。" },
+  { kind: "remote-audio", name: "远程音频", detail: "边播边缓的服务器音频文件，播完后重播免流量且断网可播。" },
   { kind: "remote-artwork", name: "远程封面", detail: "服务器封面图片缓存。" },
   { kind: "remote-catalog", name: "远程索引", detail: "远程浏览与分组索引。" },
   { kind: "local-artwork", name: "本地封面", detail: "本地文件的封面解析缓存。" },
+  { kind: "analysis", name: "波形与分析缓存", detail: "本地与远程曲目的波形峰值、响度与标签分析结果（持久化在曲库中）。" },
 ];
 export function SettingsPage() {
   const path = () => engine.renderPath();
@@ -95,8 +99,27 @@ export function SettingsPage() {
 
   const cacheRow = (row: (typeof CACHE_ROWS)[number]) => {
     const stat = () => stats();
-    const bytes = () => (row.kind === "remote-audio" ? stat().remote_audio_bytes : row.kind === "remote-artwork" ? stat().remote_artwork_bytes : row.kind === "remote-catalog" ? stat().remote_catalog_bytes : stat().local_artwork_bytes);
-    const files = () => (row.kind === "remote-audio" ? stat().remote_audio_files : row.kind === "remote-artwork" ? stat().remote_artwork_files : row.kind === "remote-catalog" ? stat().remote_catalog_files : stat().local_artwork_files);
+    const bytes = () =>
+      row.kind === "remote-audio"
+        ? stat().remote_audio_bytes
+        : row.kind === "remote-artwork"
+          ? stat().remote_artwork_bytes
+          : row.kind === "remote-catalog"
+            ? stat().remote_catalog_bytes
+            : row.kind === "analysis"
+              ? (stat().analysis_cache_bytes ?? 0)
+              : stat().local_artwork_bytes;
+    const files = () =>
+      row.kind === "remote-audio"
+        ? stat().remote_audio_files
+        : row.kind === "remote-artwork"
+          ? stat().remote_artwork_files
+          : row.kind === "remote-catalog"
+            ? stat().remote_catalog_files
+            : row.kind === "analysis"
+              ? (stat().analysis_cache_entries ?? 0)
+              : stat().local_artwork_files;
+    const countUnit = row.kind === "analysis" ? "条记录" : "个文件";
     const disabled = () => cacheBusy() || (row.kind === "remote-audio" && audioDisabled());
     return (
       <View class="flex-row items-center justify-between gap-3 border-b border-border/40 py-2 last:border-b-0">
@@ -106,7 +129,7 @@ export function SettingsPage() {
         </View>
         <View class="shrink-0 text-right">
           <Text class="font-mono text-xs font-bold text-foreground">{formatCacheSize(bytes())}</Text>
-          <Text class="text-[11px] text-muted-foreground">{files()} 个文件</Text>
+          <Text class="text-[11px] text-muted-foreground">{files()} {countUnit}</Text>
         </View>
         <View class="shrink-0">
           <Button
@@ -127,32 +150,85 @@ export function SettingsPage() {
     );
   };
 
-  const renderCacheCard = () => (
-    <View class="gap-3">
-      <SectionTitle>存储与缓存</SectionTitle>
-      <View class="rounded-(--radius-panel) border border-border bg-card p-4 gap-2" testID="cache-card">
-        <Each of={CACHE_ROWS}>
-          {(row) => cacheRow(row())}
-        </Each>
-        <If when={audioDisabled()}>
-          <Text class="text-xs text-amber-500">播放中不可清理音频缓存</Text>
-        </If>
-        <View class="pt-2">
-          <Button
-            testID="cache-clear-all"
-            disabled={cacheBusy() || audioDisabled()}
-            accessibilityLabel="全部清理缓存"
-            onPress={() => clearAllOpen.set(true)}
-            class={`h-8 flex-row items-center justify-center rounded-full border border-destructive/40 bg-destructive/10 px-4 active:scale-95 ${focusRing} ${
-              cacheBusy() || audioDisabled() ? "opacity-40" : ""
-            }`}
-          >
-            <Text class="text-center text-xs font-bold leading-none text-destructive">全部清理</Text>
-          </Button>
+  const renderCacheCard = () => {
+    const budget = () => audioCacheBudget();
+    const policyNotice = () => {
+      const b = budget();
+      if (b === 0) {
+        return "当前为纯流式模式：仅在内存中缓冲播放，不写入磁盘；重播需重新拉流，无网络时无法离线播放远程曲目。";
+      }
+      const tail =
+        b === null
+          ? "当前不设容量上限，请注意设备剩余存储空间。"
+          : "超出上限时按最久未播放自动清理。";
+      return `播放远程曲目时自动边播边缓存到本地；完整缓存的曲目重播不耗流量，断网时仍可直接播放。${tail}`;
+    };
+    return (
+      <View class="gap-3">
+        <SectionTitle>存储与缓存</SectionTitle>
+        <View class="rounded-(--radius-panel) border border-border bg-card p-4 gap-3" testID="cache-card">
+          <View class="gap-2 border-b border-border/40 pb-3">
+            <Text class="text-sm font-bold text-foreground">远程音频缓存上限</Text>
+            <View class="flex-row flex-wrap gap-1.5">
+              <Each of={AUDIO_CACHE_PRESETS}>
+                {(preset) => {
+                  const active = () => budget() === preset().value;
+                  const idSuffix = preset().value === null ? "unlimited" : String(preset().value);
+                  return (
+                    <Button
+                      testID={`cache-budget-${idSuffix}`}
+                      accessibilityLabel={`远程音频缓存上限 ${preset().label}`}
+                      onPress={() => setAudioCacheBudget(preset().value)}
+                      class={`h-7 items-center justify-center rounded-full border px-3 active:scale-95 ${focusRing} ${
+                        active()
+                          ? "border-primary bg-primary/15"
+                          : "border-border bg-secondary/60"
+                      }`}
+                    >
+                      <Text
+                        class={`text-xs font-medium leading-none ${
+                          active() ? "font-bold text-primary" : "text-foreground"
+                        }`}
+                      >
+                        {preset().label}
+                      </Text>
+                    </Button>
+                  );
+                }}
+              </Each>
+            </View>
+            <Text class="text-xs leading-relaxed text-muted-foreground">{policyNotice()}</Text>
+            <If when={platform.os === "ios"}>
+              <Text class="text-[11px] leading-relaxed text-muted-foreground/80">
+                iOS 缓存位于系统 Caches 目录，不计入 iCloud 备份；设备存储极度紧张时系统可能自动清理。
+              </Text>
+            </If>
+          </View>
+          <View class="gap-0">
+            <Each of={CACHE_ROWS}>
+              {(row) => cacheRow(row())}
+            </Each>
+          </View>
+          <If when={audioDisabled()}>
+            <Text class="text-xs text-amber-500">播放中不可清理音频缓存</Text>
+          </If>
+          <View class="pt-1">
+            <Button
+              testID="cache-clear-all"
+              disabled={cacheBusy() || audioDisabled()}
+              accessibilityLabel="全部清理缓存"
+              onPress={() => clearAllOpen.set(true)}
+              class={`h-8 flex-row items-center justify-center rounded-full border border-destructive/40 bg-destructive/10 px-4 active:scale-95 ${focusRing} ${
+                cacheBusy() || audioDisabled() ? "opacity-40" : ""
+              }`}
+            >
+              <Text class="text-center text-xs font-bold leading-none text-destructive">全部清理</Text>
+            </Button>
+          </View>
         </View>
       </View>
-    </View>
-  );
+    );
+  };
   const protocolLabel = () => {
     const r = res();
     const backend = r?.backend ? String(r.backend).toUpperCase() : "WASAPI";

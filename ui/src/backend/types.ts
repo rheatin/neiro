@@ -528,6 +528,7 @@ export interface Backend {
   coverCacheGet(path: string): string;
   /** Remembers a cover answer for `path`: the `data:` URI, or `"none"`. */
   coverCachePut(path: string, uri: string): void;
+  setAudioCacheBudget(budgetBytes: number | null): void;
 
   // 远程库（v2）
   /** This installation's remote identity, the same value `set_remote`

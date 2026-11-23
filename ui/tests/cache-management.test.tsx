@@ -75,6 +75,9 @@ test("存储与缓存 UI：清理按钮、播放禁用和全部清理确认", as
   expect(app.shows("id:cache-clear-remote-artwork")).toBe(true);
   expect(app.shows("id:cache-clear-remote-catalog")).toBe(true);
   expect(app.shows("id:cache-clear-local-artwork")).toBe(true);
+  expect(app.shows("id:cache-clear-analysis")).toBe(true);
+  expect(app.shows("id:cache-budget-0")).toBe(true);
+  expect(app.shows("id:cache-budget-unlimited")).toBe(true);
   expect(app.shows("id:cache-clear-all")).toBe(true);
 
   await app.press("id:cache-clear-all");
