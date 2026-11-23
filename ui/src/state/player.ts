@@ -93,8 +93,49 @@ function prune(): void {
 }
 
 effect(() => {
-  engine.player();
-  untracked(() => prune());
+  const state = engine.player();
+  untracked(() => {
+    if (state.state === "error" || state.state === "deviceLost") {
+      if (pending().length > 0) pending.set([]);
+      return;
+    }
+    prune();
+  });
+});
+
+effect(() => {
+  const list = pending();
+  if (list.length === 0) return;
+  let nextExpiry = Infinity;
+  for (const p of list) {
+    nextExpiry = Math.min(nextExpiry, p.started + PENDING_LIMIT);
+    if (p.settledAt !== null) {
+      nextExpiry = Math.min(nextExpiry, p.settledAt + SETTLE_GRACE);
+    }
+  }
+  const delay = Math.max(16, nextExpiry - Date.now());
+  const timer = setTimeout(() => untracked(() => prune()), delay);
+  cleanup(() => clearTimeout(timer));
+});
+
+const PLAYBACK_ERROR_LABELS: Record<string, string> = {
+  open: "播放失败",
+  open_sacd: "播放失败",
+  play: "播放失败",
+  resume: "继续播放失败",
+  pause: "暂停失败",
+  seek: "跳转失败",
+  stop: "停止失败",
+  volume: "音量失败",
+};
+
+engine.subscribeEngineError(({ op, message }) => {
+  const label = PLAYBACK_ERROR_LABELS[op];
+  if (!label) return;
+  untracked(() => {
+    if (pending().length > 0) pending.set([]);
+    reportEngineFailure(new Error(message), label);
+  });
 });
 
 

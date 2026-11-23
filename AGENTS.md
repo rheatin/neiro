@@ -1,98 +1,42 @@
-# AGENTS.md — Neiro Standalone UI Host Architecture & Invariants
+# AGENTS.md — Neiro Standalone UI Host
 
-This repository (`neiro`) is the standalone desktop client and host for the Neiro High-Fidelity Audio System, built on [Native Shell](https://nsh.dev) (NSH) TSX and a Rust host integration crate (`neiro-ui`).
+本仓库（`neiro`）是 Neiro 高保真音频系统的独立客户端宿主，基于 [Native Shell](https://nsh.dev)（NSH）TSX 与 Rust 宿主集成 crate（`neiro-ui`）构建。
 
-It communicates with the audio engine exclusively across the `neiro-core` C ABI (`neiro_base.dll` / `libneiro_base.dylib`). Prebuilt core SDK binaries are fetched via `scripts/fetch-core.sh` (or `scripts/fetch-core.ps1`). **Do NOT assume local compilation of C++ engine or local submodules in this repository.**
-
----
-
-## 1. Single Owner State Invariants
-
-Every piece of state has exactly ONE authoritative owner. Never re-derive or maintain competing copies.
-
-- **Audio Stream Bit-Perfect Status**:
-  The only authoritative predicate is `isStreamBitPerfect()` in `ui/src/state/resolved.ts`.
-  It evaluates both the engine's reported `renderPath().bitPerfect` and host-side DSP layers (OPRA headphone calibration, crossfade, host EQ). All UI surfaces (`surface/source.tsx`, `surface/master-bus.tsx`, `surface/telemetry.tsx`, `shells/studio-minimal.tsx`, `format-badges.tsx`, `output-interface.tsx`, `pages/settings.tsx`) MUST call `isStreamBitPerfect()`.
-- **Sample Rate Formatting**:
-  The canonical formatter is `formatHz` in `ui/src/state/resolved.ts`. `formatRate` in `formats.ts` re-exports `formatHz`.
-- **Playback Order (Shuffle / Repeat)**:
-  `shuffleMode` and `repeatMode` in `ui/src/state/player.ts` are the single source of truth for the host. When the engine emits `queueSnapshot`, host state syncs immediately; user toggles persist to `Storage` and send commands to the engine. `state/shuffle.ts` re-exports directly from `player.ts`.
-- **Output Policy (Rate, Share Mode, Dither, DSD)**:
-  `applyPolicy(...)` in `ui/src/state/resolved.ts` is the single point for changing and persisting output policies. On startup when engine health becomes ready, `restorePolicyAtStartup()` reapplies the user's saved policy over the engine's default.
+前端与宿主仅通过 `neiro-core` 发布的 C ABI（桌面端 `neiro_base.dll` / `libneiro_base.dylib`，移动端静态链接 `neiro_base.xcframework`）与底层引擎通信。预构建 SDK 通过 `scripts/fetch-core.sh` / `scripts/fetch-core.ps1`（iOS 为 `scripts/fetch-core-ios.sh`）获取，**切勿在本仓库假设存在本地 C++ 引擎编译或 Git 子模块**。
 
 ---
 
-## 2. C ABI & Backward Compatibility Invariants
+## 规范路由表（`.agents/`）
 
-The UI host must remain backward and forward compatible across `neiro-core` SDK versions (specifically `v0.2.0` and `>= v0.2.1` / `QueueDirector`).
+修改代码前，请按任务类型查阅对应的规范文档：
 
-- **Queue Item JSON Normalization**:
-  Any `QueueItem` serialized across the boundary MUST supply snake_case `duration_ms: u64` (even if TypeScript has camelCase `durationMs`). In `ui/src/engine.rs`, `normalize_queue_items_json` cleans and normalizes all incoming queue items.
-- **Graceful v0.2.0 `-2` Command Fallback**:
-  If the loaded DLL lacks newer symbols (`NAE_BasePlayContext`, `NAE_BasePlayNext`, `NAE_BasePlayLater`, `NAE_BaseSetRepeatMode`, `NAE_BaseSetShuffleMode`, `NAE_BasePrevious`, etc.) or returns `NAE_BASE_ERR_PARSE = -2`, `ui/src/engine.rs` MUST automatically degrade to `v0.2.0` primitive commands (`play`, `enqueue`, `clear_queue`, `seek 0.0`) without raising fatal errors to the user.
-- **Honest Plugin Reporting**:
-  In fallback mode without dynamic plugin control ABI symbols, the host must not falsely report built-in decoders (`cue`, `sacd`, `dsd`, `soxr`) as togglable. Built-in engine stages remain marked as permanently active.
-
----
-
-## 3. Remote Streaming & Virtual Path Invariants
-
-- **`remote://` Virtual Paths**:
-  Tracks originating from remote sources (Jellyfin, Navidrome, WebDAV) carry virtual paths in the format `remote://{id}.{ext}`.
-  Base intercepts them: `open_path` opens the provider's byte-range source instead of a local file, so the host dispatches the virtual path directly and no URI reaches a C++ decoder. The host must only do so for a provider whose descriptor declares `source: true` (`ui/src/state/remote.ts`, `servesSource`); a provider without a source form, and a row already in the cache, are still resolved to a local path via `withRemotePath` before playback. Context queues may carry virtual paths as they are.
-- **Callback Array & Epoch Guards**:
-  In `ui/src/state/remote.ts`, `fetchedActions` must hold an array of callbacks (`Array<(path: string) => void>`) so concurrent requests for the same track do not drop handlers. All pagination must verify `listEpoch` to discard outdated page responses.
+| 主题 | 文档 | 说明 |
+|---|---|---|
+| 总体架构、目录分工、状态归属、导航 | [`.agents/architecture.md`](.agents/architecture.md) | 四层架构、单所有者状态注册表、`NavStack` 多根栈 |
+| 核心不变量、编码红线、性能与跨平台规范 | [`.agents/rules.md`](.agents/rules.md) | 必须遵守的红线（含 `Drop` 安全、`remote://`、iOS 宿主不变量） |
+| 界面插件、多外壳（Shell）切换、权限门控、歌词源、光效 | [`.agents/ui-plugins.md`](.agents/ui-plugins.md) | 三层插件、`DesktopShell`/`StudioMinimalShell`/外部外壳契约 |
+| UI 设计系统、Token、控制台表面、布局与 WGSL 动效 | [`.agents/ui-design-system.md`](.agents/ui-design-system.md) | 语义 Token、硬件控制台六大表面、GPU 着色器约束 |
+| `neiro-core` C ABI 契约、版本兼容与 SDK 拉取 | [`.agents/core-abi.md`](.agents/core-abi.md) | 必选/可选符号、`duration_ms` 规范化、`v0.2.0` `-2` 降级与 iOS ABI v2 |
+| 本地验证命令、无头测试写法、PR 检查清单 | [`.agents/workflows.md`](.agents/workflows.md) | `nsh check`、`cargo test`、`nsh test`、MacBook iOS 验证与 CI 策略 |
+| 历史交接与排障记录 | [`ui/HANDOVER.md`](ui/HANDOVER.md) | NSH 升级记录、已知问题与测量基线 |
 
 ---
 
-## 4. UI Performance & Resource Lifecycle
+## 不可妥协的核心摘要
 
-- **List Virtualization**:
-  Large collections (all tracks, scoped folder workspaces, remote catalog) must use virtualized `<List>` with item recycling rather than unbounded `<Each>` inside `<Scroll>`, avoiding UI freezing.
-- **On-Demand 60Hz Visualizer**:
-  `visualiserWanted` in `ui/src/state/visualiser.ts` must only request 60Hz FFT frames when music is actively playing AND an actual visual consumer is visible (Now Playing sheet open, Output console open, Studio Minimal shell active, or non-off toolbar effect). When hidden, it calls `engine.setVisualiser(null)`.
-- **LRU Cache & Watchdog Cleanups**:
-  When evicting items from `artwork.ts` cache, always delete from the `asked` set to allow re-fetching on scroll-back. Background catalog pagination must employ watchdog timeouts (15s) to recover from lost IPC events. Subscriptions (e.g. lyrics search) must provide explicit cancellation on sheet closure.
-
----
-
-## 5. iOS Host Invariants
-
-- **Two roots, one owner each**: `data_root()` in `ui/src/lib.rs` is `Application Support` on iOS (the library, the device id, bookmarks); `cache_root()` is `Library/Caches` (remote downloads, artwork). Everything regenerable reads `cache_root()`; everything worth restoring reads `data_root()`. The desktop keeps both beside the library, as before.
-- **Secrets live in the Keychain only**: on iOS a server's credential is one generic-password item (`service app.neiro.ui.remote`, `account remote:secret:{serverId}`, accessibility AfterFirstUnlock) behind `Base::secret_get/secret_set/secret_delete`. The `remote:servers` roster holds `hasSecret` and never a password or token; `state/sources.ts` (`readServerSecret`, `upsertServer`) is the single bridge. The desktop keeps credentials in the roster row and the Keychain methods are no-ops there.
-- **Never persist a config with a secret**: `saveRemoteConfig` skips `remote:config` on iOS, and `upsertServer` strips secret keys from `params` before storing the row.
-- **The packaged plist is owned by `ui/nsh.json`**: `ios.infoPlist` carries `UIBackgroundModes: ["audio"]`, `NSLocalNetworkUsageDescription` and `NSAppTransportSecurity.NSAllowsLocalNetworking` (no arbitrary loads). Do not hand-edit Info.plist in the built app.
-- **The privacy manifest is injected after packaging**: NSH has no privacy-manifest support, so `scripts/ios-prepare.sh <Neiro.app>` copies `ui/ios/PrivacyInfo.xcprivacy` beside the binary and re-signs; `--check` verifies the plist promises and the manifest (CI runs it).
-- **iOS fetches whole files**: `servesSource` in `ui/src/state/remote.ts` answers false on iOS; a remote track is downloaded before it plays, inside the `cache_root()` budget.
-- **File protection**: the data directory and `library.db` are set to `NSFileProtectionCompleteUnlessOpen` at launch (`ui/src/ios/mod.rs`), so a playback already running survives the lock screen.
+1. **单所有者状态**：Bit-Perfect 判定唯一归属 `isStreamBitPerfect()`（`ui/src/state/resolved.ts`）；采样率格式化归 `formatHz`；Shuffle/Repeat 归 `ui/src/state/player.ts`；输出策略归 `applyPolicy()`。
+2. **诚实遥测**：引擎未上报的字段保持 `null`（UI 显示 `—`），严禁伪造；降级模式下不得把永久内置解码器/DSP 伪报为可开关。
+3. **Engine `Drop` 与 C ABI 兼容**：重构 `ui/src/engine.rs` 时必须保留 `Drop for Engine`（`unsubscribe` + 释放 `ctx` + 有界 `shutdown` + 超时泄漏库句柄防卸载崩溃）；跨边界 `QueueItem` 必须归一化为 snake_case `duration_ms: u64` 并保留 `-2` 降级。
+4. **远程 `remote://` 与性能**：播放前必须拦截 `remote://`（仅在 Provider 声明 `source: true` 且非 iOS 时直读，否则先缓存落地）；大列表必须用虚拟化 `<List>`；60Hz FFT 仅在播放且存在可见视觉消费者时开启。
+5. **仓库与编码卫生**：`.ps1` 脚本仅用纯 ASCII；不用未指定编码的 PowerShell 命令读写 UTF-8 文件；不向根目录提交临时评审/审计 `.md` 草稿。
 
 ---
 
-## 6. Verification Commands
-
-Run all checks from the repository root:
+## 快速验证命令
 
 ```bash
-# Set up Rust environment if needed
-export RUSTUP_HOME="$HOME/Library/Caches/puccinialin/rustup"
-export CARGO_HOME="$HOME/Library/Caches/puccinialin/cargo"
-export PATH="$HOME/.local/bin:$RUSTUP_HOME/toolchains/stable-aarch64-apple-darwin/bin:$CARGO_HOME/bin:/opt/homebrew/bin:$PATH"
-
-# Typecheck and build Rust crate & TSX
 (cd ui && nsh check)
-
-# Run Rust unit tests
 cargo test --manifest-path ui/Cargo.toml --lib
-
-# Run all headless UI integration tests
+cargo test --manifest-path ui/Cargo.toml --test engine_shutdown
 (cd ui && nsh test)
-
-# iOS: both simulation targets compile
-cargo check --manifest-path ui/Cargo.toml --target aarch64-apple-ios
-cargo check --manifest-path ui/Cargo.toml --target aarch64-apple-ios-sim
-
-# iOS: package the simulator app and verify its plist and privacy manifest
-(cd ui && nsh package --target ios-simulator)
-./scripts/ios-prepare.sh ui/.nsh/out/Neiro.app
-./scripts/ios-prepare.sh --check ui/.nsh/out/Neiro.app
 ```
