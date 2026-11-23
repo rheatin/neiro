@@ -991,6 +991,18 @@ export class Engine implements Backend {
 
   // ---- 远程库（v2，契约：缓存目录由 Rust 固定，不传参） --------------------------
 
+  /** This install's remote identity. A probe can run with no Base loaded
+   * (the engine-down page still offers 设置), so that case answers empty and
+   * the caller keeps the historical fallback. */
+  deviceId(): string {
+    try {
+      return this.#base?.deviceId() ?? "";
+    } catch (error) {
+      console.warn("neiro: 设备标识没有读到:", String(error));
+      return "";
+    }
+  }
+
   setRemoteJellyfinPassword(baseUrl: string, user: string, password: string): void {
     this.#command((base) => base.setRemoteJellyfinPassword(baseUrl, user, password));
   }

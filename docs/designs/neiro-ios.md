@@ -206,9 +206,9 @@ Security-scoped bookmarks are the model.
 
 Jellyfin only, using the existing whole-file fetch (`engine.fetchRemote` → `Base::fetch_remote`). No byte-range path and no progressive playback in this release.
 
-*   The Rust host (`ui/src/lib.rs`) remains the sole cache owner: cache accounting, clearing and budgeted oldest-first pruning already exist. `ui/src/state/cache.ts` stays a stats reader over `engine.cacheStats()`.
+*   The Rust host (`ui/src/lib.rs`) remains the sole cache owner: cache accounting, clearing and budgeted oldest-first pruning live there. `ui/src/state/cache.ts` stays a stats reader over `engine.cacheStats()`.
 *   `ui/src/state/remote.ts` keeps the catalog and player UI state; it does not manage files.
-*   A per-install Jellyfin device ID is generated in the host and passed to `set_remote`; `neiro-core` must accept a `device_id`. If the core release does not, the existing `Device="desktop"` identity remains and cross-install collisions are accepted and documented.
+*   A per-install Jellyfin device ID is generated in the host and passed to `set_remote`. `neiro-core` v0.3.1 does not read it: its sign-in claim is hard-coded to `DeviceId="neiro-base"`, so that identity and its cross-install collisions remain until the core accepts `device_id`. The host's connection probe already sends the per-install id.
 *   Network policy is stated as two stacks, not one: the connection probe uses JavaScript `fetch` (URLSession, ATS applies); listings and downloads go through the core's own HTTP client (system trust, local-network privacy prompt). `Info.plist` sets `NSAllowsLocalNetworking` for LAN servers, no arbitrary loads, and an `NSLocalNetworkUsageDescription` naming the server feature. HTTPS is required for non-local servers.
 
 ### 7. Packaging and lifecycle
@@ -259,7 +259,7 @@ Rust host (neiro-ui)
 | Which `neiro-core` release contains the xcframework, `NAE_BaseAbiVersion`, capabilities, reinitialize and the audio events? | `neiro-core` maintainer | Stage 0 gate | No iOS release; design stays open |
 | Does legal accept static `libneiro_base.a` plus dynamic `FFmpeg.framework`? | Author / legal | Before Stage 5 | Static FFmpeg with relinkable objects and written sign-off |
 | Does NSH expose the root view controller to the host? | NSH upstream / author | Stage 0 spike | Upstream picker API; otherwise copy-import (rejected alternative E) becomes the fallback |
-| Does `neiro-core` accept a host-supplied Jellyfin `device_id`? | `neiro-core` maintainer | Stage 4 | Keep the current identity; document collision |
+| Does `neiro-core` accept a host-supplied Jellyfin `device_id`? | `neiro-core` maintainer | Answered (v0.3.1: no) | Taken: the host generates and sends it; the core ignores it and the `neiro-base` identity remains, documented above |
 
 ## Alternatives Considered
 
@@ -368,6 +368,10 @@ Goal: add a Jellyfin server, browse it, and play with the existing fetch path.
 
 *   **Files.** `ui/src/state/remote.ts` (Modify: host-supplied device ID, remove range assumptions); `ui/src/state/cache.ts` (Modify: display host stats only); `ui/src/lib.rs` (Modify: `device_id` passed to `set_remote`, cache reconciliation on launch); `ui/src/pages/remote.tsx` (Modify: Servers shell and connection states); `ui/src/components/ui/server-dialog.tsx` (Modify: iOS fields and validation).
 *   **Done when:** a Jellyfin server is added on device, its catalog browses, a track plays after the whole file downloads, the cache stays under its cap, and an interrupted download leaves no orphan temp file.
+*   **As built (2026-11-23), whole-file Jellyfin.** iOS plays every remote row through `engine.fetchRemote`: `servesSource` in `remote.ts` answers false on iOS, so the player and the queue fetch each row when it becomes current and a provider's `source` descriptor cannot pull playback back onto the range path. The desktop keeps its source-form branch unchanged. The host generates one opaque id per install (`data_root()/Neiro/device-id`, 32 hex characters) and sends it as `device_id` in the `set_remote` server object and in both Jellyfin setters; the core's tolerant server reader keeps it in its params map, but v0.3.1's sign-in claim stays `DeviceId="neiro-base"`. `Base.deviceId()` exposes the same value, and the JavaScript connection probe names it in its MediaBrowser claim instead of `neiro-base`.
+*   The host owns the remote cache. At launch `reconcile_remote_cache_in` removes unfinished `<id>.<ext>.part` files on iOS — the desktop keeps them because WebDAV resumes a part an earlier run left — and trims the downloaded-audio bucket to 2 GiB, oldest first, 10% past the ceiling, the same shape as the local cover cache. The trim runs again after every `remote_fetched`, and is never allowed to evict a file this run downloaded (the queue and player hold those paths), so older downloads pay for the ceiling instead of the session's playback material. Cache stats remain the host's JSON read by `cache.ts`.
+*   The Servers tab has the roster state a phone needs: saved servers with no active choice list as rows (`server-roster`, each with 连接), and a page with more than one server shows server chips to switch, because the mobile shell has no source sidebar. The header says 已连接 / 正在连接… / 未连接. The dialog body is a bounded (`max-height: 560`) `Scroll`, so its buttons stay reachable on a phone, and 连接 / 测试连接 validate before sending: the address is required and well formed, username and password (or the API token) are required in the Jellyfin modes, and on iOS plain http is refused outside the loopback, private and home-network address ranges.
+*   Tests: `remote-owner-switch.test.tsx` now also proves that an iOS app fetches a row from a provider that declares a source form, while the desktop still plays its virtual path; `server-dialog.test.tsx` covers the four validation messages; `servers-roster.test.tsx` covers the roster-to-catalog transition. Rust tests cover the persisted install id, `.part` removal, the finished-file guarantee and the 2 GiB trim. Still open for the device matrix: a real Jellyfin server behind the local-network prompt, a complete download followed by playback, a kill mid-download, and the cap with a full cache.
 
 ### Stage 5 — Packaging, secrets and verification
 

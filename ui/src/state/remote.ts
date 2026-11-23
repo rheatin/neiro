@@ -1,9 +1,10 @@
 // 远程库的状态: 服务器会话 (一组凭据，仅保存在 Storage 中 — 它们不进源码),
 // `remote_listed` 数据已合并完整 (搜索会在本地过滤)，封面已连接至共享的
-// artwork 栈。有 source 形式的服务器 (描述符里的 `source`) 直接按虚拟路径
-// 播放，Base 边播边读；没有的走 fetch→fetched→play。
+// artwork 栈。桌面上有 source 形式的服务器 (描述符里的 `source`) 直接按虚拟
+// 路径播放，Base 边播边读；没有的走 fetch→fetched→play。iOS 一律走整文件
+// 下载：这一版没有 Range 来源，也没有边下边播。
 
-import { cleanup, computed, effect, signal, Storage, untracked } from "nsh";
+import { cleanup, computed, effect, platform, signal, Storage, untracked } from "nsh";
 import { engine, registerRemoteTrackLookup, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
 import { notifyRemoteFetchFailed, playAll, playQueue, registerRemotePlayer, playTrack } from "./player";
@@ -107,10 +108,13 @@ export async function probeRemoteConfig(
       }
       const info = (await infoRes.json().catch(() => ({}))) as { ServerName?: string; Version?: string };
       const serverName = info.ServerName ?? "Jellyfin";
+      // The same per-install identity `set_remote` sends. No engine handle
+      // (the engine-down page still offers Settings) keeps the old id.
+      const deviceId = engine.deviceId() || "neiro-base";
 
       // 2. Token 模式验证
       if (cfg.token) {
-        const claim = `MediaBrowser Client="neiro", Device="desktop", DeviceId="neiro-base", Version="0.1", Token="${cfg.token}"`;
+        const claim = `MediaBrowser Client="neiro", Device="desktop", DeviceId="${deviceId}", Version="0.1", Token="${cfg.token}"`;
         const testRes = await fetch(`${url}/Items?Limit=1`, {
           signal: controller.signal,
           headers: {
@@ -127,7 +131,7 @@ export async function probeRemoteConfig(
 
       // 3. 密码模式验证
       if (cfg.password || cfg.user) {
-        const claim = `MediaBrowser Client="neiro", Device="desktop", DeviceId="neiro-base", Version="0.1"`;
+        const claim = `MediaBrowser Client="neiro", Device="desktop", DeviceId="${deviceId}", Version="0.1"`;
         const authRes = await fetch(`${url}/Users/AuthenticateByName`, {
           method: "POST",
           signal: controller.signal,
@@ -742,8 +746,13 @@ function virtualPathOf(track: RemoteTrack): string {
  * its descriptor, so the host keeps no list of its own; a provider that only
  * answers with a download reports false and the row is fetched first. The
  * declaration is about the provider, not the row: the caller still has to be
- * pointed at the server the row belongs to. */
+ * pointed at the server the row belongs to.
+ *
+ * iOS is the exception for this release: the app ships the whole-file fetch
+ * only, with no byte-range path, so every row is downloaded before it plays
+ * no matter what the provider's descriptor says. */
 function servesSource(track: RemoteTrack): boolean {
+  if (platform.os === "ios") return false;
   const owner = ownerServerOf(track);
   const kind = owner
     ? servers().find((s) => s.id === owner)?.kind
@@ -774,8 +783,8 @@ export function asLocalTrack(track: RemoteTrack, path: string): Track {
 }
 
 /** 点远程列表的第 `index` 首:曲目原地播放,后面按列表顺序进队列。
- * 有 source 形式的服务器(Base 直接按 Range 读)不产生下载;没有的才在
- * 轮到它之前取流,所以两种服务器共用这一条路径。 */
+ * 桌面上有 source 形式的服务器(Base 直接按 Range 读)不产生下载;没有的
+ * 才在轮到它之前取流。iOS 上每一首都在轮到它时整文件下载。 */
 export function queueRemoteFrom(rows: RemoteTrack[], index: number): void {
   const at = Math.min(Math.max(index, 0), Math.max(rows.length - 1, 0));
   if (rows.length === 0) return;

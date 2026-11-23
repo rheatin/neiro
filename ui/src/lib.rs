@@ -593,6 +593,181 @@ fn remote_cache_dir_in(root: &std::path::Path) -> std::path::PathBuf {
     root.join("Neiro").join("remote")
 }
 
+// ---- Remote identity -------------------------------------------------------
+//
+// Jellyfin groups sessions by the device that opened them. A name shared by
+// every install ("neiro-base") makes two phones, or two windows of the same
+// app, look like one device to the server. This installation therefore keeps
+// its own opaque id, persisted beside the library so it survives a restart.
+//
+// The linked core (v0.3.1) still sends its fixed `DeviceId="neiro-base"`
+// claim and does not read `device_id`; the host sends the id anyway, so the
+// day the core accepts it nothing else changes. Until then the connection
+// probe is the one request that already reports this install.
+
+/// The per-install remote identity, created once and then read.
+static INSTALLATION_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The file holding [`installation_id`], under an explicit root (tests).
+fn installation_id_path_in(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("Neiro").join("device-id")
+}
+
+/// This install's id: 32 lowercase hex characters. A missing or empty file
+/// is replaced; a write failure is said out loud once and the id stays
+/// in-memory for this run.
+fn installation_id_in(root: &std::path::Path) -> String {
+    let path = installation_id_path_in(root);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let text = text.trim();
+        if !text.is_empty() {
+            return text.to_owned();
+        }
+    }
+    let id = new_installation_id(root);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(error) = std::fs::write(&path, &id) {
+        eprintln!("neiro: 设备标识没有写入 {}：{error}", path.display());
+    }
+    id
+}
+
+/// Two FNV passes over the clock, the process and the data root. It is not
+/// a cryptographic random value; it only has to differ between installs and
+/// stay stable once written.
+fn new_installation_id(root: &std::path::Path) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let seed = format!("{nanos}:{}:{}", std::process::id(), root.display());
+    let first = fnv1a64(seed.as_bytes());
+    let second = fnv1a64(format!("{seed}:second").as_bytes());
+    format!("{first:016x}{second:016x}")
+}
+
+fn installation_id() -> String {
+    INSTALLATION_ID
+        .get_or_init(|| installation_id_in(&data_root()))
+        .clone()
+}
+
+// ---- Remote cache ----------------------------------------------------------
+
+/// The ceiling for downloaded remote audio. Downloads are whole files, so a
+/// handful of lossless albums is hundreds of megabytes; 2 GiB keeps a phone
+/// bounded without making the cache useless. The oldest go first.
+const REMOTE_AUDIO_CACHE_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Paths this run downloaded. They are the session's playback material: the
+/// queue and the player already hold these paths, so eviction must not take
+/// them out from under a row that is about to play. Only older files pay for
+/// the ceiling.
+static SESSION_FETCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn remember_session_fetch(path: &str) {
+    if path.is_empty() {
+        return;
+    }
+    let mut kept = SESSION_FETCHED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if !kept.iter().any(|known| known == path) {
+        kept.push(path.to_owned());
+    }
+}
+
+/// Keeps downloaded audio under `budget`, oldest first, dropping 10% past
+/// the ceiling so the next download does not walk the directory again.
+/// Subdirectories (artwork, catalog) and half-written `.part` files are not
+/// counted here. Returns how many files were removed.
+fn prune_remote_audio_cache_in(root: &std::path::Path, budget: u64) -> usize {
+    let dir = remote_cache_dir_in(root);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let session: Vec<String> = SESSION_FETCHED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let mut files: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("part") {
+            continue;
+        }
+        if session.iter().any(|kept| std::path::Path::new(kept) == path) {
+            continue;
+        }
+        total = total.saturating_add(metadata.len());
+        files.push((
+            path,
+            metadata.len(),
+            metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+        ));
+    }
+    if total <= budget {
+        return 0;
+    }
+    files.sort_by(|left, right| left.2.cmp(&right.2));
+    let mut to_free = total - budget + budget / 10;
+    let mut removed = 0;
+    for (path, len, _) in files {
+        if to_free == 0 {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            to_free = to_free.saturating_sub(len);
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Removes `<id>.<ext>.part` files — a download that never finished — from
+/// the remote audio directory. Returns how many were removed.
+#[cfg_attr(not(any(target_os = "ios", test)), allow(dead_code))]
+fn remove_part_files_in(root: &std::path::Path) -> usize {
+    let dir = remote_cache_dir_in(root);
+    let mut removed = 0;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("part") {
+                continue;
+            }
+            if entry.metadata().map(|meta| meta.is_file()).unwrap_or(false)
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// What a launch owes the cache: a process killed mid-download leaves
+/// `<id>.<ext>.part`, which no later fetch can use, and the audio bucket may
+/// have grown past its ceiling. Returns how many files were removed.
+fn reconcile_remote_cache_in(root: &std::path::Path) -> usize {
+    // The desktop's WebDAV fetch resumes the part an earlier run left behind,
+    // so it is not junk there. iOS ships the whole-file fetch only: a part is
+    // always the remains of an interrupted download.
+    #[cfg(target_os = "ios")]
+    let removed = remove_part_files_in(root);
+    #[cfg(not(target_os = "ios"))]
+    let removed = 0;
+    removed + prune_remote_audio_cache_in(root, REMOTE_AUDIO_CACHE_BUDGET)
+}
+
 // ---- Local cover cache -----------------------------------------------------
 //
 // Embedded pictures are read out of the file (and decoded by Base) every time
@@ -1209,8 +1384,11 @@ impl Inner {
                 self.on_remote_probed.post(&probe.clone());
             }
             WireEvent::RemoteFetched { track, path } => {
+                remember_session_fetch(&path);
                 self.on_remote_fetched
                     .post(&RemoteFetched { track: remote_track_of(track), path });
+                // A download just grew the bucket; keep it under its ceiling.
+                prune_remote_audio_cache_in(&data_root(), REMOTE_AUDIO_CACHE_BUDGET);
             }
             WireEvent::RemoteArtwork { id, mime, data } => {
                 self.on_remote_artwork
@@ -1678,6 +1856,12 @@ impl Base {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("E_ENGINE: 无法创建数据目录 {}：{e}", dir.display()))?;
         }
+        // Nothing is downloading yet, so a `.part` file now is what a killed
+        // process left behind, and the oldest downloads may be over budget.
+        let cleaned = reconcile_remote_cache_in(&data_root());
+        if cleaned > 0 {
+            eprintln!("neiro: 启动时清理了 {cleaned} 个远程缓存文件");
+        }
         #[cfg(target_os = "ios")]
         let granted = audio_session::activate()
             .map_err(|e| format!("E_ENGINE: 无法激活音频会话：{e}"))?;
@@ -1954,6 +2138,7 @@ impl Base {
                 "kind": "jellyfin",
                 "base_url": base_url,
                 "auth": { "kind": "password", "user": user, "password": password },
+                "device_id": installation_id(),
             },
         }))
     }
@@ -1972,6 +2157,7 @@ impl Base {
                 "kind": "jellyfin",
                 "base_url": base_url,
                 "auth": { "kind": "token", "token": token },
+                "device_id": installation_id(),
             },
         }))
     }
@@ -2046,6 +2232,10 @@ impl Base {
                     "kind": "jellyfin",
                     "base_url": base_url,
                     "auth": auth,
+                    // The core's Server reader keeps every flat text field in
+                    // its params map, so this survives a core that does not
+                    // know the key yet.
+                    "device_id": installation_id(),
                     "params": params,
                 })
             }
@@ -2075,6 +2265,13 @@ impl Base {
             "cache_dir": remote_cache_dir(),
             "server": server,
         }))
+    }
+
+    /// This installation's remote identity, the same value `set_remote`
+    /// sends to the core. The connection probe reads it so its request names
+    /// the same device the engine's downloads do.
+    pub fn device_id(&self) -> String {
+        installation_id()
     }
 
     /// Disconnects. The local cover cache survives: a server that is
@@ -3070,6 +3267,72 @@ mod cache_bucket_tests {
         assert_eq!(root.join("Neiro/unrelated/keep.txt").exists(), true);
         #[cfg(unix)]
         assert_eq!(link.symlink_metadata().unwrap().file_type().is_symlink(), true);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn installation_id_is_persisted_and_opaque() {
+        let root = cache_tree();
+        let first = installation_id_in(&root);
+        assert_eq!(first.len(), 32);
+        assert!(first
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        assert_eq!(
+            installation_id_in(&root),
+            first,
+            "a second launch reads the same identity"
+        );
+        let path = installation_id_path_in(&root);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), first);
+        // An emptied file is replaced rather than sent empty.
+        std::fs::write(&path, "").unwrap();
+        let again = installation_id_in(&root);
+        assert_eq!(again.len(), 32);
+        assert_ne!(again, "");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconciliation_removes_partial_downloads_and_keeps_finished_ones() {
+        let root = cache_tree();
+        let part = remote_cache_dir_in(&root).join("album.flac.part");
+        std::fs::write(&part, b"half").unwrap();
+        assert_eq!(remove_part_files_in(&root), 1);
+        assert!(!part.exists(), "an interrupted download is not kept");
+        // The launch pass never touches a finished download.
+        reconcile_remote_cache_in(&root);
+        assert!(remote_cache_dir_in(&root).join("song.flac").exists());
+        assert!(remote_cache_dir_in(&root).join("artwork/cover.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn remote_prune_drops_the_oldest_past_the_budget() {
+        let root = std::env::temp_dir().join(format!(
+            "neiro-remote-prune-{}-{}",
+            std::process::id(),
+            CACHE_TEST_SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let dir = remote_cache_dir_in(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, age) in [("a.flac", 0u64), ("b.flac", 1), ("c.flac", 2)] {
+            let path = dir.join(name);
+            std::fs::write(&path, vec![0u8; 100]).unwrap();
+            let handle = std::fs::File::options().write(true).open(&path).unwrap();
+            handle
+                .set_modified(
+                    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + age),
+                )
+                .unwrap();
+        }
+        // The oldest file is this session's own download: it stays. The next
+        // oldest pays for the ceiling, so 300 bytes over 150 drops one file.
+        remember_session_fetch(&dir.join("a.flac").to_string_lossy());
+        assert_eq!(prune_remote_audio_cache_in(&root, 150), 1);
+        assert!(dir.join("a.flac").exists(), "a session download is never evicted");
+        assert!(!dir.join("b.flac").exists());
+        assert!(dir.join("c.flac").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

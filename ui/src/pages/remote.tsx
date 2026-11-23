@@ -53,7 +53,7 @@ import { TrackHeader } from "../components/library/tracks";
 import { layout, pageEnd, wideTracks } from "../components/layout";
 import { RemoteCardsRow, type RemoteCardItem } from "../components/library/remote-cards";
 import { shuffleMode } from "../state/player";
-import { selectSource, ALL_ID } from "../state/sources";
+import { selectSource, servers, ALL_ID } from "../state/sources";
 
 const CONTAINER_LABEL = (container: string): string => (container ? container.toUpperCase() : "").slice(0, 5);
 
@@ -198,22 +198,34 @@ export function RemotePage() {
         <If
           when={srv()}
           else={
-            <EmptyState
-              title="没有连接的服务器"
-              detail={
-                layout() === "mobile"
-                  ? "在设置中连接一个服务器；凭据只留在本机。"
-                  : "在侧栏或设置中连接一个服务器；凭据只留在本机。"
+            <If
+              when={servers().length > 0}
+              else={
+                <EmptyState
+                  title="没有连接的服务器"
+                  detail={
+                    layout() === "mobile"
+                      ? "连接一台 Jellyfin 服务器，浏览它的曲库；凭据只留在本机。"
+                      : "在侧栏或设置中连接一个服务器；凭据只留在本机。"
+                  }
+                >
+                  <ActionButton label="连接服务器…" onPress={() => setServerDialogOpen(true)} />
+                </EmptyState>
               }
             >
-              <ActionButton label="连接服务器…" onPress={() => setServerDialogOpen(true)} />
-            </EmptyState>
+              <ServerRoster />
+            </If>
           }
         >
           {/* 1) Source Management Header */}
           <View class="px-6 pt-2 pb-4 gap-2" role="header">
             <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
-              {srv()!.kind.toUpperCase()} · {srv()!.baseUrl} · {engine.remoteStatus().configured ? "已连接" : "未连接"}
+              {srv()!.kind.toUpperCase()} · {srv()!.baseUrl} ·{" "}
+              {engine.remoteStatus().configured
+                ? "已连接"
+                : remoteLoadingState() === "loading"
+                ? "正在连接…"
+                : "未连接"}
             </Text>
             <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
               {srv()!.label}
@@ -241,6 +253,34 @@ export function RemotePage() {
                 }}
               />
             </View>
+            {/* Several servers on a phone: the roster is the only way to
+                change which one this tab is showing. */}
+            <If when={servers().length > 1}>
+              <Scroll horizontal scrollbar={false} style={{ height: 32 }} contentStyle={{ paddingRight: 8 }}>
+                <View class="flex-row items-center gap-1.5 pt-1">
+                  <Each of={servers()}>
+                    {(server) => {
+                      const current = () => srv()?.id === server().id;
+                      return (
+                        <Button
+                          accessibilityLabel={`服务器 ${server().label}${current() ? "，当前" : ""}`}
+                          selected={current()}
+                          onPress={() => selectSource(`remote:${server().id}`)}
+                          class={`h-8 shrink-0 flex-row items-center gap-1.5 rounded-full px-3 transition duration-150 ease-out ${
+                            current() ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-row-hover"
+                          } ${focusRing}`}
+                        >
+                          <Icon name="server" size={14} color={current() ? "foreground" : "muted-foreground"} />
+                          <Text class={`text-xs ${current() ? "font-semibold text-foreground" : "text-muted-foreground"}`}>
+                            {server().label}
+                          </Text>
+                        </Button>
+                      );
+                    }}
+                  </Each>
+                </View>
+              </Scroll>
+            </If>
           </View>
 
           {/* 2) In-Source Search Input + Sub-Tabs */}
@@ -348,6 +388,41 @@ export function RemotePage() {
         </If>
       </Scroll>
     </AppPage>
+  );
+}
+
+/** The Servers tab with a roster but no server chosen yet: a phone has no
+ * sidebar, so this list is how a saved server is opened. */
+function ServerRoster() {
+  const list = () => servers();
+  return (
+    <View class="gap-2 px-6 pt-2" testID="server-roster">
+      <Text role="header" class="pb-1 text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
+        服务器
+      </Text>
+      <Text class="pb-3 text-xs text-muted-foreground">选一台服务器连接；凭据只留在本机。</Text>
+      <Each of={list()}>
+        {(server) => (
+          <Button
+            accessibilityLabel={`连接 ${server().label}`}
+            onPress={() => selectSource(`remote:${server().id}`)}
+            class={`flex-row items-center gap-3 rounded-(--radius) border border-border bg-secondary px-3 py-3 text-left hover:bg-row-hover active:opacity-60 ${focusRing}`}
+          >
+            <Icon name="server" size={18} color="muted-foreground" />
+            <View class="min-w-0 flex-1">
+              <Text class="truncate text-sm font-bold text-foreground">{server().label}</Text>
+              <Text class="truncate text-xs text-muted-foreground">
+                {server().kind.toUpperCase()} · {server().baseUrl}
+              </Text>
+            </View>
+            <Icon name="chevronRight" size={16} color="muted-foreground" />
+          </Button>
+        )}
+      </Each>
+      <View class="flex-row items-center justify-end pt-2">
+        <ActionButton label="新建服务器…" onPress={() => setServerDialogOpen(true)} />
+      </View>
+    </View>
   );
 }
 

@@ -530,6 +530,9 @@ export interface Backend {
   coverCachePut(path: string, uri: string): void;
 
   // 远程库（v2）
+  /** This installation's remote identity, the same value `set_remote`
+   * sends. Empty when no engine handle is loaded. */
+  deviceId(): string;
   setRemoteJellyfinPassword(baseUrl: string, user: string, password: string): void;
   setRemoteJellyfinToken(baseUrl: string, token: string): void;
   setRemoteNavidrome(baseUrl: string, user: string, password: string): void;

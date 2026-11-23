@@ -2,7 +2,7 @@
 // 表单字段完全由引擎的动态插件注册表（PluginRegistry / engine.remoteProviders()）下发，
 // 零硬编码枚举，支持任意新增的远程协议与存储插件。
 
-import { effect, signal, token, Text, View, type JSX } from "nsh";
+import { effect, platform, Scroll, signal, token, Text, View, type JSX } from "nsh";
 import { Button, Input } from "nsh/base";
 import type { ProviderDescriptor, RemoteKind } from "../../backend/types";
 import {
@@ -32,6 +32,37 @@ function remoteProvidersList(): ProviderDescriptor[] {
 
 function hostOf(baseUrl: string): string {
   return baseUrl.replace(/^\w+:\/\//, "").replace(/\/.*$/, "") || baseUrl;
+}
+
+/** Whether a phone may reach this host over plain http. The loopback, the
+ * private IPv4/IPv6 ranges, `.local` names and single-label machine names
+ * are the LAN; everything else is a public server and needs https. */
+export function isLocalRemoteHost(hostname: string): boolean {
+  const name = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!name) return false;
+  if (name === "localhost" || name === "local" || name.endsWith(".local")) return true;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(name)) {
+    return (
+      name.startsWith("10.") ||
+      name.startsWith("127.") ||
+      name.startsWith("169.254.") ||
+      name.startsWith("192.168.") ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(name)
+    );
+  }
+  if (name.includes(":")) {
+    return (
+      name === "::1" ||
+      name.startsWith("fe8") ||
+      name.startsWith("fe9") ||
+      name.startsWith("fea") ||
+      name.startsWith("feb") ||
+      name.startsWith("fc") ||
+      name.startsWith("fd")
+    );
+  }
+  // A name with no dot is a single-label machine name resolved by the LAN.
+  return !name.includes(".");
 }
 
 const editing = signal<RemoteServer | null | undefined>(undefined);
@@ -172,12 +203,14 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
   const label = signal(existing?.label ?? "");
   const busy = signal(false);
   const testStatus = signal<{ state: "idle" | "testing" | "ok" | "error"; message?: string } | null>(null);
+  const formError = signal("");
 
   const currentDescriptor = () => providers().find((p) => p.id === selectedKind()) ?? providers()[0];
 
   const updateValue = (key: string, val: string) => {
     values.update((v) => ({ ...v, [key]: val }));
     testStatus.set(null);
+    formError.set("");
   };
 
   const isLocal = () => selectedKind() === "local";
@@ -188,6 +221,34 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       url = `http://${url}`;
     }
     return url.replace(/\/+$/, "");
+  };
+
+  /** What stops 连接 or 测试连接, said before anything is sent. iOS refuses
+   * plain http to a public host: ATS allows the LAN only. */
+  const validate = (): string => {
+    const raw = (values().base_url ?? "").trim();
+    if (!raw) return "请输入服务器地址";
+    let parsed: URL;
+    try {
+      parsed = new URL(normalizeUrl(raw));
+    } catch {
+      return "服务器地址格式不正确";
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "服务器地址必须以 http:// 或 https:// 开头";
+    }
+    if (platform.os === "ios" && parsed.protocol === "http:" && !isLocalRemoteHost(parsed.hostname)) {
+      return "iOS 只允许局域网服务器使用 http，其他地址请用 https";
+    }
+    if (selectedKind() === "jellyfin") {
+      if (jellyfinAuthMode() === "token") {
+        if (!(values().token ?? "").trim()) return "请输入 API Token";
+      } else {
+        if (!(values().user ?? "").trim()) return "请输入用户名";
+        if (!(values().password ?? "").trim()) return "请输入密码";
+      }
+    }
+    return "";
   };
 
   const buildConfig = (): { server: RemoteServer; cfg: RemoteConfig } | null => {
@@ -239,6 +300,13 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
   };
 
   const testConnection = async () => {
+    const problem = validate();
+    if (problem) {
+      formError.set(problem);
+      testStatus.set({ state: "error", message: problem });
+      return;
+    }
+    formError.set("");
     const built = buildConfig();
     if (!built) {
       testStatus.set({ state: "error", message: "请输入有效的服务器地址" });
@@ -267,6 +335,12 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
   };
 
   const save = () => {
+    const problem = validate();
+    if (problem) {
+      formError.set(problem);
+      return;
+    }
+    formError.set("");
     const built = buildConfig();
     if (!built) return;
 
@@ -288,7 +362,12 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
   };
 
   return (
-    <View class="gap-4 p-6" testID="server-form">
+    <Scroll
+      class="w-full"
+      contentClass="gap-4 p-6"
+      testID="server-form"
+      style={{ maxHeight: 560 }}
+    >
       <View class="flex-row items-center justify-between">
         <Text role="header" class="text-xl font-bold text-foreground">
           {existing ? "编辑服务器" : "连接服务器"}
@@ -428,7 +507,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
           </Field>
 
           <If when={jellyfinAuthMode() === "password"}>
-            <Field label="用户名" hint="选填">
+            <Field label="用户名" hint="必填">
               <Input
                 testID="input-username"
                 accessibilityLabel="用户名"
@@ -441,7 +520,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
                 style={{ placeholderColor: token("muted-foreground"), caretColor: token("foreground") }}
               />
             </Field>
-            <Field label="密码" hint="选填">
+            <Field label="密码" hint="必填">
               <Input
                 testID="input-password"
                 accessibilityLabel="密码"
@@ -505,6 +584,12 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
           </View>
         </If>
 
+        <If when={formError()}>
+          <Text testID="server-form-error" class="text-xs font-medium text-destructive">
+            {formError()}
+          </Text>
+        </If>
+
         <View class="flex-row items-center justify-between pt-2">
           <TextLink label="取消" small onPress={props.onCancel} />
           <View class="flex-row items-center gap-2">
@@ -524,7 +609,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
           </View>
         </View>
       </If>
-    </View>
+    </Scroll>
   );
 }
 
