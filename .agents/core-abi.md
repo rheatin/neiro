@@ -6,7 +6,7 @@
 
 ## 1. SDK 版本锁定与获取
 
-- **版本锁定文件**：根目录 `NEIRO_CORE_VERSION`（当前主线为 `v0.3.1`）。
+- **版本锁定文件**：根目录 `NEIRO_CORE_VERSION`（当前主线为 `v0.3.2`）。
 - **预构建拉取脚本**：
   - macOS / Linux：`./scripts/fetch-core.sh`
   - Windows：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-core.ps1`
