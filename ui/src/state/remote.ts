@@ -620,6 +620,11 @@ export function loadRemote(force = false): void {
 }
 
 export function retryRemote(): void {
+  const srv = activeRemoteServer();
+  if (srv) {
+    void reconnectServer(srv.id);
+    return;
+  }
   if (remoteLoadingState() === "error" || remoteTracks().length === 0) loadRemote(true);
 }
 
@@ -637,7 +642,17 @@ effect(() => {
 engine.subscribeEngineError((error) => {
   if (error.op !== "remote") return;
   untracked(() => {
-    remoteError.set(error.message);
+    const srv = activeRemoteServer();
+    const missingSecret =
+      secretsInKeychain &&
+      srv !== null &&
+      srv.hasSecret === false &&
+      (error.message.includes("401") || error.message.includes("403"));
+    remoteError.set(
+      missingSecret
+        ? `${error.message}（凭据未保存，请在「服务器 → 编辑」中重新输入密码）`
+        : error.message,
+    );
     remoteFetching.set(false);
     remoteLoadingState.set("error");
   });

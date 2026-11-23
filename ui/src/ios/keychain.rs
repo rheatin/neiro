@@ -14,6 +14,8 @@
 //! leaves the roster's `hasSecret` pointing at nothing; [`get`] answering
 //! `None` is what sends the user back to the dialog to re-enter it.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::ptr;
 
 use objc2_core_foundation::{
@@ -28,6 +30,62 @@ use objc2_security::{
 
 /// The Keychain service all of this app's remote items share.
 const SERVICE: &str = "app.neiro.ui.remote";
+
+/// Returned on ad-hoc signed iOS Simulator builds (`codesign --sign -`) that
+/// carry no provisioning profile / keychain-access-groups entitlement.
+const ERR_SEC_MISSING_ENTITLEMENT: i32 = -34018;
+
+fn fallback_store_path() -> PathBuf {
+    super::home()
+        .join("Library")
+        .join("Application Support")
+        .join("Neiro")
+        .join("keychain-fallback.json")
+}
+
+fn read_fallback_map() -> BTreeMap<String, String> {
+    let path = fallback_store_path();
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return BTreeMap::new();
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn write_fallback_map(map: &BTreeMap<String, String>) -> Result<(), String> {
+    let path = fallback_store_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("E_KEYCHAIN: 创建本地凭据目录失败：{e}"))?;
+    }
+    let json = serde_json::to_string(map)
+        .map_err(|e| format!("E_KEYCHAIN: 序列化本地凭据失败：{e}"))?;
+    std::fs::write(&path, json.as_bytes())
+        .map_err(|e| format!("E_KEYCHAIN: 写入本地凭据失败：{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn fallback_get(server: &str) -> Option<String> {
+    read_fallback_map().remove(server)
+}
+
+fn fallback_set(server: &str, value: &str) -> Result<(), String> {
+    let mut map = read_fallback_map();
+    map.insert(server.to_owned(), value.to_owned());
+    write_fallback_map(&map)
+}
+
+fn fallback_delete(server: &str) -> Result<(), String> {
+    let mut map = read_fallback_map();
+    if map.remove(server).is_some() {
+        write_fallback_map(&map)?;
+    }
+    Ok(())
+}
 
 /// One server's account name. The server id is the roster's id, made when the
 /// row is created; it never contains a secret.
@@ -80,6 +138,9 @@ pub fn get(server: &str) -> Option<String> {
     // SAFETY: the dictionary holds CoreFoundation keys and values, and the
     // result slot is a living local; a +1 object comes back on success.
     let status = unsafe { SecItemCopyMatching(query.as_ref(), &mut result) };
+    if status == ERR_SEC_MISSING_ENTITLEMENT {
+        return fallback_get(server);
+    }
     if status != errSecSuccess || result.is_null() {
         return None;
     }
@@ -116,6 +177,9 @@ pub fn set(server: &str, value: &str) -> Result<(), String> {
     if updated == errSecSuccess {
         return Ok(());
     }
+    if updated == ERR_SEC_MISSING_ENTITLEMENT {
+        return fallback_set(server, value);
+    }
     if updated != errSecItemNotFound {
         return Err(status_message("更新", updated));
     }
@@ -144,6 +208,8 @@ pub fn set(server: &str, value: &str) -> Result<(), String> {
     let added = unsafe { SecItemAdd(item.as_ref(), ptr::null_mut()) };
     if added == errSecSuccess {
         Ok(())
+    } else if added == ERR_SEC_MISSING_ENTITLEMENT {
+        fallback_set(server, value)
     } else {
         Err(status_message("保存", added))
     }
@@ -165,6 +231,8 @@ pub fn delete(server: &str) -> Result<(), String> {
     let status = unsafe { SecItemDelete(query.as_ref()) };
     if status == errSecSuccess || status == errSecItemNotFound {
         Ok(())
+    } else if status == ERR_SEC_MISSING_ENTITLEMENT {
+        fallback_delete(server)
     } else {
         Err(status_message("删除", status))
     }
