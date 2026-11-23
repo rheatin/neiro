@@ -146,6 +146,33 @@ const optimistic = computed<Partial<Player>>(() => Object.assign({}, ...pending(
  * controls still on their way over it. */
 export const player = computed<Player>(() => ({ ...EMPTY_PLAYER, ...engine.player(), ...optimistic() }));
 
+export function sameTrackPath(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.startsWith("remote://") || b.startsWith("remote://")) {
+    const nameOf = (p: string) => {
+      if (p.startsWith("remote://")) return p.slice("remote://".length);
+      return p.replace(/\\/g, "/").split("/").pop() ?? "";
+    };
+    return nameOf(a) !== "" && nameOf(a) === nameOf(b);
+  }
+  return false;
+}
+
+/** Whether the engine is actually rendering audio for the track currently shown.
+ * Prevents the timeline clock and progress bar from advancing while a remote
+ * (or slow) track is still buffering/opening and has not produced audio yet. */
+export function shouldAdvanceClock(shown: Player, enginePlayer: Player): boolean {
+  if (shown.state !== "playing" || !shown.path) return false;
+  if (enginePlayer.state !== "playing") return false;
+  if (!sameTrackPath(enginePlayer.path, shown.path)) return false;
+  if (enginePlayer.positionMs <= 0) return false;
+  if (Math.abs(enginePlayer.positionMs - shown.positionMs) > 2500) return false;
+  return true;
+}
+
+export const engineClockRunning = computed<boolean>(() => shouldAdvanceClock(player(), engine.player()));
+
 // ---- The position -----------------------------------------------------------
 
 const now = signal(Date.now());
@@ -154,8 +181,8 @@ const now = signal(Date.now());
 // second, just as the shown second changes (the bar moves natively
 // through `positionFill`).
 effect(() => {
+  if (!engineClockRunning()) return;
   const p = player();
-  if (p.state !== "playing") return;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const tick = () => {
     const t = Date.now();
@@ -174,7 +201,12 @@ const seekDraft = signal<number | null>(null);
 const volumeDraft = signal<number | null>(null);
 
 /** The position to show: the drag in progress, else the player's. */
-export const position = (): number => seekDraft() ?? positionAt(player(), now());
+export const position = (): number => {
+  const draft = seekDraft();
+  if (draft !== null) return draft;
+  const p = player();
+  return engineClockRunning() ? positionAt(p, now()) : p.positionMs;
+};
 
 /** The position as a share of the track (0..1), an animated value moving
  * natively while it plays, with no JS per frame: linear timing to the end
@@ -189,17 +221,18 @@ const HOLD_MS = 86_400_000;
 effect(() => {
   const draft = seekDraft();
   const p = player();
+  const running = engineClockRunning();
   const duration = p.durationMs;
-  const anchor = `${draft}|${p.positionMs}|${p.at}|${p.state}|${duration}`;
+  const anchor = `${draft}|${p.positionMs}|${p.at}|${p.state}|${duration}|${running}`;
   if (anchor === fillAnchor) return;
   fillAnchor = anchor;
   const max = Math.max(1, duration);
-  const at = draft ?? positionAt(p, Date.now());
+  const at = draft ?? (running ? positionAt(p, Date.now()) : p.positionMs);
   const from = Math.min(1, Math.max(0, at / max));
   fillRun?.stop();
   fillRun = null;
   positionFill.set(from);
-  if (draft === null && p.state === "playing" && duration > 0 && from < 1) {
+  if (draft === null && running && duration > 0 && from < 1) {
     fillRun = Animated.loop(
       Animated.sequence([
         Animated.timing(positionFill, { toValue: 1, duration: Math.max(1, duration - at), easing: "linear" }),
@@ -239,18 +272,7 @@ export const controlsEnabled = (): boolean => loadedContent() && player().state 
 
 /** Whether `path` is the track loaded (tracked). */
 export function isCurrentTrack(path: string): boolean {
-  if (!path) return false;
-  const current = loadedPath();
-  if (!current) return false;
-  if (current === path) return true;
-  if (path.startsWith("remote://") || current.startsWith("remote://")) {
-    const nameOf = (p: string) => {
-      if (p.startsWith("remote://")) return p.slice("remote://".length);
-      return p.replace(/\\/g, "/").split("/").pop() ?? "";
-    };
-    return nameOf(path) !== "" && nameOf(path) === nameOf(current);
-  }
-  return false;
+  return sameTrackPath(loadedPath(), path);
 }
 
 /** Whether the loaded track is playing (tracked). */
