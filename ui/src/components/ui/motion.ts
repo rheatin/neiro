@@ -16,14 +16,15 @@ import {
   createMotion,
   type Easing,
   effect,
-  LayoutAnimation,
   reduceMotion,
   signal,
   untracked,
+  type LayoutAnimationAnimation,
   type Motion,
   type MotionName,
   type MotionOptions,
   type MotionSpec,
+  type ViewRef,
   type ViewStyle,
 } from "nsh";
 import { DISTANCE, DURATION, EASING, SMOOTH_OUT } from "./tokens";
@@ -31,7 +32,7 @@ import { DISTANCE, DURATION, EASING, SMOOTH_OUT } from "./tokens";
 /** A style that plays `preset` once when the view mounts; spread it into
  * `style`. Call it in a component body, or on a plain host view whose style
  * reads nothing else. */
-export function enter(preset: MotionName = "fadeInUp", delay = 0) {
+export function enter(preset: MotionName | MotionSpec = "fadeInUp", delay = 0) {
   return untracked(() => createMotion({ enter: preset, delay }).style);
 }
 
@@ -422,21 +423,23 @@ export function listItemEntrance(options: {
 }
 
 /** Animates the layout when `step` changes (the sidebar opens or narrows,
- * the player bar rearranges): what moves or resizes glides there, what
- * comes or goes fades. Not on every size change, only when the arrangement
- * does. */
-export function animateLayoutOn(step: () => string): void {
+ * the player bar rearranges): what moves or resizes glides there. Not on
+ * every size change, only when the arrangement does.
+ *
+ * Scoped to `ref`'s region: `animateLayout` animates the frames that
+ * change moves, not every frame of the commit (a `configureNext` did, hidden
+ * tab layers included). Insertions and removals are not animated by it, so
+ * views that appear should bring their own entrance. */
+export function animateLayoutOn(
+  ref: () => ViewRef | undefined,
+  step: () => string,
+  transition: LayoutAnimationAnimation = { duration: DURATION.base, type: "easeInEaseOut" },
+): void {
   let last: string | null = null;
   effect(() => {
     const now = step();
     if (last !== null && now !== last && !reduceMotion()) {
-      const curve = { type: "easeInEaseOut" as const };
-      LayoutAnimation.configureNext({
-        duration: DURATION.base,
-        update: curve,
-        create: { ...curve, property: "opacity" },
-        delete: { ...curve, property: "opacity" },
-      });
+      ref()?.animateLayout(transition);
     }
     last = now;
   });

@@ -16,8 +16,11 @@ const AWAY_FROM_TOP = 300;
 /** A page's scroll container, remembered: pass the props to the page's
  * `<Scroll>` or `<List>`, and the handle to `AppPage`. */
 export interface PageScroll {
-  /** Where the container starts (the position it was left at). */
-  contentOffset: { y: number };
+  /** Where the container starts (the position it was left at), or `undefined`
+   * for a page opened at the top: its resting offset is not 0 on every
+   * platform (iOS's system header insets the scroll view), so not asking for
+   * an offset is how a page starts at its top. */
+  contentOffset: { y: number } | undefined;
   /** The page is opening where it was left, not for the first time: its
    * entrance animations (the rows' wave) are skipped, so it reads as
    * arriving back rather than loading afresh. */
@@ -39,7 +42,7 @@ export function rememberScroll(key: string): PageScroll {
   const away = signal(false);
   let node: Scroller | null = null;
   return {
-    contentOffset: { y: start },
+    contentOffset: start !== 0 ? { y: start } : undefined,
     restored: start > 0,
     onScroll: (e) => {
       offsets.set(key, e.offset.y);

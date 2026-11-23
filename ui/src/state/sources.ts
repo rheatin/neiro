@@ -4,12 +4,21 @@
 // 来源的切换 = `activateServer(id)`（配置 + 重拉）；本地来源用 catalog 的
 // 根过滤层，无需任何引擎动作。
 //
-// 服务器花名册存 Storage `remote:servers`（凭据只在 Storage，不进源码）；
-// 旧的单条 `remote:config` 迁移为第一项。当前激活来源存 `source:active`。
+// 服务器花名册存 Storage `remote:servers`（凭据不进源码：桌面在行内，iOS
+// 在钥匙串，行里只有 hasSecret）；旧的单条 `remote:config` 迁移为第一项。
+// 当前激活来源存 `source:active`。
 
-import { computed, effect, signal, Storage } from "nsh";
+import { computed, effect, platform, signal, Storage } from "nsh";
 import type { RemoteKind } from "../backend/types";
-import { addRoot, registerSourceKind, roots, rootsLoaded, scopedRoot, setHomeRoot } from "./catalog";
+import { engine } from "../backend/engine";
+import {
+  addRoot,
+  registerSourceKind,
+  rootRecords,
+  rootsLoaded,
+  scopedRoot,
+  setHomeRoot,
+} from "./catalog";
 import { isRemoteKindEnabled, registerPluginToggleHook } from "./plugins";
 import { notify } from "./feedback";
 
@@ -21,8 +30,15 @@ export interface RemoteServer {
   kind: RemoteKind;
   baseUrl: string;
   user?: string;
+  /** Desktop only: the credential sits in the roster. On iOS it is stripped
+   * into the Keychain and this stays undefined. */
   password?: string;
+  /** Desktop only, as `password`. */
   token?: string;
+  /** iOS: a secret was saved for this server. The value itself is not here;
+   * a restore that lost the Keychain leaves this marker pointing at nothing,
+   * and the settings page then asks for the credential again. */
+  hasSecret?: boolean;
   params?: Record<string, string>;
 }
 
@@ -57,13 +73,15 @@ function serverSource(server: RemoteServer): Source {
   return { id: `remote:${server.id}`, kind: "remote", label: server.label, serverId: server.id };
 }
 
-/** 本地来源：全部 + 每个根目录（根目录 basename 作 label）。 */
+/** 本地来源：全部 + 每个解析出来的根目录。id 跟随记录（iOS 是 uuid，
+ * 桌面是路径），label 是用户选目录时看到的名字。没解析出来的根
+ * （书签失效）不出现在来源里：它没有可浏览的内容。 */
 export const localSources = computed<Source[]>(() => {
   const list: Source[] = [ALL, LOCAL_ALL];
   if (rootsLoaded()) {
-    for (const root of roots()) {
-      const base = root.replace(/\\/g, "/").split("/").pop() || root;
-      list.push({ id: `local:${root}`, kind: "local", label: base, root });
+    for (const record of rootRecords()) {
+      if (record.path === null) continue;
+      list.push({ id: `local:${record.id}`, kind: "local", label: record.label, root: record.path });
     }
   }
   return list;
@@ -112,10 +130,109 @@ export const activeSource = (): Source => {
 
 registerSourceKind(() => activeSource().kind);
 
+// ---- Remote secrets -------------------------------------------------------
+//
+// One owner: on iOS a server's credential is a Keychain item and the roster
+// row holds only `hasSecret`. On the desktop the roster row is the only
+// place, as it always has been. Everything that hands credentials to the
+// engine or to the dialog reads them through `readServerSecret`, so neither
+// platform has a second copy.
+
+/** iOS keeps secrets in the Keychain; the desktop keeps them in the row. */
+export const secretsInKeychain = platform.os === "ios";
+
+/** The provider keys that are credentials, when the caller does not know
+ * the provider's fields (the two shapes Base itself ships). */
+const DEFAULT_SECRET_KEYS = ["password", "token"];
+
+/** The keychain blob for `server`: a JSON map of secret params, or an empty
+ * map. On iOS an unreadable item and a restore that lost it look the same —
+ * the user is asked to re-enter. */
+export function readServerSecret(server: RemoteServer): Record<string, string> {
+  if (!secretsInKeychain) {
+    const legacy: Record<string, string> = {};
+    if (server.password) legacy.password = server.password;
+    if (server.token) legacy.token = server.token;
+    return legacy;
+  }
+  const raw = engine.secretGet(server.id);
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const secret: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "string" && value) secret[key] = value;
+    }
+    return secret;
+  } catch {
+    return {};
+  }
+}
+
+/** Writes the secret blob; `false` means the Keychain refused it. */
+function writeServerSecret(id: string, secret: Record<string, string>): boolean {
+  try {
+    if (Object.keys(secret).length > 0) {
+      engine.secretSet(id, JSON.stringify(secret));
+    } else {
+      engine.secretDelete(id);
+    }
+    return true;
+  } catch (error) {
+    console.warn("neiro: 凭据没有写进钥匙串:", String(error));
+    return false;
+  }
+}
+
+/** Deletes one server's secret (including a desktop row's, which has none). */
+export function deleteServerSecret(id: string): void {
+  if (!secretsInKeychain) return;
+  try {
+    engine.secretDelete(id);
+  } catch (error) {
+    console.warn("neiro: 凭据没有从钥匙串删除:", String(error));
+  }
+}
+
+/** The server's credentials as the engine needs them: the saved secret plus
+ * the row's own legacy copy. */
+export function serverCredentials(server: RemoteServer): Record<string, string> {
+  return {
+    ...(server.password ? { password: server.password } : {}),
+    ...(server.token ? { token: server.token } : {}),
+    ...(server.params ?? {}),
+    ...readServerSecret(server),
+  };
+}
+
+/** Strips `secretKeys` out of the row and into the Keychain (iOS). The
+ * desktop keeps the row as it is. */
+function withStoredSecrets(server: RemoteServer, secretKeys: string[]): RemoteServer {
+  if (!secretsInKeychain) return server;
+  const params: Record<string, string> = { ...(server.params ?? {}) };
+  const secret: Record<string, string> = {};
+  const row: RemoteServer = { ...server, params };
+  delete row.password;
+  delete row.token;
+  for (const key of secretKeys) {
+    const value = key === "password" ? server.password : key === "token" ? server.token : params[key];
+    if (typeof value === "string" && value) secret[key] = value;
+    delete params[key];
+  }
+  const saved = writeServerSecret(server.id, secret);
+  row.hasSecret = saved && Object.keys(secret).length > 0;
+  return row;
+}
+
 /** 服务器花名册的增改删（凭据只进 Storage）。 */
-export async function upsertServer(server: RemoteServer): Promise<void> {
-  const next = servers().filter((s) => s.id !== server.id);
-  next.push(server);
+export async function upsertServer(
+  server: RemoteServer,
+  secretKeys: string[] = DEFAULT_SECRET_KEYS,
+): Promise<void> {
+  const row = withStoredSecrets(server, secretKeys);
+  const next = servers().filter((s) => s.id !== row.id);
+  next.push(row);
   servers.set(next);
   await Storage.setItem(SERVERS_KEY, JSON.stringify(next)).catch((error) =>
     console.warn("neiro: 服务器花名册没有记住:", String(error)),
@@ -123,6 +240,7 @@ export async function upsertServer(server: RemoteServer): Promise<void> {
 }
 
 export async function removeServer(id: string): Promise<void> {
+  deleteServerSecret(id);
   servers.set(servers().filter((s) => s.id !== id));
   await Storage.setItem(SERVERS_KEY, JSON.stringify(servers())).catch((error) =>
     console.warn("neiro: 服务器花名册没有记住:", String(error)),
@@ -213,7 +331,8 @@ effect(() => {
       const activeId = storedId === LOCAL_ALL_ID ? ALL_ID : storedId;
       activeSourceId.set(activeId);
       if (activeId.startsWith("local:") && activeId !== LOCAL_ALL_ID) {
-        setHomeRoot(activeId.slice("local:".length));
+        const record = rootRecords().find((row) => `local:${row.id}` === activeId);
+        setHomeRoot(record?.path ?? null);
       } else if (scopedRoot() === null) {
         // Nothing picked since boot: the stored choice stands. A folder picked
         // while this read was in flight is the newer fact, not this one.
@@ -227,9 +346,41 @@ effect(() => {
   })();
 });
 
+// A roster row written before the Keychain existed (a legacy `remote:config`
+// migrated into `srv-0`, or a roster saved under an older build) still carries
+// its password in the clear. Once the engine is ready — the Keychain bridge
+// needs it — those move into the Keychain and the row keeps only the marker.
+let secretsMigrated = false;
+effect(() => {
+  if (!secretsInKeychain || secretsMigrated) return;
+  if (!serversLoaded() || engine.health().status !== "ready") return;
+  secretsMigrated = true;
+  const plain = servers().filter(
+    (row) =>
+      !!row.password ||
+      !!row.token ||
+      DEFAULT_SECRET_KEYS.some((key) => !!row.params?.[key]),
+  );
+  if (plain.length === 0) return;
+  const next = servers().map((row) => (plain.includes(row) ? withStoredSecrets(row, DEFAULT_SECRET_KEYS) : row));
+  servers.set(next);
+  void Storage.setItem(SERVERS_KEY, JSON.stringify(next)).catch((error) =>
+    console.warn("neiro: 服务器花名册没有记住:", String(error)),
+  );
+  void Storage.removeItem("remote:config").catch(() => {});
+});
+
+/** 本地来源在启动时可能比根目录记录先恢复（记录等引擎就绪才读）。记录
+ * 到了之后把作用域补上：来源 id 是 `local:{id}`，路径只在内存里。 */
+effect(() => {
+  const id = activeSourceId();
+  if (!id.startsWith("local:") || id === LOCAL_ALL_ID) return;
+  const record = rootRecords().find((row) => `local:${row.id}` === id);
+  if (record?.path && scopedRoot() === null) setHomeRoot(record.path);
+});
+
 /** 新增本地根（首页 Tab 的 + 文件夹），并切到它的来源。 */
 export async function pickAndAddRoot(): Promise<void> {
-  const before = roots().length;
-  await addRoot();
-  if (roots().length > before) selectSource(`local:${roots()[roots().length - 1]}`);
+  const added = await addRoot();
+  if (added) selectSource(`local:${added.id}`);
 }

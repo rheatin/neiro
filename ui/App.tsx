@@ -9,6 +9,7 @@ import { health } from "./src/state/engine";
 import { layout, UnsupportedPage } from "./src/components/layout";
 import { DesktopShell } from "./src/shells/desktop";
 import { StudioMinimalShell } from "./src/shells/studio-minimal";
+import { MobileShell } from "./src/shells/mobile";
 import { PluginManagerDialog } from "./src/components/ui/plugin-dialog";
 import { NowPlayingSheet } from "./src/components/player/now-playing";
 import { OutputSheet } from "./src/components/player/output-drawer";
@@ -20,7 +21,12 @@ import { LyricsWriteDialog } from "./src/components/player/lyrics-write-dialog";
 import { PlaylistDialogs } from "./src/components/library/playlist-dialogs";
 import { ContextMenuHost } from "./src/components/ui/context-menu";
 import { QueueSheet } from "./src/components/player/queue-sheet";
-import { bumpVolume, next, seek, toggle as togglePlayback } from "./src/state/player";
+import {
+  bumpVolume,
+  next,
+  seek,
+  toggle as togglePlayback,
+} from "./src/state/player";
 import { loadAdoptedLyrics, loadAutoLyricsSetting, subscribeLyrics } from "./src/state/lyrics";
 import { outputOpen, setOutputOpen, setPluginDialogOpen } from "./src/state/overlays";
 import {
@@ -131,7 +137,7 @@ function App() {
 
   return (
     <View class="flex-1 bg-sidebar">
-      <If when={layout() === "desktop"} else={<UnsupportedPage />}>
+      <If when={layout() === "desktop"} else={layout() === "mobile" ? <MobileShell /> : <UnsupportedPage />}>
         <If when={isStudioMinimalShell()} else={<DesktopShell />}>
           <StudioMinimalShell />
         </If>
@@ -145,7 +151,7 @@ function App() {
       <LyricsWriteDialog />
       <PlaylistDialogs />
       <ContextMenuHost />
-      <Toaster bottomOffset={96} />
+      <Toaster bottomOffset={layout() === "mobile" ? 72 : 96} />
       <Shortcuts />
     </View>
   );

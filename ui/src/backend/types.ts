@@ -350,6 +350,9 @@ export interface ProviderDescriptor {
   id: string;
   name: string;
   fields: ProviderField[];
+  /** The provider serves a track's bytes itself: its rows play from
+   * `remote://{id}.{ext}` without a download. Absent from an older Base. */
+  source?: boolean;
 }
 
 /** Open string for any dynamically registered remote provider plugin. */
@@ -433,6 +436,24 @@ export interface RemoteArtwork {
 
 // ---- The contract -----------------------------------------------------------
 
+/** A folder the user picked on iOS: the path to scan now, the
+ * security-scoped bookmark that keeps the folder across launches, and its
+ * own name. The path is memory-only; the bookmark is what is stored. */
+export interface PickedFolder {
+  path: string;
+  bookmark: string;
+  label: string;
+}
+
+/** A stored bookmark resolved for this launch. `stale` means iOS asked for a
+ * new bookmark, which comes back in `bookmark`; `null` from
+ * `resolveFolderBookmark` means the folder must be picked again. */
+export interface FolderAccess {
+  path: string;
+  bookmark: string;
+  stale: boolean;
+}
+
 /** What plays the music over the one Base the process owns (`engine.ts`).
  * Requests are sync: they throw `E_*` when the engine is gone. */
 export interface Backend {
@@ -486,6 +507,14 @@ export interface Backend {
   unwatchFolder(root: string): void;
   setReconcileInterval(seconds: number): void;
   pickFolder(): Promise<string | null>;
+  /** iOS: the folder picker with a security-scoped bookmark; the desktop
+   * rejects, because a path alone already survives there. */
+  pickFolderBookmark(): Promise<PickedFolder | null>;
+  /** iOS: resolve a stored bookmark and open access to the folder; the
+   * desktop returns the stored path as it is. `null` = pick again. */
+  resolveFolderBookmark(bookmark: string): FolderAccess | null;
+  /** iOS: stop the app's access to a folder that left the library. */
+  releaseFolderBookmark(bookmark: string): void;
 
   // Data requests and their events (the fire-and-forget round trip).
   listTracks(offset: number, limit: number): void;
@@ -501,6 +530,18 @@ export interface Backend {
   coverCachePut(path: string, uri: string): void;
 
   // 远程库（v2）
+  /** This installation's remote identity, the same value `set_remote`
+   * sends. Empty when no engine handle is loaded. */
+  deviceId(): string;
+  /** The secret blob saved for the server with this roster id: a JSON
+   * object of the provider's secret params, or `null`. iOS reads the
+   * Keychain; the desktop keeps credentials in the roster row. */
+  secretGet(server: string): string | null;
+  /** Saves the server's secret blob. iOS: one Keychain item; the desktop
+   * has no Keychain and stores nothing here. */
+  secretSet(server: string, value: string): void;
+  /** Forgets the server's secret blob. */
+  secretDelete(server: string): void;
   setRemoteJellyfinPassword(baseUrl: string, user: string, password: string): void;
   setRemoteJellyfinToken(baseUrl: string, token: string): void;
   setRemoteNavidrome(baseUrl: string, user: string, password: string): void;

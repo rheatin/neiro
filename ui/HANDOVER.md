@@ -241,6 +241,35 @@ bit-perfect / bypassed / Policy / Output 等**保留英文原文**，中文只�
   `.iss`（缺 ISCC 时只警告，`.nsh/out/Neiro` 与 zip 仍产出）——部署双击版
   仍拷 `Neiro.exe`+`nsh/`+引擎 DLL。
 
+## NSH 0.6.1 升级（2026-11-20）
+
+- **版本对齐**：CLI `0.5.0 (61a11d5 nightly 2026-11-12)` → `0.6.1`；
+  `Cargo.toml` 的 nsh-core/nsh-base 从 nightly `4aeefa8`（0.6.0）改为
+  `tag = "v0.6.1"`，CLI、生成的 host 与 crate 同一版本。
+- **布局动画改作用域**：`animateLayoutOn` 从全局 `LayoutAnimation.configureNext`
+  改为 `ViewRef.animateLayout`，四处调用（桌面壳 / 播放条 / Now Playing
+  内容 / 歌词）各自带 ref。只动画真正变化的帧，不再把常驻的隐藏 tab 层一起
+  送进布局动画；插入/删除不再由它淡入，出现的内容由自身入场负责。
+- **Now Playing 弹簧**：内容入场用 `MotionSpec.spring`（stiffness 420 /
+  damping 40），歌词与封面重排用 `animateLayout({ type: "spring",
+  stiffness: 320, damping: 34 })`；Sheet 自身滑入仍是 NSH 的。
+- **顺带获得**（不改代码）：`Each`/List 只更新保留行、一行一个 cell、keyed
+  行按 identity 保留 cell 与尺寸、`numColumns` 变化锚定首个可见项、窗口
+  resize 保持滚动可见项、macOS 隐藏视图不抢键盘焦点；0.6.1 修了释放中的
+  memo、keyed 行索引、文本内容保留和复合动画取消。
+- **测量**（macOS 真窗口，800 首 / 160 专辑）：已建层的 tab 切换同步
+  `0.13–0.23ms`、12 帧内最大间隔 `16.9–18.8ms`（约一帧）；首次进专辑网格
+  `2.93ms` + 首帧 `292.7ms`，首次进曲目页 `2.85ms` + `201.1ms`。
+- **验证**：`nsh check` 通过；`cargo test --lib` 24 通过；`nsh test` 92 项
+  88 通过，4 个失败与升级前一致（dither-policy / info-drawer-play /
+  player-bar / share-mode，均为测试 host 无引擎时 `debugPlay` 后 `暂停`
+  不出现）。
+- **环境**：本机 stable 工具链缺 `rustc` 二进制，`rustup update stable`
+  修复到 rustc/cargo 1.100.0；不修则 `nsh check` 的 cargo 调用失败。
+- **iOS（以后）**：0.6 起有系统 Switch/DateTimePicker、系统菜单/分享、
+  sheet detents、SplitView 自适应列、reactive size class 等；iOS 布局未定，
+  暂不接，但共享 TSX 不要写死 macOS 假设。
+
 ## 曲单"新建没反应/不能加歌"（2026-11-13）
 
 两个 UI 冻结快照的 bug：
@@ -378,3 +407,45 @@ Proof, on the Mac: `engine/build-macos/macos_play_check /tmp/tone.wav` prints
 reports `engine down page: false` and lists the shell pages; the packaged
 `Neiro.app` launches with `libneiro_base.dylib`, `libnae.dylib` and the FFmpeg
 dylibs beside it, all references rewritten to `@loader_path`.
+
+
+## iOS Stage 5: packaging and secrets (2026-11-23)
+
+The device build's shape is now written down where the tools can enforce it.
+
+- **Plist keys belong to `ui/nsh.json`.** NSH v0.6.1 writes `ios.infoPlist`
+  into the packaged `Info.plist`, so there is no hand-maintained
+  `ui/ios/Info.plist`. `UIBackgroundModes: ["audio"]`,
+  `NSLocalNetworkUsageDescription` and
+  `NSAppTransportSecurity.NSAllowsLocalNetworking` (no arbitrary loads) are
+  verified in the built bundle. No entitlements are needed beyond NSH's own
+  identity, so `App.entitlements` waits for the release owner's signing
+  inputs.
+- **NSH has no privacy-manifest support.** `scripts/ios-prepare.sh` copies
+  `ui/ios/PrivacyInfo.xcprivacy` into the `.app` after `nsh package` and
+  re-signs it (a file added after signing is not covered). `--check` verifies
+  the three plist promises and the manifest and writes nothing; CI runs it
+  against the simulator package.
+- **Secrets are Keychain-only on iOS.** `ui/src/ios/keychain.rs` holds one
+  generic-password item per server (`app.neiro.ui.remote`,
+  `remote:secret:{id}`, accessibility AfterFirstUnlock) through
+  `objc2-security`. The roster keeps `hasSecret`; `state/sources.ts` is the
+  bridge (`readServerSecret`, `upsertServer`); `saveRemoteConfig` stops
+  writing `remote:config` on iOS; a ready-engine migration moves any legacy
+  plaintext row into the Keychain. Settings shows 凭据需重新输入 when the
+  marker has no item, and the dialog's validation then asks for the
+  credential again.
+- **Two roots.** `data_root()` is `NSHomeDirectory()/Library/Application
+  Support` on iOS; `cache_root()` is `Library/Caches`, where downloads,
+  covers, stats and pruning now live. `library.db` and its directory get
+  `NSFileProtectionCompleteUnlessOpen` at launch.
+
+Verified on this machine: `cargo check` for `aarch64-apple-ios` and
+`aarch64-apple-ios-sim`; `nsh check`; `cargo test --lib` 32 passed;
+`nsh test` 126 passed; `nsh package --target ios-simulator` (3 min, 81 MB
+bundle) followed by `scripts/ios-prepare.sh --check` passing.
+
+Still open: the manual device matrix (background audio under lock,
+interruption, route change, media-services reset, local-network denial,
+bookmark re-pick, cache cap), a signed device `.ipa`, and the
+Keychain-after-restore case.

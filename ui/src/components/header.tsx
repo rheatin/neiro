@@ -95,6 +95,13 @@ export function NavControls() {
   );
 }
 
+/** The mobile header's trailing item. `switchTo` reaches the same Settings
+ * the desktop sidebar opens; on mobile `open` pushes it onto the tab it was
+ * opened from, so the system header's back returns there. */
+export function MobileSettingsButton() {
+  return <IconButton name="settings" label="设置" size={20} onPress={() => switchTo(SETTINGS)} />;
+}
+
 /** The trailing controls: the search field and settings button. */
 export function TrailingControls() {
   return (

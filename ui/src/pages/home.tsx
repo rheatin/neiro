@@ -103,7 +103,7 @@ export function HomePage() {
   const wave = createListWave({ isTop: () => currentRoute().name === "home", reenter: rootOpens, quiet: scroll.restored });
 
   return (
-    <AppPage title="首页" testID="page-home" scroll={scroll}>
+    <AppPage title="首页" testID="page-home" scroll={scroll} gear>
       <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <Text role="header" class="px-6 pt-2 pb-4 text-4xl font-bold text-foreground" style={enter("fadeInUp")}>
           {greeting()}

@@ -51,8 +51,10 @@ import {
   type DirectoryListing,
   type EqBand,
   type Favourites,
+  type FolderAccess,
   type Health,
   type MostPlayed,
+  type PickedFolder,
   type Player,
   type Playlist,
   type PlaylistEntriesPage,
@@ -868,6 +870,34 @@ export class Engine implements Backend {
     return base.pickFolder();
   }
 
+  /** iOS's folder picker, with the security-scoped bookmark the library
+   * keeps instead of a path; `null` when the user cancelled. */
+  async pickFolderBookmark(): Promise<PickedFolder | null> {
+    const base = this.#base;
+    if (!base) throw new Error("E_ENGINE: 引擎未连接");
+    const picked = await base.pickFolderBookmark();
+    return picked
+      ? { path: text(picked.path), bookmark: text(picked.bookmark), label: text(picked.label) }
+      : null;
+  }
+
+  /** Resolves a stored bookmark and opens the app's access to the folder;
+   * `null` when it no longer resolves (pick it again). */
+  resolveFolderBookmark(bookmark: string): FolderAccess | null {
+    const base = this.#base;
+    if (!base) throw new Error("E_ENGINE: 引擎未连接");
+    const access = base.resolveFolderBookmark(bookmark);
+    return access
+      ? { path: text(access.path), bookmark: text(access.bookmark), stale: access.stale }
+      : null;
+  }
+
+  /** Stops the access a resolved bookmark opened; nothing to do without an
+   * engine (its process held no access). */
+  releaseFolderBookmark(bookmark: string): void {
+    this.#base?.releaseFolderBookmark(bookmark);
+  }
+
   listTracks(offset: number, limit: number): void {
     this.#command((base) => base.listTracks(offset, limit));
   }
@@ -929,6 +959,23 @@ export class Engine implements Backend {
     }
   }
 
+  /** The linked core's ABI version on iOS; 0 where the core is loaded at run time. */
+  baseAbiVersion(): number {
+    const base = this.#base;
+    if (!base) return 0;
+    try {
+      return base.baseAbiVersion();
+    } catch (error) {
+      console.warn("neiro: core ABI 版本读不出来:", String(error));
+      return 0;
+    }
+  }
+
+  /** The iOS test tone: writes it once, then plays it through the core. */
+  playTone(): void {
+    this.#command((base) => base.playTone());
+  }
+
   /** Deletes one cache bucket; the answer is the stats after the clean. */
   clearCache(kind: string): string | null {
     const base = this.#base;
@@ -943,6 +990,38 @@ export class Engine implements Backend {
   }
 
   // ---- 远程库（v2，契约：缓存目录由 Rust 固定，不传参） --------------------------
+
+  /** This install's remote identity. A probe can run with no Base loaded
+   * (the engine-down page still offers 设置), so that case answers empty and
+   * the caller keeps the historical fallback. */
+  deviceId(): string {
+    try {
+      return this.#base?.deviceId() ?? "";
+    } catch (error) {
+      console.warn("neiro: 设备标识没有读到:", String(error));
+      return "";
+    }
+  }
+
+  /** The Keychain blob for one server. A missing handle or a refused read
+   * answers `null`: the caller then asks the user to re-enter the
+   * credential instead of failing the whole page. */
+  secretGet(server: string): string | null {
+    try {
+      return this.#base?.secretGet(server) ?? null;
+    } catch (error) {
+      console.warn("neiro: 钥匙串没有读到:", String(error));
+      return null;
+    }
+  }
+
+  secretSet(server: string, value: string): void {
+    this.#command((base) => base.secretSet(server, value));
+  }
+
+  secretDelete(server: string): void {
+    this.#command((base) => base.secretDelete(server));
+  }
 
   setRemoteJellyfinPassword(baseUrl: string, user: string, password: string): void {
     this.#command((base) => base.setRemoteJellyfinPassword(baseUrl, user, password));

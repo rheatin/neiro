@@ -7,7 +7,7 @@
 import { Text, View, platform, signal, windowSize, type JSX } from "nsh";
 import { sidebarCollapsed } from "../state/overlays";
 
-export type Layout = "desktop" | "unsupported";
+export type Layout = "desktop" | "mobile" | "unsupported";
 
 /** The desktop sidebar's widths (a rail, and open), and the shell's gaps
  * around and between it and the pages. */
@@ -24,15 +24,53 @@ const COMPACT_BAR = 760;
 /** Narrower than this, it is stacked. */
 const STACKED_BAR = 520;
 
-/** The layout for the window now (tracked). A native desktop window is the
- * desktop; every other idiom this app does not pretend to support. */
+/** The two mobile shells. A phone and the cover screen are folded; an iPad
+ * and the inner screen of a foldable are unfolded. There is no hinge API: the
+ * shell is chosen by measured width, with a band where the current one is
+ * kept so a drag across the threshold does not flicker. */
+export type MobileShell = "folded" | "unfolded";
+const UNFOLD_AT = 700;
+const FOLD_AT = 660;
+
+/** Which mobile shell `width` pt asks for, keeping `current` inside the
+ * 660–700 pt band. Pure, so the band is tested without a window. */
+export function nextMobileShell(current: MobileShell, width: number): MobileShell {
+  if (width >= UNFOLD_AT) return "unfolded";
+  if (width < FOLD_AT) return "folded";
+  return current;
+}
+
+const mobile = signal<MobileShell>("folded");
+let measureTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** The mobile shell in use (tracked). A change is applied after 250 ms, so a
+ * fold gesture does not rebuild the shell mid-drag. */
+export const mobileShell = () => mobile();
+
+/** The mobile shell measured its width (call from `onLayout`). */
+export function measureMobileShell(width: number): void {
+  const w = Math.round(width);
+  if (w <= 0) return;
+  if (measureTimer !== null) clearTimeout(measureTimer);
+  measureTimer = setTimeout(() => {
+    measureTimer = null;
+    mobile.set(nextMobileShell(mobile(), w));
+  }, 250);
+}
+
+/** The layout for the window now (tracked). iOS is the mobile application;
+ * a native desktop window is the desktop; every other idiom this app does
+ * not pretend to support. */
 export function layout(): Layout {
-  if (platform.desktop && platform.os !== "web" && platform.os !== "ios" && platform.os !== "android") return "desktop";
+  if (platform.os === "ios") return "mobile";
+  if (platform.desktop && platform.os !== "web" && platform.os !== "android") return "desktop";
   return "unsupported";
 }
 
-/** How the desktop's player bar is laid out (tracked). */
+/** How the desktop's player bar is laid out (tracked). The mobile player is
+ * the mini bar, which is one arrangement. */
 export const barSize = (): "full" | "compact" | "stacked" => {
+  if (layout() === "mobile") return "compact";
   // The pages' width, which the bar floats over.
   const w = windowSize().width - sidebarWidth() - (sidebarShown() ? SHELL_GAPS : 2 * 8);
   return w < STACKED_BAR ? "stacked" : w < COMPACT_BAR ? "compact" : "full";
@@ -60,11 +98,14 @@ export const sidebarWidth = () =>
   !sidebarShown() ? 0 : railSidebar() ? RAIL_WIDTH : SIDEBAR_WIDE;
 
 /** Whether there is room for the album column of track lists (tracked). */
-export const wideTracks = () => layout() === "desktop" && windowSize().width > ALBUM_COLUMN;
+export const wideTracks = () => (measuredShellWidth() || windowSize().width) > ALBUM_COLUMN;
 
-/** The room a page leaves at its end: the player floats over the bottom of
- * the pages, so their last rows scroll clear of it. */
-export const pageEnd = () => (barSize() === "stacked" ? "pb-36" : "pb-28");
+/** The room a page leaves at its end. On the desktop the player floats over
+ * the pages, so their last rows scroll clear of it. On mobile the chrome is
+ * part of the column (mini player and tab bar below the content), so the page
+ * only needs its own margin and the shell owns the rest. */
+export const pageEnd = () =>
+  layout() === "mobile" ? "pb-6" : barSize() === "stacked" ? "pb-36" : "pb-28";
 
 /** The one page every non-desktop idiom gets: honest, no fake UI. */
 export function UnsupportedPage(): JSX.Element {

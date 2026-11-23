@@ -264,6 +264,10 @@ function mergeProviderList(raw: ProviderDescriptor[]): ProviderDescriptor[] {
         list.push({
           id: "jellyfin",
           name: "Jellyfin 媒体服务器",
+          // Either form is the same endpoint: Base's declaration carries over.
+          source: raw.some(
+            (p) => (p.id === "jellyfin" || p.id === "jellyfin_token") && p.source === true,
+          ),
           fields: [
             { key: "base_url", label: "服务器地址", kind: "url", placeholder: "http://192.168.1.2:8096", required: true, secret: false },
             { key: "user", label: "用户名", kind: "text", placeholder: "admin", required: false, secret: false },

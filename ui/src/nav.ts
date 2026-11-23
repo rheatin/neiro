@@ -9,10 +9,12 @@
 
 import { batch, effect, signal, untracked } from "nsh";
 import { createNavStack, type NavStackState } from "nsh/base";
+import { layout } from "./components/layout";
 
 /** A page of the main content. */
 export type Route =
   | { name: "home" }
+  | { name: "library" }
   | { name: "search" }
   | { name: "albums" }
   | { name: "artists" }
@@ -32,6 +34,7 @@ export type Route =
 /** The root routes: the same objects every time, so a stack that keeps one
  * keeps its page. */
 export const HOME: Route = { name: "home" };
+export const LIBRARY: Route = { name: "library" };
 export const SEARCH: Route = { name: "search" };
 export const ALBUMS: Route = { name: "albums" };
 export const ARTISTS: Route = { name: "artists" };
@@ -41,9 +44,17 @@ export const LIKED: Route = { name: "liked" };
 export const PLAYLISTS: Route = { name: "playlists" };
 export const SETTINGS: Route = { name: "settings" };
 
-export const ROOT_ROUTES = [HOME, SEARCH, ALBUMS, ARTISTS, TRACKS, REMOTE, LIKED, PLAYLISTS, SETTINGS];
+export const ROOT_ROUTES = [HOME, LIBRARY, SEARCH, ALBUMS, ARTISTS, TRACKS, REMOTE, LIKED, PLAYLISTS, SETTINGS];
+
+/** The four roots the mobile tab bar shows, in order. They are the same
+ * route objects the desktop sidebar uses, so a page is the same page. */
+export const MOBILE_ROOTS = [HOME, LIBRARY, REMOTE, SEARCH];
 
 const ROOT_NAMES = new Set<Route["name"]>(ROOT_ROUTES.map((r) => r.name));
+/** The roots that are places on mobile. The rest of `ROOT_ROUTES` (专辑,
+ * 艺术家, 歌曲 … and 设置) are pages a tab pushes: on a phone the sidebar's
+ * places do not fit a tab bar, so the categories live one level down. */
+const MOBILE_ROOT_NAMES = new Set<Route["name"]>(MOBILE_ROOTS.map((r) => r.name));
 
 /** How many times the root on show was opened again (spotish 最新动效的
  * `reenter`：同一 root 被再选中，列表也重新进场一次；切到别的栏目再回来
@@ -184,6 +195,7 @@ export function same(a: Route | undefined, b: Route): boolean {
   if (!a || a.name !== b.name) return false;
   switch (a.name) {
     case "home":
+    case "library":
     case "search":
     case "albums":
     case "artists":
@@ -234,7 +246,11 @@ export function currentRoot(): Route {
  * stack is gone back to (Back's motion, its page as it was); the next one
  * ahead is gone forward to; any other is pushed (Forward's motion). */
 export function open(route: Route): void {
-  if (ROOT_NAMES.has(route.name)) {
+  // A place shows its stack. On mobile the tab bar's four are the places;
+  // the desktop's other roots (the library's categories, 设置) are pages the
+  // tab they are opened from pushes, so Back returns to what you were
+  // reading and the tab bar stays lit.
+  if (ROOT_NAMES.has(route.name) && (layout() !== "mobile" || MOBILE_ROOT_NAMES.has(route.name))) {
     openRoot(route);
     return;
   }
@@ -294,6 +310,23 @@ export function openRoot(root: Route): void {
     stack.setAhead([]);
     activeKey.set(key);
   });
+}
+
+/** Chooses a tab on mobile. Unlike `openRoot`, the tab being left keeps its
+ * stack: on a phone the tabs are places, and coming back to one is coming
+ * back to where you were. Re-tapping the active tab goes back to its root. */
+export function activateTab(root: Route): void {
+  const stack = stackFor(root);
+  if (activeKey() === root.name) {
+    rootOpenCount.update((n) => n + 1);
+    if (stack.state.routes().length > 1) {
+      stack.intent = { kind: "clear" };
+      stack.state.popToRoot();
+    }
+    return;
+  }
+  motion.set("fade");
+  activeKey.set(root.name);
 }
 
 /** Whether Back has a page to go to (tracked). */

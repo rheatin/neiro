@@ -1,15 +1,19 @@
 //! Base, reached through its C ABI (`../Neiro/base/include/nae_base.h`).
 //!
-//! The library is opened at run time, never linked: `neiro_base.dll` beside
-//! this binary on Windows, `libneiro_base.dylib` on macOS, or the same pair
-//! under `../Neiro/base/target/release/` when this UI runs out of the engine
-//! checkout. It imports the engine's own audio library (`nae.dll`,
+//! On desktop the library is opened at run time, never linked: `neiro_base.dll`
+//! beside this binary on Windows, `libneiro_base.dylib` on macOS, or the same
+//! pair under `../Neiro/base/target/release/` when this UI runs out of the
+//! engine checkout. It imports the engine's own audio library (`nae.dll`,
 //! `libnae.dylib`), which the platform resolves from the loaded library's own
 //! directory — the Windows flag below makes that explicit, macOS reads it
 //! from the dylib's `@loader_path` rpath — so neither library is copied or
 //! put on a PATH. A machine without the engine still builds and runs this
 //! UI; [`Engine::open`] reports `E_ENGINE` and the interface says the engine
 //! is not connected instead of drawing plausible values.
+//!
+//! On iOS the core is linked at build time (see `engine/ios.rs` and
+//! `docs/ios/core-contract.md`): the same [`Engine`] is filled from
+//! `extern "C"` symbols, with no probing and no fallback.
 //!
 //! Commands and events are the serialized types of `base/src/protocol.rs`:
 //! commands tagged `"command"`, events tagged `"event"`, both snake_case.
@@ -18,19 +22,21 @@
 //! fire-and-forget: the answer is an event, the store paints from events.
 
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use libloading::{Library, Symbol};
 use serde::Deserialize;
 
-/// The engine's Base library beside the binary, named the way the platform
-/// loads it.
-#[cfg(windows)]
-const DLL: &str = "neiro_base.dll";
-#[cfg(target_os = "macos")]
-const DLL: &str = "libneiro_base.dylib";
-#[cfg(all(unix, not(target_os = "macos")))]
-const DLL: &str = "libneiro_base.so";
+#[cfg(not(target_os = "ios"))]
+pub(crate) mod desktop;
+#[cfg(target_os = "ios")]
+pub(crate) mod ios;
+
+/// What the loader keeps alive for the process: the desktop's opened dylib,
+/// or nothing on iOS, where the core is part of the binary.
+#[cfg(not(target_os = "ios"))]
+type Loader = libloading::Library;
+#[cfg(target_os = "ios")]
+type Loader = std::marker::PhantomData<()>;
 
 type StartWithLibraryFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 type CommandFn = unsafe extern "C" fn(*mut c_void, *const c_char) -> i32;
@@ -81,7 +87,7 @@ pub struct Engine {
     move_user_queue_item: Option<MoveUserQueueItemFn>,
     /// The subscription's context; freed in `Drop`, after `unsubscribe`.
     ctx: *mut Ctx,
-    _library: Option<Library>,
+    _library: Option<Loader>,
 }
 
 // The pointer is process-owned state; nothing inside it is thread-local, and
@@ -100,37 +106,6 @@ extern "C" fn forward(json: *const c_char, user: *mut c_void) {
     let ctx = unsafe { &*(user as *const Ctx) };
     let text = unsafe { CStr::from_ptr(json) }.to_string_lossy().into_owned();
     let _ = ctx.events.send(text);
-}
-
-/// Where `neiro_base.dll` is looked for, in order: the environment's pointer
-/// to one copy, then beside this binary, then in the engine checkout's target
-/// directory (which also carries `nae.dll`, the loaded DLL's own import).
-fn dll_candidates(exe_dir: Option<&Path>) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(path) = std::env::var_os("NEIRO_BASE_DLL") {
-        paths.push(PathBuf::from(path));
-    }
-    if let Some(dir) = exe_dir {
-        paths.push(dir.join(DLL));
-        #[cfg(target_os = "macos")]
-        paths.push(dir.join("../Frameworks").join(DLL));
-    }
-    for sdk in ["../.cache/neiro-core/current", ".cache/neiro-core/current"] {
-        #[cfg(windows)]
-        paths.push(PathBuf::from(sdk).join("bin").join(DLL));
-        #[cfg(not(windows))]
-        paths.push(PathBuf::from(sdk).join("lib").join(DLL));
-    }
-    for root in [
-        "../neiro-core/base",
-        "../../neiro-core/base",
-        "../Neiro/base",
-        "../base",
-        "../../base",
-    ] {
-        paths.push(PathBuf::from(root).join("target/release").join(DLL));
-    }
-    paths
 }
 
 /// Everything between "the DLL is loaded" and "the events are subscribed":
@@ -159,7 +134,7 @@ struct Prepared {
     remove_queue_item: Option<RemoveQueueItemFn>,
     clear_user_queue: Option<ClearUserQueueFn>,
     move_user_queue_item: Option<MoveUserQueueItemFn>,
-    library: Library,
+    library: Loader,
 }
 
 /// The exports this UI calls, resolved once by [`Engine::resolve_all`].
@@ -190,126 +165,25 @@ struct Exports {
 }
 
 impl Engine {
-    /// Opens the DLL, starts Base with its SQLite library at `library`, and
+    /// Opens Base, starts it with its SQLite library at `library`, and
     /// subscribes. Every event arrives afterwards as its raw JSON line on
     /// the returned receiver; the channel stays open until the engine is
     /// dropped.
+    ///
+    /// Desktop searches for the dylib and may fall back to older symbols;
+    /// iOS links the core into the app and fails before start on an ABI
+    /// mismatch.
     pub fn open(
         library: &Path,
     ) -> Result<(Engine, std::sync::mpsc::Receiver<String>), String> {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(Path::to_path_buf));
-        let mut tried = Vec::new();
-        let all_candidates = dll_candidates(exe_dir.as_deref());
-        // Prefer a candidate that exports the full plugin C ABI (`NAE_BaseListPlugins`)
-        // when a local `../neiro-core` build is newer than a cached v0.2.0 prebuilt.
-        let mut ordered = Vec::with_capacity(all_candidates.len());
-        let mut legacy = Vec::new();
-        for c in all_candidates {
-            if c.is_file() && Self::exports_plugin_api(&c) {
-                ordered.push(c);
-            } else {
-                legacy.push(c);
-            }
+        #[cfg(not(target_os = "ios"))]
+        {
+            desktop::open(library)
         }
-        ordered.extend(legacy);
-
-        for candidate in ordered {
-            if !candidate.is_file() {
-                tried.push(format!("{}（没有文件）", candidate.display()));
-                continue;
-            }
-            let reason = match Self::load(&candidate, library) {
-                Ok(prepared) => match prepared.finish() {
-                    Ok((engine, receiver)) => return Ok((engine, receiver)),
-                    Err(reason) => reason,
-                },
-                Err(reason) => reason,
-            };
-            tried.push(format!("{}：{reason}", candidate.display()));
+        #[cfg(target_os = "ios")]
+        {
+            ios::start(library)?.finish()
         }
-        Err(format!(
-            "E_ENGINE: 无法打开 {DLL}。试过的位置：{}。需要先构建 ../Neiro/base。",
-            tried.join("；")
-        ))
-    }
-
-    fn exports_plugin_api(path: &Path) -> bool {
-        #[cfg(windows)]
-        let lib = unsafe {
-            libloading::os::windows::Library::load_with_flags(
-                path,
-                libloading::os::windows::LOAD_WITH_ALTERED_SEARCH_PATH,
-            )
-        }
-        .ok()
-        .map(libloading::Library::from);
-        #[cfg(not(windows))]
-        let lib = unsafe { libloading::Library::new(path) }.ok();
-        let Some(lib) = lib else { return false };
-        symbol_optional::<ListPluginsFn>(&lib, b"NAE_BaseListPlugins\0").is_some()
-    }
-
-    /// Loads the exports and starts Base. Nothing subscribes yet: without an
-    /// event channel a queued command loses its answer.
-    fn load(path: &Path, library: &Path) -> Result<Prepared, String> {
-        // Windows: `LOAD_WITH_ALTERED_SEARCH_PATH` makes the loaded module's
-        // own directory the search root for its dependencies — `nae.dll`
-        // sits beside `neiro_base.dll`, and the FFmpeg DLLs beside `nae.dll`.
-        // The plain flags would look in the host's directory instead and fail
-        // a DLL chain that provably works there (`base_capi_check.exe`).
-        //
-        // Elsewhere `dlopen` resolves the same way: macOS through the
-        // dylib's `@loader_path` rpath, Linux through `$ORIGIN`.
-        #[cfg(windows)]
-        let library_file = {
-            let loaded = unsafe {
-                libloading::os::windows::Library::load_with_flags(
-                    path,
-                    libloading::os::windows::LOAD_WITH_ALTERED_SEARCH_PATH,
-                )
-            }
-            .map_err(|e| format!("加载失败：{e}"))?;
-            libloading::Library::from(loaded)
-        };
-        #[cfg(not(windows))]
-        let library_file =
-            unsafe { libloading::Library::new(path) }.map_err(|e| format!("加载失败：{e}"))?;
-        let exports = Exports::resolve(&library_file)?;
-        let library_c =
-            CString::new(library.to_string_lossy().as_ref()).expect("路径里没有 NUL");
-        let base =
-            unsafe { (exports.start_with_library)(library_c.as_ptr() as *const c_char) };
-        if base.is_null() {
-            // Base was never started, so there is nothing to shut down; the
-            // DLL unloads when this error returns.
-            return Err("Base 无法启动（worker 线程或 library 打不开）".into());
-        }
-        Ok(Prepared {
-            base,
-            command: exports.command,
-            subscribe: exports.subscribe,
-            unsubscribe: exports.unsubscribe,
-            snapshot: exports.snapshot,
-            free_string: exports.free_string,
-            shutdown: exports.shutdown,
-            remote_providers: exports.remote_providers,
-            list_directory: exports.list_directory,
-            list_plugins: exports.list_plugins,
-            set_plugin_enabled: exports.set_plugin_enabled,
-            reload_plugins: exports.reload_plugins,
-            play_context: exports.play_context,
-            play_next: exports.play_next,
-            play_later: exports.play_later,
-            set_repeat_mode: exports.set_repeat_mode,
-            set_shuffle_mode: exports.set_shuffle_mode,
-            previous: exports.previous,
-            remove_queue_item: exports.remove_queue_item,
-            clear_user_queue: exports.clear_user_queue,
-            move_user_queue_item: exports.move_user_queue_item,
-            library: library_file,
-        })
     }
 
     /// Sends one serialized command. `0` means queued; the state change
@@ -800,93 +674,6 @@ impl Prepared {
     }
 }
 
-impl Exports {
-    /// Resolves the exports in one place so a missing symbol names itself.
-    fn resolve(library: &Library) -> Result<Exports, String> {
-        Ok(Exports {
-            start_with_library: symbol::<StartWithLibraryFn>(
-                library,
-                b"NAE_BaseStartWithLibrary\0",
-                "NAE_BaseStartWithLibrary",
-            )?,
-            command: symbol::<CommandFn>(library, b"NAE_BaseCommand\0", "NAE_BaseCommand")?,
-            subscribe: symbol::<SubscribeFn>(
-                library,
-                b"NAE_BaseSubscribe\0",
-                "NAE_BaseSubscribe",
-            )?,
-            unsubscribe: symbol::<UnsubscribeFn>(
-                library,
-                b"NAE_BaseUnsubscribe\0",
-                "NAE_BaseUnsubscribe",
-            )?,
-            snapshot: symbol::<SnapshotFn>(library, b"NAE_BaseSnapshot\0", "NAE_BaseSnapshot")?,
-            free_string: symbol::<FreeStringFn>(
-                library,
-                b"NAE_BaseFreeString\0",
-                "NAE_BaseFreeString",
-            )?,
-            shutdown: symbol::<ShutdownFn>(library, b"NAE_BaseShutdown\0", "NAE_BaseShutdown")?,
-            remote_providers: symbol_optional::<RemoteProvidersFn>(
-                library,
-                b"NAE_BaseRemoteProviders\0",
-            ),
-            list_directory: symbol_optional::<ListDirectoryFn>(
-                library,
-                b"NAE_BaseListDirectory\0",
-            ),
-            list_plugins: symbol_optional::<ListPluginsFn>(
-                library,
-                b"NAE_BaseListPlugins\0",
-            ),
-            set_plugin_enabled: symbol_optional::<SetPluginEnabledFn>(
-                library,
-                b"NAE_BaseSetPluginEnabled\0",
-            ),
-            reload_plugins: symbol_optional::<ReloadPluginsFn>(
-                library,
-                b"NAE_BaseReloadPlugins\0",
-            ),
-            play_context: symbol_optional::<PlayContextFn>(
-                library,
-                b"NAE_BasePlayContext\0",
-            ),
-            play_next: symbol_optional::<PlayNextFn>(
-                library,
-                b"NAE_BasePlayNext\0",
-            ),
-            play_later: symbol_optional::<PlayLaterFn>(
-                library,
-                b"NAE_BasePlayLater\0",
-            ),
-            set_repeat_mode: symbol_optional::<SetRepeatModeFn>(
-                library,
-                b"NAE_BaseSetRepeatMode\0",
-            ),
-            set_shuffle_mode: symbol_optional::<SetShuffleModeFn>(
-                library,
-                b"NAE_BaseSetShuffleMode\0",
-            ),
-            previous: symbol_optional::<PreviousFn>(
-                library,
-                b"NAE_BasePrevious\0",
-            ),
-            remove_queue_item: symbol_optional::<RemoveQueueItemFn>(
-                library,
-                b"NAE_BaseRemoveQueueItem\0",
-            ),
-            clear_user_queue: symbol_optional::<ClearUserQueueFn>(
-                library,
-                b"NAE_BaseClearUserQueue\0",
-            ),
-            move_user_queue_item: symbol_optional::<MoveUserQueueItemFn>(
-                library,
-                b"NAE_BaseMoveUserQueueItem\0",
-            ),
-        })
-    }
-}
-
 /// How long a drop waits for Base to stop before leaving its worker to the
 /// process. Base's shutdown joins its worker, and that worker may sit in a
 /// remote request (a page still listing, a fetch from a server that stopped
@@ -931,16 +718,6 @@ impl Drop for Engine {
     }
 }
 
-/// One export by its C name; the error carries the name, not a raw OS code.
-fn symbol<T: Copy>(library: &Library, name: &[u8], printed: &str) -> Result<T, String> {
-    let resolved: Symbol<'_, T> =
-        unsafe { library.get(name) }.map_err(|e| format!("缺少符号 {printed}：{e}"))?;
-    Ok(*resolved)
-}
-
-fn symbol_optional<T: Copy>(library: &Library, name: &[u8]) -> Option<T> {
-    unsafe { library.get(name).ok().map(|s: Symbol<'_, T>| *s) }
-}
 
 fn fallback_disabled_set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static DISABLED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =

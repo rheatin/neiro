@@ -1,0 +1,81 @@
+# iOS build gate. The core is linked at build time, so the artifact is a
+# hard prerequisite when CORE_RELEASE_TOKEN is set: without the token (e.g.
+# fork PRs), the private SDK fetch and target link checks are skipped with a
+# notice, matching macos.yml and windows.yml.
+# Layout and symbols are normative in docs/ios/core-contract.md.
+name: ios
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ secrets.CORE_RELEASE_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust with iOS targets
+        run: |
+          rustup toolchain install stable-aarch64-apple-darwin --profile minimal
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: Fetch the iOS core artifact
+        if: env.GH_TOKEN != ''
+        run: |
+          chmod +x scripts/fetch-core-ios.sh
+          ./scripts/fetch-core-ios.sh
+
+      - name: SDK not fetched (no CORE_RELEASE_TOKEN)
+        if: env.GH_TOKEN == ''
+        run: echo "::notice::CORE_RELEASE_TOKEN is not set, so the private neiro-core iOS xcframework is not fetched. Add the secret to run the iOS artifact provenance and target checks."
+
+      - name: Artifact provenance
+        if: env.GH_TOKEN != ''
+        run: |
+          set -euo pipefail
+          art=ui/vendor/neiro_base.xcframework
+          test -f "$art/ios-arm64/libneiro_base.a"
+          test -f "$art/ios-arm64-simulator/libneiro_base.a"
+          # Real artifacts embed static LGPL FFmpeg and the ABI v2 symbols.
+          nm -gU "$art/ios-arm64/libneiro_base.a" | grep -q 'avcodec_version'
+          nm -gU "$art/ios-arm64-simulator/libneiro_base.a" | grep -q 'avcodec_version'
+          nm -gU "$art/ios-arm64/libneiro_base.a" | grep -q 'NAE_BaseAbiVersion'
+          nm -gU "$art/ios-arm64/libneiro_base.a" | grep -q 'NAE_BaseReinitializeAudio'
+
+      - name: Check the device slice
+        if: env.GH_TOKEN != ''
+        run: cargo check --manifest-path ui/Cargo.toml --target aarch64-apple-ios
+
+      - name: Check the simulator slice
+        if: env.GH_TOKEN != ''
+        run: cargo check --manifest-path ui/Cargo.toml --target aarch64-apple-ios-sim
+
+      - name: Check UI TSX (if nsh available)
+        run: |
+          if command -v nsh >/dev/null 2>&1; then
+            cd ui && nsh check
+          else
+            echo "nsh not installed in runner, skipping nsh check"
+          fi
+
+      # The packaged bundle is where the plist promises and the privacy
+      # manifest become real; `nsh check` only proves the sources.
+      - name: Package and verify the simulator bundle (if nsh available)
+        if: env.GH_TOKEN != ''
+        run: |
+          set -euo pipefail
+          if command -v nsh >/dev/null 2>&1; then
+            (cd ui && nsh package --target ios-simulator)
+            chmod +x scripts/ios-prepare.sh
+            ./scripts/ios-prepare.sh ui/.nsh/out/Neiro.app
+            ./scripts/ios-prepare.sh --check ui/.nsh/out/Neiro.app
+            test -f ui/.nsh/out/Neiro.app/PrivacyInfo.xcprivacy
+          else
+            echo "nsh not installed in runner, skipping the simulator package"
+          fi

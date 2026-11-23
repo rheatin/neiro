@@ -32,7 +32,7 @@ import {
   remoteTracks,
 } from "../state/remote";
 import { AppPage } from "../components/page";
-import { pageEnd, wideTracks } from "../components/layout";
+import { layout, pageEnd, wideTracks } from "../components/layout";
 import { CardRow } from "../components/library/cards";
 import { RemoteCardsRow, type RemoteCardItem } from "../components/library/remote-cards";
 import { RemoteTrackRow } from "./remote";
@@ -136,7 +136,21 @@ export function SearchPage() {
   const scroll = rememberScroll(`search:${activeSource().kind}`);
 
   return (
-    <AppPage title="搜索" testID="page-search" scroll={scroll}>
+    <AppPage title="搜索" testID="page-search" scroll={scroll} gear>
+      {/* The desktop's field is the header's; a phone's header is the system's,
+          so the page owns its field. */}
+      <If when={layout() === "mobile"}>
+        <View class="px-4 pt-2 pb-3">
+          <Input
+            value={searchQuery()}
+            onChange={({ value }) => searchQuery.set(value)}
+            placeholder="歌曲、专辑、歌手"
+            returnKeyType="search"
+            autoFocus
+            class="h-10 rounded-full bg-secondary px-4 text-base text-foreground"
+          />
+        </View>
+      </If>
       <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <If
           when={term()}

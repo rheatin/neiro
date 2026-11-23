@@ -16,6 +16,7 @@ import {
   homeArtists,
   homeTracks,
   activeRemoteState,
+  missingTracks,
   removeRoot,
   retryTracks,
   scopedRoot,
@@ -33,13 +34,21 @@ import { activeSource, ALL_ID, selectSource } from "../state/sources";
 import { rememberScroll, type PageScroll } from "../state/page-scroll";
 import { playAllRemote, queueRemoteFrom, remoteLoadingState, remoteTracks, retryRemote } from "../state/remote";
 import { RemoteTrackRow } from "./remote";
-import { barSize, wideTracks } from "../components/layout";
+import { barSize, pageEnd, wideTracks } from "../components/layout";
 import { SelectionBar } from "../components/library/selection-bar";
 import { beginSelection, endSelection, selectionActive } from "../state/queue";
 import { CardGrid } from "../components/library/cards";
 import { engine } from "../backend/engine";
 import { Icon } from "../components/ui/icons";
-import { albumKey, type Album, type Artist, type RemoteTrack, type Track } from "../backend/types";
+import {
+  albumKey,
+  trackArtist,
+  trackTitle,
+  type Album,
+  type Artist,
+  type RemoteTrack,
+  type Track,
+} from "../backend/types";
 import {
   sortAndFilterRemoteTracks,
   sortAndFilterTracks,
@@ -226,7 +235,7 @@ export function TracksPage() {
                   </If>
                 )}
                 class="flex-1"
-                contentClass="pb-28"
+                contentClass={pageEnd()}
                 contentOffset={scroll.contentOffset}
                 onScroll={scroll.onScroll}
                 ref={scroll.ref}
@@ -248,7 +257,7 @@ export function TracksPage() {
               keyExtractor={(t) => t.id}
               estimatedItemSize={48}
               class="flex-1"
-              contentClass="pb-28"
+              contentClass={pageEnd()}
               contentOffset={scroll.contentOffset}
               onScroll={scroll.onScroll}
               ref={scroll.ref}
@@ -324,6 +333,13 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave; scroll: Pa
 
   const q = () => query().trim().toLowerCase();
   const filteredTracks = computed(() => sortAndFilterTracks(sourceTracks(), { query: q() }));
+  // 扫描找不到的文件跟着曲目列表一起显示（标成不可用）；它们不在引擎
+  // 索引里，所以不能混进 sourceTracks()。
+  const missingRows = (): Track[] => sortAndFilterTracks(missingTracks(), { query: q() });
+  const trackRows = (): { track: Track; missing: boolean }[] => [
+    ...filteredTracks().map((track) => ({ track, missing: false })),
+    ...missingRows().map((track) => ({ track, missing: true })),
+  ];
   const filteredAlbums = (): Album[] => {
     const term = q();
     if (!term) return sourceAlbums();
@@ -429,7 +445,7 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave; scroll: Pa
     <If
       when={activeTab() === "tracks"}
       else={
-        <Scroll class="flex-1" contentClass="pb-28" contentOffset={props.scroll.contentOffset} onScroll={props.scroll.onScroll} ref={props.scroll.ref}>
+        <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={props.scroll.contentOffset} onScroll={props.scroll.onScroll} ref={props.scroll.ref}>
           {renderHeader(false)}
           <If when={activeTab() === "albums"}>
             <View class="px-6">
@@ -445,11 +461,11 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave; scroll: Pa
       }
     >
       <List
-        each={filteredTracks()}
-        keyExtractor={(t) => t.path}
+        each={trackRows()}
+        keyExtractor={(row) => row.track.path}
         estimatedItemSize={48}
         class="flex-1"
-        contentClass="pb-28"
+        contentClass={pageEnd()}
         contentOffset={props.scroll.contentOffset}
         onScroll={props.scroll.onScroll}
         ref={props.scroll.ref}
@@ -460,19 +476,39 @@ function ScopedFolderWorkspace(props: { root: string; wave: ListWave; scroll: Pa
         )}
         header={() => renderHeader(true)}
       >
-        {(track, index) => (
+        {(row, index) => (
           <View class="px-3">
-            <TrackRow
-              track={track()}
-              number={index()}
-              showAlbum={wideTracks()}
-              wave={props.wave}
-              onPlay={() => playFromRows(filteredTracks(), index())}
-            />
+            <If when={row().missing}>
+              <LostTrackRow track={row().track} number={index()} />
+            </If>
+            <If when={!row().missing}>
+              <TrackRow
+                track={row().track}
+                number={index()}
+                showAlbum={wideTracks()}
+                wave={props.wave}
+                onPlay={() => playFromRows(filteredTracks(), index())}
+              />
+            </If>
           </View>
         )}
       </List>
     </If>
+  );
+}
+
+/** 一个扫描找不到的文件：还在列表里，标成不可用，不给播（点了也没有
+ * 文件可开）。下一次扫描找回它，这一行就回到普通行。 */
+function LostTrackRow(props: { track: Track; number: number }) {
+  return (
+    <View class="mx-6 flex-row items-center gap-3 py-2 opacity-50" accessible={false}>
+      <Text class="w-6 text-right text-xs text-muted-foreground">{props.number + 1}</Text>
+      <View class="min-w-0 flex-1">
+        <Text class="truncate text-sm text-foreground">{trackTitle(props.track)}</Text>
+        <Text class="truncate text-xs text-muted-foreground">{trackArtist(props.track)}</Text>
+      </View>
+      <Text class="text-xs text-muted-foreground">不可用</Text>
+    </View>
   );
 }
 

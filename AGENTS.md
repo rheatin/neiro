@@ -39,7 +39,7 @@ The UI host must remain backward and forward compatible across `neiro-core` SDK 
 
 - **`remote://` Virtual Paths**:
   Tracks originating from remote sources (Jellyfin, Navidrome, WebDAV) carry virtual paths in the format `remote://{id}.{ext}`.
-  The host player MUST intercept `path.startsWith("remote://")` before dispatching to the native playback engine. The first track must resolve to a valid local cache path via `withRemotePath` / `playRemoteByPath`; subsequent items in context queues must resolve to cached local files or be deferred until cached, preventing C++ decoders from opening raw virtual URIs.
+  Base intercepts them: `open_path` opens the provider's byte-range source instead of a local file, so the host dispatches the virtual path directly and no URI reaches a C++ decoder. The host must only do so for a provider whose descriptor declares `source: true` (`ui/src/state/remote.ts`, `servesSource`); a provider without a source form, and a row already in the cache, are still resolved to a local path via `withRemotePath` before playback. Context queues may carry virtual paths as they are.
 - **Callback Array & Epoch Guards**:
   In `ui/src/state/remote.ts`, `fetchedActions` must hold an array of callbacks (`Array<(path: string) => void>`) so concurrent requests for the same track do not drop handlers. All pagination must verify `listEpoch` to discard outdated page responses.
 
@@ -56,7 +56,19 @@ The UI host must remain backward and forward compatible across `neiro-core` SDK 
 
 ---
 
-## 5. Verification Commands
+## 5. iOS Host Invariants
+
+- **Two roots, one owner each**: `data_root()` in `ui/src/lib.rs` is `Application Support` on iOS (the library, the device id, bookmarks); `cache_root()` is `Library/Caches` (remote downloads, artwork). Everything regenerable reads `cache_root()`; everything worth restoring reads `data_root()`. The desktop keeps both beside the library, as before.
+- **Secrets live in the Keychain only**: on iOS a server's credential is one generic-password item (`service app.neiro.ui.remote`, `account remote:secret:{serverId}`, accessibility AfterFirstUnlock) behind `Base::secret_get/secret_set/secret_delete`. The `remote:servers` roster holds `hasSecret` and never a password or token; `state/sources.ts` (`readServerSecret`, `upsertServer`) is the single bridge. The desktop keeps credentials in the roster row and the Keychain methods are no-ops there.
+- **Never persist a config with a secret**: `saveRemoteConfig` skips `remote:config` on iOS, and `upsertServer` strips secret keys from `params` before storing the row.
+- **The packaged plist is owned by `ui/nsh.json`**: `ios.infoPlist` carries `UIBackgroundModes: ["audio"]`, `NSLocalNetworkUsageDescription` and `NSAppTransportSecurity.NSAllowsLocalNetworking` (no arbitrary loads). Do not hand-edit Info.plist in the built app.
+- **The privacy manifest is injected after packaging**: NSH has no privacy-manifest support, so `scripts/ios-prepare.sh <Neiro.app>` copies `ui/ios/PrivacyInfo.xcprivacy` beside the binary and re-signs; `--check` verifies the plist promises and the manifest (CI runs it).
+- **iOS fetches whole files**: `servesSource` in `ui/src/state/remote.ts` answers false on iOS; a remote track is downloaded before it plays, inside the `cache_root()` budget.
+- **File protection**: the data directory and `library.db` are set to `NSFileProtectionCompleteUnlessOpen` at launch (`ui/src/ios/mod.rs`), so a playback already running survives the lock screen.
+
+---
+
+## 6. Verification Commands
 
 Run all checks from the repository root:
 
@@ -74,4 +86,13 @@ cargo test --manifest-path ui/Cargo.toml --lib
 
 # Run all headless UI integration tests
 (cd ui && nsh test)
+
+# iOS: both simulation targets compile
+cargo check --manifest-path ui/Cargo.toml --target aarch64-apple-ios
+cargo check --manifest-path ui/Cargo.toml --target aarch64-apple-ios-sim
+
+# iOS: package the simulator app and verify its plist and privacy manifest
+(cd ui && nsh package --target ios-simulator)
+./scripts/ios-prepare.sh ui/.nsh/out/Neiro.app
+./scripts/ios-prepare.sh --check ui/.nsh/out/Neiro.app
 ```

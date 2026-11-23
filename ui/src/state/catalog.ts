@@ -4,9 +4,16 @@
 // answer). Data loads lazily: a page asks when it shows, so nothing loads
 // that was never opened.
 
-import { cleanup, computed, effect, signal, Storage, untracked, type Accessor } from "nsh";
+import { cleanup, computed, effect, lifecycle, platform, signal, Storage, untracked, type Accessor } from "nsh";
 import { engine, registerTrackLookup, reportEngineFailure, TRACK_PAGE } from "../backend/engine";
-import { albumKey, type Album, type Artist, type Track } from "../backend/types";
+import {
+  albumKey,
+  type Album,
+  type Artist,
+  type FolderAccess,
+  type PickedFolder,
+  type Track,
+} from "../backend/types";
 import { open } from "../nav";
 
 const remoteTracksAccessor = signal<{ get: () => Track[] }>({ get: () => [] });
@@ -43,14 +50,101 @@ registerTrackLookup((path) => trackForPath(path));
 
 const ROOTS_KEY = "library:roots";
 
-/** The library's roots, in memory, saved to Storage when they change. */
+/** A folder the library keeps. iOS stores the bookmark and resolves its
+ * path every launch (a folder's path changes with the app container's
+ * UUID); the desktop stores the path itself, and its id is the path.
+ * `path` is memory-only: `null` when the folder cannot be reached now (a
+ * stale bookmark, a folder that moved) and the settings row asks to pick it
+ * again. */
+export interface LibraryRoot {
+  id: string;
+  bookmark: string;
+  label: string;
+  path: string | null;
+}
+
+/** The folder records, in memory, saved to Storage when they change. */
+export const rootRecords = signal<LibraryRoot[]>([]);
+/** Roots that need picking again (a stale bookmark, a folder that moved). */
+export const staleRoots: Accessor<LibraryRoot[]> = computed(() =>
+  rootRecords().filter((record) => record.path === null),
+);
+
+/** The library's roots as paths, in memory (what the engine and the root
+ * filters take). Never persisted on iOS: `rootRecords` holds those. */
 export const roots = signal<string[]>([]);
+
+/** iOS keeps folders by bookmark; the desktop's paths survive on their own. */
+function isIOS(): boolean {
+  return platform.os === "ios";
+}
+
+function basename(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || path;
+}
+
+function newRootId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+/** Records become the two views the rest of the app reads: the records
+ * themselves, and the paths of those that resolved. */
+function applyRecords(records: LibraryRoot[]): void {
+  rootRecords.set(records);
+  roots.set(records.flatMap((record) => (record.path === null ? [] : [record.path])));
+}
+
+/** What goes to Storage: iOS's records without their resolved paths, or the
+ * desktop's paths as they always were. */
+function saveRoots(): void {
+  const text = isIOS()
+    ? JSON.stringify(rootRecords().map(({ id, bookmark, label }) => ({ id, bookmark, label })))
+    : JSON.stringify(roots());
+  void Storage.setItem(ROOTS_KEY, text).catch((error) =>
+    console.warn("neiro: 根目录没有记住:", String(error)),
+  );
+}
+
+/** Storage's two shapes: paths (the desktop's, and every earlier build) and
+ * `{id, bookmark, label}` records (this build's iOS). */
+function parseStored(raw: unknown): { paths: string[]; records: LibraryRoot[] } {
+  const paths: string[] = [];
+  const records: LibraryRoot[] = [];
+  if (!Array.isArray(raw)) return { paths, records };
+  for (const item of raw) {
+    if (typeof item === "string") {
+      if (item !== "") paths.push(item);
+      continue;
+    }
+    if (typeof item !== "object" || item === null) continue;
+    const record = item as Partial<LibraryRoot>;
+    if (typeof record.bookmark !== "string" || record.bookmark === "") continue;
+    records.push({
+      id: typeof record.id === "string" && record.id !== "" ? record.id : record.bookmark,
+      bookmark: record.bookmark,
+      label:
+        typeof record.label === "string" && record.label !== ""
+          ? record.label
+          : basename(record.bookmark),
+      path: null,
+    });
+  }
+  return { paths, records };
+}
 /** Whether the library has been opened and its roots are known (the pages
  * tell 空曲库 and 没有打开 apart on it). */
 export const rootsLoaded = signal(false);
 /** Whether a scan is running, and how many tracks the last one added
  * (the 扫描中 line's count). */
-export const scan = signal<{ running: boolean; lastAdded: number | null }>({ running: false, lastAdded: null });
+export const scan = signal<{ running: boolean; lastAdded: number | null; at: number | null }>({
+  running: false,
+  lastAdded: null,
+  at: null,
+});
 
 /** Bumped when the index changed (a scan found or lost files): the pages
  * that already asked ask again. */
@@ -60,8 +154,43 @@ type ListState = "idle" | "loading" | "error";
 /** The track index has one state more: complete (nothing left to page). */
 type TracksListState = "idle" | "loading" | "complete" | "error";
 
-/** Connect-time seeding (after a retry too): watch the saved roots again,
- * turn the reconcile walk on, and rescan so the index is fresh. */
+/** Resolves stored bookmarks for this launch and opens the app's access to
+ * each folder (the core reads from its own threads). A bookmark iOS calls
+ * stale comes back fresh and is written over the stored one; one that does
+ * not resolve stays as a stale record for the settings row. */
+async function adoptBookmarks(records: LibraryRoot[]): Promise<void> {
+  let changed = false;
+  const resolved: LibraryRoot[] = [];
+  for (const record of records) {
+    let access: FolderAccess | null = null;
+    try {
+      access = engine.resolveFolderBookmark(record.bookmark);
+    } catch (error) {
+      reportEngineFailure(error, `无法读取文件夹 ${record.label}`);
+    }
+    if (access === null) {
+      resolved.push({ ...record, path: null });
+      continue;
+    }
+    if (access.bookmark !== record.bookmark) changed = true;
+    resolved.push({
+      id: record.id,
+      bookmark: access.bookmark,
+      label: record.label,
+      path: access.path,
+    });
+  }
+  applyRecords(resolved);
+  if (changed) saveRoots();
+  if (roots().length > 0) {
+    ensureTracks();
+    rescanAll();
+  }
+}
+
+/** Connect-time seeding (after a retry too): iOS resolves the saved
+ * bookmarks (there is no watcher); the desktop watches its paths again and
+ * turns the reconcile walk on. Either way the index is rescanned. */
 let seeded = false;
 effect(() => {
   if (engine.health().status !== "ready" || seeded) return;
@@ -70,27 +199,46 @@ effect(() => {
     try {
       const saved = await Storage.getItem(ROOTS_KEY);
       const parsed: unknown = saved ? JSON.parse(saved) : null;
-      const paths = Array.isArray(parsed)
-        ? parsed.filter((p): p is string => typeof p === "string" && p !== "")
-        : [];
-      roots.set(paths);
-      rootsLoaded.set(true);
-      for (const root of paths) {
+      const stored = parseStored(parsed);
+      if (isIOS()) {
+        await adoptBookmarks(stored.records);
+        // Paths saved by an iOS build that had no bookmarks cannot be
+        // resolved again; they stay visible as 需要重新选择, and picking the
+        // folder again replaces them.
+        if (stored.paths.length > 0) {
+          applyRecords([
+            ...untracked(rootRecords),
+            ...stored.paths.map((path) => ({
+              id: path,
+              bookmark: path,
+              label: basename(path),
+              path: null,
+            })),
+          ]);
+        }
+      } else {
+        const paths = [...stored.paths, ...stored.records.map((record) => record.bookmark)];
+        applyRecords(
+          paths.map((path) => ({ id: path, bookmark: path, label: basename(path), path })),
+        );
+        for (const root of paths) {
+          try {
+            engine.watchFolder(root);
+          } catch (error) {
+            reportEngineFailure(error, `无法监视 ${root}`);
+          }
+        }
         try {
-          engine.watchFolder(root);
+          engine.setReconcileInterval(600);
         } catch (error) {
-          reportEngineFailure(error, `无法监视 ${root}`);
+          console.warn("neiro: 对账周期没有设置上:", String(error));
+        }
+        if (paths.length > 0) {
+          ensureTracks();
+          rescanAll();
         }
       }
-      try {
-        engine.setReconcileInterval(600);
-      } catch (error) {
-        console.warn("neiro: 对账周期没有设置上:", String(error));
-      }
-      if (paths.length > 0) {
-        ensureTracks();
-        rescanAll();
-      }
+      rootsLoaded.set(true);
     } catch (error) {
       console.warn("neiro: 曲库根目录没有读回来:", String(error));
       rootsLoaded.set(true);
@@ -98,41 +246,146 @@ effect(() => {
   })();
 });
 
-/** Asks for a folder and adds it (watched, then scanned). */
-export async function addRoot(): Promise<void> {
+/** iOS has no filesystem watcher: the scan on launch and the one when the app
+ * comes back are what keep the folders honest. */
+{
+  let was = lifecycle();
+  effect(() => {
+    const now = lifecycle();
+    const cameBack = now === "active" && was !== "active";
+    was = now;
+    if (!isIOS() || !cameBack) return;
+    if (untracked(rootsLoaded) && untracked(roots).length > 0) rescanAll();
+  });
+}
+
+/** Resolves a bookmark the picker just returned, so the app's access is
+ * open before the engine walks the folder. */
+function accessOf(bookmark: string): FolderAccess | null {
+  try {
+    return engine.resolveFolderBookmark(bookmark);
+  } catch (error) {
+    reportEngineFailure(error, "无法读取选中的文件夹");
+    return null;
+  }
+}
+
+/** iOS: the picker's folder becomes a record keyed by a UUID; the path is
+ * kept in memory only. */
+async function addBookmarkedRoot(): Promise<LibraryRoot | null> {
+  let picked: PickedFolder | null;
+  try {
+    picked = await engine.pickFolderBookmark();
+  } catch (error) {
+    reportEngineFailure(error, "打不开文件夹选择框");
+    return null;
+  }
+  if (!picked) return null;
+  const access = accessOf(picked.bookmark);
+  const path = access?.path ?? picked.path;
+  const bookmark = access?.bookmark ?? picked.bookmark;
+  const duplicate = untracked(rootRecords).find(
+    (record) => record.bookmark === bookmark || record.path === path,
+  );
+  if (duplicate) return duplicate;
+  const record: LibraryRoot = {
+    id: newRootId(),
+    bookmark,
+    label: picked.label || basename(path),
+    path,
+  };
+  applyRecords([...rootRecords(), record]);
+  saveRoots();
+  rescanAll();
+  return record;
+}
+
+/** Asks for a folder and adds it (watched, then scanned; iOS keeps it by
+ * bookmark). Returns the added root, or null when the user cancelled. */
+export async function addRoot(): Promise<LibraryRoot | null> {
+  if (isIOS()) return addBookmarkedRoot();
   let picked: string | null;
   try {
     picked = await engine.pickFolder();
   } catch (error) {
     reportEngineFailure(error, "打不开文件夹选择框");
-    return;
+    return null;
   }
-  if (!picked || roots().includes(picked)) return;
-  const next = [...roots(), picked];
-  roots.set(next);
-  void Storage.setItem(ROOTS_KEY, JSON.stringify(next)).catch((error) =>
-    console.warn("neiro: 根目录没有记住:", String(error)),
-  );
+  if (!picked || roots().includes(picked)) return null;
+  const record: LibraryRoot = { id: picked, bookmark: picked, label: basename(picked), path: picked };
+  applyRecords([...rootRecords(), record]);
+  saveRoots();
   try {
     engine.watchFolder(picked);
   } catch (error) {
     reportEngineFailure(error, "无法监视文件夹");
   }
   rescanAll();
+  return record;
 }
 
-export function removeRoot(path: string): void {
-  const next = roots().filter((root) => root !== path);
-  roots.set(next);
-  void Storage.setItem(ROOTS_KEY, JSON.stringify(next)).catch((error) =>
-    console.warn("neiro: 根目录没有记住:", String(error)),
-  );
+/** Picks the stale root `id` again and puts the new bookmark in its place. */
+export async function repairRoot(id: string): Promise<void> {
+  const record = untracked(rootRecords).find((row) => row.id === id);
+  if (!record || record.path !== null) return;
+  let picked: PickedFolder | null;
   try {
-    // Unwatching stops the watcher; the rows are what the lists read, so a
-    // removed folder has to take them with it.
-    engine.forgetFolder(path);
+    picked = await engine.pickFolderBookmark();
   } catch (error) {
-    reportEngineFailure(error, "无法移除文件夹");
+    reportEngineFailure(error, "打不开文件夹选择框");
+    return;
+  }
+  if (!picked) return;
+  const access = accessOf(picked.bookmark);
+  const path = access?.path ?? picked.path;
+  const bookmark = access?.bookmark ?? picked.bookmark;
+  applyRecords(
+    rootRecords().map((row) =>
+      row.id === id
+        ? { ...row, bookmark, label: picked?.label || row.label, path }
+        : row,
+    ),
+  );
+  saveRoots();
+  rescanAll();
+}
+
+/** Removes a root by its path (the desktop's callers hold paths; iOS's
+ * settings rows hold ids and call `removeRootById`). */
+export function removeRoot(path: string): void {
+  const record = untracked(rootRecords).find(
+    (row) => row.path === path || row.id === path,
+  );
+  if (!record) return;
+  removeRootRecord(record);
+}
+
+/** Removes the root `id` (a stale one has no path to pass). */
+export function removeRootById(id: string): void {
+  const record = untracked(rootRecords).find((row) => row.id === id);
+  if (!record) return;
+  removeRootRecord(record);
+}
+
+function removeRootRecord(record: LibraryRoot): void {
+  applyRecords(rootRecords().filter((row) => row.id !== record.id));
+  saveRoots();
+  if (record.path !== null) {
+    try {
+      // The rows are what the lists read, so a removed folder has to take
+      // them with it (this also stops the desktop's watcher).
+      engine.forgetFolder(record.path);
+    } catch (error) {
+      reportEngineFailure(error, "无法移除文件夹");
+    }
+  }
+  if (isIOS() && record.bookmark !== record.path) {
+    try {
+      engine.releaseFolderBookmark(record.bookmark);
+    } catch (error) {
+      // An engine that cannot answer holds no access to release.
+      console.warn("neiro: 文件夹访问没有释放:", String(error));
+    }
   }
   rescanAll();
 }
@@ -149,6 +402,35 @@ export function rescanAll(): void {
   }
 }
 
+/** Files a scan reported gone. They stay listed as unavailable until a scan
+ * finds them again (or the root they were under leaves the library): a
+ * folder on a card can disappear, and dropping the row would hide that. */
+const lostTracks = signal<Map<string, Track>>(new Map());
+
+/** The lost files still under a current root, in the order only lost ones
+ * have: the pages that render file rows append them. */
+export const missingTracks: Accessor<Track[]> = computed(() =>
+  [...lostTracks().values()].filter((track) => underRoots(track.path)),
+);
+
+/** What a finished scan leaves lost: `added` and `modified` came back, and
+ * `removed` rows are kept when the index still had them to show. Pure, so
+ * the rule is tested without an engine. */
+export function lostAfterScan(
+  before: Track[],
+  lost: Map<string, Track>,
+  event: { added: string[]; modified: string[]; removed: string[] },
+): Map<string, Track> {
+  const next = new Map(lost);
+  for (const path of event.added) next.delete(path);
+  for (const path of event.modified) next.delete(path);
+  for (const path of event.removed) {
+    const track = before.find((row) => row.path === path);
+    if (track) next.set(path, track);
+  }
+  return next;
+}
+
 function handleScan(event: { kind: string; added: string[]; modified: string[]; removed: string[]; rescan: boolean }): void {
   if (event.kind === "started") {
     scan.update((s) => ({ ...s, running: true }));
@@ -156,7 +438,8 @@ function handleScan(event: { kind: string; added: string[]; modified: string[]; 
   }
   if (event.kind === "done") {
     const changed = event.added.length + event.modified.length + event.removed.length;
-    scan.set({ running: false, lastAdded: changed });
+    scan.set({ running: false, lastAdded: changed, at: Date.now() });
+    lostTracks.update((lost) => lostAfterScan(untracked(allTracks), lost, event));
     if (changed > 0) dataEpoch.update((n) => n + 1);
     return;
   }
@@ -253,10 +536,12 @@ export const tracksComplete = (): boolean => tracksState() === "complete";
 /** 只给测试注入曲目数据（无头测试模拟曲库） */
 export function setTracksForTest(tracks: Track[], testRoots?: string[]): void {
   if (testRoots) {
-    roots.set(testRoots);
+    applyRecords(
+      testRoots.map((root) => ({ id: root, bookmark: root, label: basename(root), path: root })),
+    );
     rootsLoaded.set(true);
   } else if (roots().length === 0) {
-    roots.set(["/music"]);
+    applyRecords([{ id: "/music", bookmark: "/music", label: "music", path: "/music" }]);
     rootsLoaded.set(true);
   }
   allTracks.set(tracks);

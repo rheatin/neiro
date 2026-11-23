@@ -20,6 +20,27 @@ use serde::Deserialize;
 /// [`Engine`]: ../src/engine.rs.html
 pub mod engine;
 pub mod lyrics_providers;
+pub mod audio_session;
+#[cfg(target_os = "ios")]
+pub mod ios;
+
+/// A folder the user picked: the path to scan now, the bookmark to store,
+/// and the folder's own name.
+#[derive(Debug, Clone, Default, PartialEq, JsObject)]
+pub struct PickedFolderInfo {
+    pub path: String,
+    pub bookmark: String,
+    pub label: String,
+}
+
+/// A stored bookmark resolved for this launch: the path now, the bookmark
+/// to keep (a fresh one when the stored one was stale), and whether it was.
+#[derive(Debug, Clone, Default, PartialEq, JsObject)]
+pub struct FolderAccessInfo {
+    pub path: String,
+    pub bookmark: String,
+    pub stale: bool,
+}
 
 use crate::engine::{Analysis, Engine, RenderPath, Snapshot, WireEvent};
 
@@ -527,6 +548,15 @@ fn data_root() -> std::path::PathBuf {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     }
+    #[cfg(target_os = "ios")]
+    {
+        // The app container's Application Support: backed up, and the only
+        // place iOS expects a database and a device id to live. The unix
+        // branch below is wrong here — an iOS process owns no XDG tree.
+        crate::ios::home()
+            .join("Library")
+            .join("Application Support")
+    }
     #[cfg(target_os = "macos")]
     {
         std::env::var_os("HOME")
@@ -535,7 +565,7 @@ fn data_root() -> std::path::PathBuf {
             .join("Library")
             .join("Application Support")
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
     {
         std::env::var_os("XDG_DATA_HOME")
             .map(std::path::PathBuf::from)
@@ -545,6 +575,22 @@ fn data_root() -> std::path::PathBuf {
                     .map(|home| home.join(".local").join("share"))
             })
             .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+}
+
+/// Where regenerable data lives. On iOS that is the Caches directory:
+/// downloads and artwork are excluded from backup and may be purged by the
+/// system, which is exactly what they are. Everywhere else the caches stay
+/// beside the library, as they always have — moving them would orphan the
+/// paths favourites and playlists already name.
+fn cache_root() -> std::path::PathBuf {
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios::home().join("Library").join("Caches")
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        data_root()
     }
 }
 
@@ -558,10 +604,7 @@ fn library_path() -> std::path::PathBuf {
 /// cache directory that moved would orphan every favourite and playlist
 /// entry that names one of its files.
 fn remote_cache_dir() -> String {
-    library_path()
-        .parent()
-        .expect("the library always has a directory")
-        .join("remote")
+    remote_cache_dir_in(&cache_root())
         .to_string_lossy()
         .into_owned()
 }
@@ -570,6 +613,181 @@ fn remote_cache_dir() -> String {
 /// the app data path. Production passes the real directories.
 fn remote_cache_dir_in(root: &std::path::Path) -> std::path::PathBuf {
     root.join("Neiro").join("remote")
+}
+
+// ---- Remote identity -------------------------------------------------------
+//
+// Jellyfin groups sessions by the device that opened them. A name shared by
+// every install ("neiro-base") makes two phones, or two windows of the same
+// app, look like one device to the server. This installation therefore keeps
+// its own opaque id, persisted beside the library so it survives a restart.
+//
+// The linked core (v0.3.1) still sends its fixed `DeviceId="neiro-base"`
+// claim and does not read `device_id`; the host sends the id anyway, so the
+// day the core accepts it nothing else changes. Until then the connection
+// probe is the one request that already reports this install.
+
+/// The per-install remote identity, created once and then read.
+static INSTALLATION_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The file holding [`installation_id`], under an explicit root (tests).
+fn installation_id_path_in(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("Neiro").join("device-id")
+}
+
+/// This install's id: 32 lowercase hex characters. A missing or empty file
+/// is replaced; a write failure is said out loud once and the id stays
+/// in-memory for this run.
+fn installation_id_in(root: &std::path::Path) -> String {
+    let path = installation_id_path_in(root);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let text = text.trim();
+        if !text.is_empty() {
+            return text.to_owned();
+        }
+    }
+    let id = new_installation_id(root);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(error) = std::fs::write(&path, &id) {
+        eprintln!("neiro: 设备标识没有写入 {}：{error}", path.display());
+    }
+    id
+}
+
+/// Two FNV passes over the clock, the process and the data root. It is not
+/// a cryptographic random value; it only has to differ between installs and
+/// stay stable once written.
+fn new_installation_id(root: &std::path::Path) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let seed = format!("{nanos}:{}:{}", std::process::id(), root.display());
+    let first = fnv1a64(seed.as_bytes());
+    let second = fnv1a64(format!("{seed}:second").as_bytes());
+    format!("{first:016x}{second:016x}")
+}
+
+fn installation_id() -> String {
+    INSTALLATION_ID
+        .get_or_init(|| installation_id_in(&data_root()))
+        .clone()
+}
+
+// ---- Remote cache ----------------------------------------------------------
+
+/// The ceiling for downloaded remote audio. Downloads are whole files, so a
+/// handful of lossless albums is hundreds of megabytes; 2 GiB keeps a phone
+/// bounded without making the cache useless. The oldest go first.
+const REMOTE_AUDIO_CACHE_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Paths this run downloaded. They are the session's playback material: the
+/// queue and the player already hold these paths, so eviction must not take
+/// them out from under a row that is about to play. Only older files pay for
+/// the ceiling.
+static SESSION_FETCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn remember_session_fetch(path: &str) {
+    if path.is_empty() {
+        return;
+    }
+    let mut kept = SESSION_FETCHED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if !kept.iter().any(|known| known == path) {
+        kept.push(path.to_owned());
+    }
+}
+
+/// Keeps downloaded audio under `budget`, oldest first, dropping 10% past
+/// the ceiling so the next download does not walk the directory again.
+/// Subdirectories (artwork, catalog) and half-written `.part` files are not
+/// counted here. Returns how many files were removed.
+fn prune_remote_audio_cache_in(root: &std::path::Path, budget: u64) -> usize {
+    let dir = remote_cache_dir_in(root);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let session: Vec<String> = SESSION_FETCHED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let mut files: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("part") {
+            continue;
+        }
+        if session.iter().any(|kept| std::path::Path::new(kept) == path) {
+            continue;
+        }
+        total = total.saturating_add(metadata.len());
+        files.push((
+            path,
+            metadata.len(),
+            metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+        ));
+    }
+    if total <= budget {
+        return 0;
+    }
+    files.sort_by(|left, right| left.2.cmp(&right.2));
+    let mut to_free = total - budget + budget / 10;
+    let mut removed = 0;
+    for (path, len, _) in files {
+        if to_free == 0 {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            to_free = to_free.saturating_sub(len);
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Removes `<id>.<ext>.part` files — a download that never finished — from
+/// the remote audio directory. Returns how many were removed.
+#[cfg_attr(not(any(target_os = "ios", test)), allow(dead_code))]
+fn remove_part_files_in(root: &std::path::Path) -> usize {
+    let dir = remote_cache_dir_in(root);
+    let mut removed = 0;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("part") {
+                continue;
+            }
+            if entry.metadata().map(|meta| meta.is_file()).unwrap_or(false)
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// What a launch owes the cache: a process killed mid-download leaves
+/// `<id>.<ext>.part`, which no later fetch can use, and the audio bucket may
+/// have grown past its ceiling. Returns how many files were removed.
+fn reconcile_remote_cache_in(root: &std::path::Path) -> usize {
+    // The desktop's WebDAV fetch resumes the part an earlier run left behind,
+    // so it is not junk there. iOS ships the whole-file fetch only: a part is
+    // always the remains of an interrupted download.
+    #[cfg(target_os = "ios")]
+    let removed = remove_part_files_in(root);
+    #[cfg(not(target_os = "ios"))]
+    let removed = 0;
+    removed + prune_remote_audio_cache_in(root, REMOTE_AUDIO_CACHE_BUDGET)
 }
 
 // ---- Local cover cache -----------------------------------------------------
@@ -584,10 +802,7 @@ fn remote_cache_dir_in(root: &std::path::Path) -> std::path::PathBuf {
 
 /// One text file per cover, holding the `data:` URI (or `none`).
 fn local_cover_cache_dir() -> std::path::PathBuf {
-    library_path()
-        .parent()
-        .expect("the library always has a directory")
-        .join("artwork-local")
+    local_cover_cache_dir_in(&cache_root())
 }
 
 /// The local cover cache under an explicit root (tests).
@@ -738,6 +953,45 @@ fn clear_cache_in(root: &std::path::Path, kind: &str) -> Result<String, String> 
     }
     let stats = cache_stats_in(root);
     serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
+}
+
+/// Writes an 8-second 44100 Hz stereo 16-bit PCM WAV containing a 440 Hz sine
+/// at -12 dBFS. Platform-neutral so its byte layout can be tested anywhere,
+/// but only iOS plays it, so elsewhere it exists for the test alone.
+#[cfg(any(target_os = "ios", test))]
+fn write_test_tone(path: &std::path::Path) -> Result<(), String> {
+    const SAMPLE_RATE: u32 = 44100;
+    const CHANNELS: u16 = 2;
+    const SECONDS: u32 = 8;
+    const SAMPLES: u32 = SAMPLE_RATE * SECONDS;
+    const DATA_BYTES: u32 = SAMPLES * CHANNELS as u32 * 2;
+    const AMPLITUDE: f64 = (0.25 * (i16::MAX as f64)) as f64;
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("E_TONE: 无法创建目录 {}：{e}", dir.display()))?;
+    }
+    let mut bytes = Vec::with_capacity(44 + DATA_BYTES as usize);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + DATA_BYTES).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&CHANNELS.to_le_bytes());
+    bytes.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    bytes.extend_from_slice(&(SAMPLE_RATE * CHANNELS as u32 * 2).to_le_bytes());
+    bytes.extend_from_slice(&(CHANNELS * 2).to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&DATA_BYTES.to_le_bytes());
+    for sample_index in 0..SAMPLES {
+        let sample =
+            (std::f64::consts::TAU * 440.0 * sample_index as f64 / SAMPLE_RATE as f64).sin();
+        let value = (sample * AMPLITUDE) as i16;
+        bytes.extend_from_slice(&value.to_le_bytes());
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("E_TONE: 无法写入 {}：{e}", path.display()))
 }
 
 /// The cache's ceiling. A 300 KB cover is ~1750 files at this budget; the
@@ -1149,8 +1403,11 @@ impl Inner {
                 self.on_remote_probed.post(&probe.clone());
             }
             WireEvent::RemoteFetched { track, path } => {
+                remember_session_fetch(&path);
                 self.on_remote_fetched
                     .post(&RemoteFetched { track: remote_track_of(track), path });
+                // A download just grew the bucket; keep it under its ceiling.
+                prune_remote_audio_cache_in(&cache_root(), REMOTE_AUDIO_CACHE_BUDGET);
             }
             WireEvent::RemoteArtwork { id, mime, data } => {
                 self.on_remote_artwork
@@ -1489,7 +1746,16 @@ async fn lyrics_pump(
 /// the core, waking every 30 ms: the events are low-rate (state changes, one
 /// position event per track tick), so a poll costs nothing next to a
 /// cross-thread wakeup primitive this crate does not have.
-async fn pump(engine: Shared, receiver: std::sync::mpsc::Receiver<String>, inner: Arc<Mutex<Inner>>) {
+async fn pump(
+    engine: Shared,
+    receiver: std::sync::mpsc::Receiver<String>,
+    inner: Arc<Mutex<Inner>>,
+    interruptions: Option<std::sync::mpsc::Receiver<audio_session::Interruption>>,
+) {
+    // Whether the track was playing when the interruption began: the ended
+    // notification says whether playback may continue, not what it should
+    // continue from.
+    let mut was_playing = false;
     loop {
         match receiver.try_recv() {
             Ok(line) => {
@@ -1500,7 +1766,85 @@ async fn pump(engine: Shared, receiver: std::sync::mpsc::Receiver<String>, inner
             Err(std::sync::mpsc::TryRecvError::Empty) => timer(std::time::Duration::from_millis(30)).await,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
         }
+        if let Some(interruptions) = &interruptions {
+            while let Ok(event) = interruptions.try_recv() {
+                answer_interruption(&engine, &inner, event, &mut was_playing);
+            }
+        }
         if engine.lock().map(|guard| guard.is_none()).unwrap_or(true) {
+            break;
+        }
+    }
+}
+
+/// Carries out one interruption on the thread that owns [`Inner`], the one the
+/// listeners may be called from.
+fn answer_interruption(
+    engine: &Shared,
+    inner: &Arc<Mutex<Inner>>,
+    event: audio_session::Interruption,
+    was_playing: &mut bool,
+) {
+    let steps = match event {
+        audio_session::Interruption::Began => {
+            // Inner is what the UI is showing, and the pump has absorbed every
+            // engine event before this one.
+            let playing = lock(inner)
+                .player
+                .as_ref()
+                .map(|player| player.state == "playing")
+                .unwrap_or(false);
+            *was_playing = playing;
+            audio_session::begun_steps(playing)
+        }
+        audio_session::Interruption::Ended { should_resume } => {
+            let was = std::mem::replace(was_playing, false);
+            audio_session::ended_steps(should_resume, was)
+        }
+    };
+    #[cfg(target_os = "ios")]
+    let mut granted: Option<audio_session::Granted> = None;
+    for step in steps {
+        let result = match step {
+            audio_session::Step::Pause => {
+                send_command(engine, &serde_json::json!({ "command": "pause" }))
+            }
+            // There is no session to activate off iOS, and nothing sends
+            // interruptions there; the arm exists so the decision table is
+            // one piece of code on every build.
+            #[cfg(target_os = "ios")]
+            audio_session::Step::Activate => match audio_session::activate() {
+                Ok(granted_format) => {
+                    granted = Some(granted_format);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
+            #[cfg(not(target_os = "ios"))]
+            audio_session::Step::Activate => Ok(()),
+            #[cfg(target_os = "ios")]
+            audio_session::Step::Reinitialize => match granted {
+                Some(granted_format) => crate::engine::ios::reinitialize_audio(
+                    granted_format.sample_rate,
+                    granted_format.channels,
+                ),
+                None => Ok(()),
+            },
+            #[cfg(not(target_os = "ios"))]
+            audio_session::Step::Reinitialize => Ok(()),
+            audio_session::Step::Resume => {
+                send_command(engine, &serde_json::json!({ "command": "resume" }))
+            }
+        };
+        // A notification has no call to return an error to; the page's usual
+        // error surface is what tells the user the resume did not happen. The
+        // remaining steps are dropped: resuming into a session that would not
+        // activate is the failure this reports, not a recovery.
+        if let Err(message) = result {
+            lock(inner).on_error.post(&EngineError {
+                op: "interruption".to_owned(),
+                message,
+            });
             break;
         }
     }
@@ -1531,7 +1875,40 @@ impl Base {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("E_ENGINE: 无法创建数据目录 {}：{e}", dir.display()))?;
         }
+        // Regenerable data may live in a directory of its own (iOS: Caches).
+        // A missing cache is not an error — the next download creates it —
+        // but a stats screen should not report buckets that cannot exist.
+        let cache = remote_cache_dir_in(&cache_root());
+        if let Err(error) = std::fs::create_dir_all(&cache) {
+            eprintln!("neiro: 无法创建缓存目录 {}：{error}", cache.display());
+        }
+        // The database holds favourites and playlists, which the lock screen's
+        // playback may still be reading: `CompleteUnlessOpen` keeps an open
+        // handle usable while locked and seals the rest. The folder is
+        // protected before SQLite creates its files, so they inherit the
+        // class; the file itself is set once it exists (below).
+        #[cfg(target_os = "ios")]
+        if let Some(dir) = library.parent() {
+            ios::protect(dir);
+        }
+        // Nothing is downloading yet, so a `.part` file now is what a killed
+        // process left behind, and the oldest downloads may be over budget.
+        let cleaned = reconcile_remote_cache_in(&cache_root());
+        if cleaned > 0 {
+            eprintln!("neiro: 启动时清理了 {cleaned} 个远程缓存文件");
+        }
+        #[cfg(target_os = "ios")]
+        let granted = audio_session::activate()
+            .map_err(|e| format!("E_ENGINE: 无法激活音频会话：{e}"))?;
         let (engine, receiver) = Engine::open(&library)?;
+        #[cfg(target_os = "ios")]
+        ios::protect(&library);
+        // The contract's first-play order: activate, then tell the core the
+        // format the route granted, then open. Nothing is stale this early, so
+        // a refusal here is not fatal -- a core that predates this call (it
+        // answers -5) still reads the route itself when it opens.
+        #[cfg(target_os = "ios")]
+        let _ = crate::engine::ios::reinitialize_audio(granted.sample_rate, granted.channels);
         // The snapshot is a synchronous read: the listeners about to register
         // get the whole current state before any event arrives, so the first
         // paint is the engine's, not an empty page.
@@ -1549,6 +1926,29 @@ impl Base {
             r#"{"command":"set_policy","policy":{"rate":{"mode":"device"},"quality":"very_high","share":"shared"}}"#,
         );
         let engine = Arc::new(Mutex::new(Some(engine)));
+        // An interruption is a session event, so the host answers it: pause
+        // what was playing, and after the system says playback may continue,
+        // reactivate the deactivated session and resume. The notification
+        // arrives on an AVFoundation thread, which must not touch `Inner`
+        // (its listeners are not Send), so it only forwards the event and the
+        // pump -- the thread that already owns `Inner` -- decides and acts.
+        let interruptions = {
+            let (send, receive) = std::sync::mpsc::channel::<audio_session::Interruption>();
+            #[cfg(target_os = "ios")]
+            {
+                audio_session::install(move |event| {
+                    let _ = send.send(event);
+                })
+                .map_err(|e| format!("E_ENGINE: 无法监听音频中断：{e}"))?;
+                Some(receive)
+            }
+            #[cfg(not(target_os = "ios"))]
+            {
+                let _ = (send, receive);
+                None
+            }
+        };
+
         let pump_engine = engine.clone();
         let pump_inner = inner.clone();
         cx.start(async move {
@@ -1560,7 +1960,7 @@ impl Base {
                 *slot = Some(lyrics_send);
             }
             spawn(lyrics_pump(lyrics_receive, pump_inner.clone()));
-            pump(pump_engine, receiver, pump_inner).await;
+            pump(pump_engine, receiver, pump_inner, interruptions).await;
         });
         Ok(Base { engine, inner })
     }
@@ -1775,6 +2175,7 @@ impl Base {
                 "kind": "jellyfin",
                 "base_url": base_url,
                 "auth": { "kind": "password", "user": user, "password": password },
+                "device_id": installation_id(),
             },
         }))
     }
@@ -1793,6 +2194,7 @@ impl Base {
                 "kind": "jellyfin",
                 "base_url": base_url,
                 "auth": { "kind": "token", "token": token },
+                "device_id": installation_id(),
             },
         }))
     }
@@ -1867,6 +2269,10 @@ impl Base {
                     "kind": "jellyfin",
                     "base_url": base_url,
                     "auth": auth,
+                    // The core's Server reader keeps every flat text field in
+                    // its params map, so this survives a core that does not
+                    // know the key yet.
+                    "device_id": installation_id(),
                     "params": params,
                 })
             }
@@ -1896,6 +2302,13 @@ impl Base {
             "cache_dir": remote_cache_dir(),
             "server": server,
         }))
+    }
+
+    /// This installation's remote identity, the same value `set_remote`
+    /// sends to the core. The connection probe reads it so its request names
+    /// the same device the engine's downloads do.
+    pub fn device_id(&self) -> String {
+        installation_id()
     }
 
     /// Disconnects. The local cover cache survives: a server that is
@@ -2280,15 +2693,45 @@ impl Base {
     /// The cache buckets' size and count, as a JSON object the interface
     /// formats for people.
     pub fn cache_stats(&self) -> Result<String, String> {
-        let root = data_root();
+        let root = cache_root();
         let stats = cache_stats_in(&root);
         serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
+    }
+
+    /// The linked core's ABI version on iOS; `0` elsewhere, where the core is
+    /// loaded at run time and has no link-time version. The Stage 0 spike
+    /// displays it to prove the host → Rust → C link.
+    pub fn base_abi_version(&self) -> u32 {
+        #[cfg(target_os = "ios")]
+        {
+            crate::engine::ios::abi_version()
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            0
+        }
     }
 
     /// Deletes one cache bucket's files (`all` = every bucket), keeps the
     /// directories, and answers the stats as they are after the clean.
     pub fn clear_cache(&self, kind: String) -> Result<String, String> {
-        clear_cache_in(&data_root(), &kind)
+        clear_cache_in(&cache_root(), &kind)
+    }
+
+    /// Writes the iOS test tone once, then plays it through the core.
+    pub fn play_tone(&self) -> Result<(), String> {
+        #[cfg(target_os = "ios")]
+        {
+            let path = data_root().join("Neiro").join("tone.wav");
+            if !path.exists() {
+                write_test_tone(&path)?;
+            }
+            self.play(path.to_string_lossy().into_owned())
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            Err("E_PLATFORM: play_tone 只在 iOS 上可用".to_string())
+        }
     }
 
     // ---- playback: each is a queued command; the state changes as an event -
@@ -2656,7 +3099,130 @@ impl Base {
         paths.first().map(|path| path.to_string_lossy().into_owned())
     }
 
-    // ---- helpers -----------------------------------------------------------
+    /// Shows the system's folder picker and returns the folder with a
+    /// security-scoped bookmark of it. A picked folder's path is only valid
+    /// until the app is relaunched, so iOS keeps the folder by bookmark and
+    /// resolves it each launch (`resolve_folder_bookmark`); the desktop has
+    /// no such rule, and `pick_folder` is its own door. `None` when the user
+    /// cancelled.
+    pub async fn pick_folder_bookmark(
+        this: Instance<Self>,
+    ) -> Result<Option<PickedFolderInfo>, String> {
+        let _ = &this;
+        #[cfg(target_os = "ios")]
+        {
+            let Some(url) = ios::picker::pick_folder().await? else {
+                return Ok(None);
+            };
+            let path = url
+                .path()
+                .map(|path| path.to_string())
+                .ok_or_else(|| "E_BOOKMARK: 选中的文件夹没有路径".to_owned())?;
+            let label = url
+                .lastPathComponent()
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| path.rsplit('/').next().unwrap_or_default().to_owned());
+            let started = unsafe { url.startAccessingSecurityScopedResource() };
+            let bookmark = ios::bookmarks::create(&url);
+            if started {
+                unsafe { url.stopAccessingSecurityScopedResource() };
+            }
+            let bookmark = bookmark?;
+            Ok(Some(PickedFolderInfo {
+                path,
+                bookmark,
+                label,
+            }))
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            Err("E_BOOKMARK: 当前平台不支持文件夹书签，请用 pickFolder".to_owned())
+        }
+    }
+
+    /// Resolves a stored bookmark to the folder's path for this launch and
+    /// opens the app's access to it. `None` when the bookmark no longer
+    /// resolves: the user has to pick the folder again. The desktop stores
+    /// paths, not bookmarks, so there the stored value is the path.
+    pub fn resolve_folder_bookmark(&self, bookmark: String) -> Result<Option<FolderAccessInfo>, String> {
+        #[cfg(target_os = "ios")]
+        {
+            match ios::bookmarks::resolve(&bookmark) {
+                Ok(resolved) => Ok(Some(FolderAccessInfo {
+                    path: resolved.path,
+                    bookmark: resolved.bookmark,
+                    stale: resolved.stale,
+                })),
+                Err(error) => {
+                    // A stale folder is a state the user repairs, not a
+                    // failure of the call: the page says 需要重新选择.
+                    eprintln!("neiro: 书签解析失败：{error}");
+                    Ok(None)
+                }
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            Ok(Some(FolderAccessInfo {
+                path: bookmark.clone(),
+                bookmark,
+                stale: false,
+            }))
+        }
+    }
+
+    /// Stops the app's access to a folder that left the library (iOS); the
+    /// desktop keeps none.
+    pub fn release_folder_bookmark(&self, bookmark: String) {
+        #[cfg(target_os = "ios")]
+        ios::bookmarks::release(&bookmark);
+        #[cfg(not(target_os = "ios"))]
+        let _ = bookmark;
+    }
+
+    /// The secret saved for the server with this roster id, or `None`. On
+    /// iOS it is a Keychain item; the desktop keeps credentials in the
+    /// roster row itself and this answers `None` so the roster stays the
+    /// single place that has them.
+    pub fn secret_get(&self, server: String) -> Option<String> {
+        #[cfg(target_os = "ios")]
+        {
+            ios::keychain::get(&server)
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = server;
+            None
+        }
+    }
+
+    /// Saves the server's secret. iOS: one Keychain item, replacing what was
+    /// there. The desktop has no Keychain and stores nothing here.
+    pub fn secret_set(&self, server: String, value: String) -> Result<(), String> {
+        #[cfg(target_os = "ios")]
+        {
+            ios::keychain::set(&server, &value)
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = (server, value);
+            Ok(())
+        }
+    }
+
+    /// Forgets the server's secret. iOS: deletes the Keychain item; the
+    /// desktop has nothing to delete.
+    pub fn secret_delete(&self, server: String) -> Result<(), String> {
+        #[cfg(target_os = "ios")]
+        {
+            ios::keychain::delete(&server)
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = server;
+            Ok(())
+        }
+    }
 
     /// Registers `listener` and posts the cached value, in one place: every
     /// listener with a current value behaves the same.
@@ -2683,13 +3249,21 @@ impl Base {
 
     /// Sends one command to Base; a refused command throws with `E_ENGINE`.
     fn command(&self, json: &serde_json::Value) -> Result<(), String> {
-        let line =
-            serde_json::to_string(json).map_err(|e| format!("E_ENGINE: command 无法序列化：{e}"))?;
-        let engine = self.engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
-        match engine.as_ref() {
-            Some(engine) => engine.command(&line),
-            None => Err("E_ENGINE: 引擎已释放".to_owned()),
-        }
+        send_command(&self.engine, json)
+    }
+}
+
+/// Sends one command to Base through its shared handle. Split out of
+/// [`Base::command`] because the interruption handler has no `Base`: it runs on
+/// the thread that posted the notification and reaches the engine only through
+/// the handle Base left behind.
+fn send_command(engine: &Shared, json: &serde_json::Value) -> Result<(), String> {
+    let line =
+        serde_json::to_string(json).map_err(|e| format!("E_ENGINE: command 无法序列化：{e}"))?;
+    let engine = engine.lock().map_err(|_| "E_ENGINE: 引擎已释放".to_owned())?;
+    match engine.as_ref() {
+        Some(engine) => engine.command(&line),
+        None => Err("E_ENGINE: 引擎已释放".to_owned()),
     }
 }
 
@@ -2781,6 +3355,72 @@ mod cache_bucket_tests {
         assert_eq!(link.symlink_metadata().unwrap().file_type().is_symlink(), true);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn installation_id_is_persisted_and_opaque() {
+        let root = cache_tree();
+        let first = installation_id_in(&root);
+        assert_eq!(first.len(), 32);
+        assert!(first
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        assert_eq!(
+            installation_id_in(&root),
+            first,
+            "a second launch reads the same identity"
+        );
+        let path = installation_id_path_in(&root);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), first);
+        // An emptied file is replaced rather than sent empty.
+        std::fs::write(&path, "").unwrap();
+        let again = installation_id_in(&root);
+        assert_eq!(again.len(), 32);
+        assert_ne!(again, "");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconciliation_removes_partial_downloads_and_keeps_finished_ones() {
+        let root = cache_tree();
+        let part = remote_cache_dir_in(&root).join("album.flac.part");
+        std::fs::write(&part, b"half").unwrap();
+        assert_eq!(remove_part_files_in(&root), 1);
+        assert!(!part.exists(), "an interrupted download is not kept");
+        // The launch pass never touches a finished download.
+        reconcile_remote_cache_in(&root);
+        assert!(remote_cache_dir_in(&root).join("song.flac").exists());
+        assert!(remote_cache_dir_in(&root).join("artwork/cover.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn remote_prune_drops_the_oldest_past_the_budget() {
+        let root = std::env::temp_dir().join(format!(
+            "neiro-remote-prune-{}-{}",
+            std::process::id(),
+            CACHE_TEST_SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let dir = remote_cache_dir_in(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, age) in [("a.flac", 0u64), ("b.flac", 1), ("c.flac", 2)] {
+            let path = dir.join(name);
+            std::fs::write(&path, vec![0u8; 100]).unwrap();
+            let handle = std::fs::File::options().write(true).open(&path).unwrap();
+            handle
+                .set_modified(
+                    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + age),
+                )
+                .unwrap();
+        }
+        // The oldest file is this session's own download: it stays. The next
+        // oldest pays for the ceiling, so 300 bytes over 150 drops one file.
+        remember_session_fetch(&dir.join("a.flac").to_string_lossy());
+        assert_eq!(prune_remote_audio_cache_in(&root, 150), 1);
+        assert!(dir.join("a.flac").exists(), "a session download is never evicted");
+        assert!(!dir.join("b.flac").exists());
+        assert!(dir.join("c.flac").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]
@@ -2850,6 +3490,26 @@ mod cover_cache_tests {
         assert_eq!(std::fs::read_dir(&dir).expect("read").count(), 1);
         assert!(dir.join("c").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod test_tone_tests {
+    use super::*;
+
+    #[test]
+    fn test_tone_has_a_valid_riff_header_and_byte_count() {
+        let file = std::env::temp_dir().join(format!("neiro-tone-{}.wav", std::process::id()));
+        write_test_tone(&file).expect("write tone");
+        let bytes = std::fs::read(&file).expect("read tone");
+        assert_eq!(bytes.len(), 44 + 44100 * 8 * 2 * 2);
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(&bytes[12..16], b"fmt ");
+        assert_eq!(&bytes[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 44 + 44100 * 8 * 2 * 2 - 8);
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 44100 * 8 * 2 * 2);
+        let _ = std::fs::remove_file(&file);
     }
 }
 

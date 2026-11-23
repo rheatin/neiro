@@ -3,6 +3,7 @@
 import { effect, signal, untracked, Scroll, Text, View } from "nsh";
 import { Button } from "nsh/base";
 import { AppPage } from "../components/page";
+import { pageEnd } from "../components/layout";
 import { rememberScroll } from "../state/page-scroll";
 import { ActionButton, focusRing, SectionTitle } from "../components/ui/controls";
 import { Icon } from "../components/ui/icons";
@@ -11,8 +12,15 @@ import { engine } from "../backend/engine";
 import { gaplessEnabled, setGaplessEnabled } from "../state/player";
 import { setOutputOpen, setPluginDialogOpen, setServerDialogOpen, sidebarCollapsed, toggleSidebar } from "../state/overlays";
 import { open, switchTo, REMOTE, TRACKS } from "../nav";
-import { addRoot, removeRoot, roots, setHomeRoot } from "../state/catalog";
-import { servers, selectSource } from "../state/sources";
+import {
+  addRoot,
+  removeRootById,
+  repairRoot,
+  rootRecords,
+  scan,
+  setHomeRoot,
+} from "../state/catalog";
+import { readServerSecret, secretsInKeychain, servers, selectSource, type RemoteServer } from "../state/sources";
 import { cachedRemoteTracks, reconnectServer, removeServerById } from "../state/remote";
 import { EFFECT_NAMES, TOOLBAR_EFFECTS } from "../components/ui/toolbar-fx";
 import { lightEffect, setLight } from "../state/visual";
@@ -45,7 +53,17 @@ export function SettingsPage() {
   const res = () => resolvedPath();
   const gapless = () => gaplessEnabled();
   const serverList = () => servers();
-  const localRoots = () => roots();
+  const localRoots = () => rootRecords();
+  const needsSecret = (s: RemoteServer): boolean => {
+    if (!secretsInKeychain) return false;
+    if (s.hasSecret) return Object.keys(readServerSecret(s)).length === 0;
+    return s.kind === "jellyfin" || s.kind === "jellyfin_token" || s.kind === "navidrome";
+  };
+  const scanLabel = () => {
+    const at = scan().at;
+    if (at === null) return "";
+    return new Date(at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  };
   // 切走 tab 再回来，停在原处。
   const scroll = rememberScroll("settings");
 
@@ -144,7 +162,7 @@ export function SettingsPage() {
 
   return (
     <AppPage title="设置" testID="page-settings" scroll={scroll}>
-      <Scroll class="flex-1" contentClass="pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
+      <Scroll class="flex-1" contentClass={pageEnd()} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
         <View class="px-6 pt-2 pb-6 gap-1" role="header">
           <Text class="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">系统首选项</Text>
           <Text class="text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
@@ -247,18 +265,24 @@ export function SettingsPage() {
               >
                 <View class="gap-2 pt-1">
                   <Each of={localRoots()}>
-                    {(root) => {
-                      const leaf = () => root().replace(/\\/g, "/").split("/").pop() || root();
-                      return (
-                        <View class="flex-row items-center justify-between rounded-(--radius) bg-secondary/50 px-3 py-2">
-                          <View class="min-w-0 flex-1 pr-3">
-                            <Text class="text-sm font-medium text-foreground truncate">{leaf()}</Text>
-                            <Text class="text-[11px] font-mono text-muted-foreground truncate">{root()}</Text>
-                          </View>
-                          <View class="flex-row items-center gap-1.5 shrink-0">
+                    {(record) => (
+                      <View class="flex-row items-center justify-between rounded-(--radius) bg-secondary/50 px-3 py-2">
+                        <View class="min-w-0 flex-1 pr-3">
+                          <Text class="text-sm font-medium text-foreground truncate">{record().label}</Text>
+                          <If
+                            when={record().path !== null}
+                            else={
+                              <Text class="text-[11px] text-destructive truncate">需要重新选择</Text>
+                            }
+                          >
+                            <Text class="text-[11px] font-mono text-muted-foreground truncate">{record().path}</Text>
+                          </If>
+                        </View>
+                        <View class="flex-row items-center gap-1.5 shrink-0">
+                          <If when={record().path !== null}>
                             <Button
                               onPress={() => {
-                                setHomeRoot(root());
+                                setHomeRoot(record().path);
                                 switchTo(TRACKS);
                               }}
                               class={`h-7 items-center justify-center rounded-(--radius) bg-secondary px-3 hover:bg-row-hover active:scale-95 ${focusRing}`}
@@ -266,23 +290,47 @@ export function SettingsPage() {
                               <Text class="text-center text-xs font-medium leading-none text-foreground">进入管理</Text>
                             </Button>
                             <Button
-                              onPress={() => engine.scanFolder(root())}
+                              onPress={() => {
+                                const path = record().path;
+                                if (path !== null) engine.scanFolder(path);
+                              }}
                               class={`h-7 items-center justify-center rounded-(--radius) bg-secondary px-3 hover:bg-row-hover active:scale-95 ${focusRing}`}
                             >
                               <Text class="text-center text-xs font-medium leading-none text-foreground">重新扫描</Text>
                             </Button>
+                          </If>
+                          <If when={record().path === null}>
                             <Button
-                              onPress={() => removeRoot(root())}
-                              class={`h-7 items-center justify-center rounded-(--radius) px-3 hover:bg-destructive/10 active:scale-95 ${focusRing}`}
+                              accessibilityLabel={`重新选择 ${record().label}`}
+                              onPress={() => void repairRoot(record().id)}
+                              class={`h-7 items-center justify-center rounded-(--radius) bg-secondary px-3 hover:bg-row-hover active:scale-95 ${focusRing}`}
                             >
-                              <Text class="text-center text-xs font-medium leading-none text-destructive">移除</Text>
+                              <Text class="text-center text-xs font-medium leading-none text-foreground">重新选择</Text>
                             </Button>
-                          </View>
+                          </If>
+                          <Button
+                            accessibilityLabel={`移除 ${record().label}`}
+                            onPress={() => removeRootById(record().id)}
+                            class={`h-7 items-center justify-center rounded-(--radius) px-3 hover:bg-destructive/10 active:scale-95 ${focusRing}`}
+                          >
+                            <Text class="text-center text-xs font-medium leading-none text-destructive">移除</Text>
+                          </Button>
                         </View>
-                      );
-                    }}
+                      </View>
+                    )}
                   </Each>
                 </View>
+              </If>
+
+              {/* 上一次扫描的结果：iOS 没有 watcher，这里的行是唯一能说明
+                  曲库是否还跟得上文件夹的地方。 */}
+              <If when={scan().running}>
+                <Text class="text-[11px] text-muted-foreground">正在扫描…</Text>
+              </If>
+              <If when={!scan().running && scan().at !== null}>
+                <Text class="text-[11px] text-muted-foreground">
+                  {`上次扫描 ${scanLabel()} · 变动 ${scan().lastAdded ?? 0} 个文件`}
+                </Text>
               </If>
             </View>
 
@@ -313,6 +361,11 @@ export function SettingsPage() {
                               <If when={!enabled()}>
                                 <View class="rounded px-1.5 py-0.5 bg-amber-500/15">
                                   <Text class="text-[10px] font-bold text-amber-500">插件已停用</Text>
+                                </View>
+                              </If>
+                              <If when={needsSecret(srv())}>
+                                <View class="rounded px-1.5 py-0.5 bg-destructive/15">
+                                  <Text class="text-[10px] font-bold text-destructive">凭据需重新输入</Text>
                                 </View>
                               </If>
                             </View>

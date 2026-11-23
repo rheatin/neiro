@@ -23,6 +23,7 @@ import { queueRemoteFrom, remoteAlbumGroups, remoteLoadingState, remoteTracks, r
 import { playQueue } from "../state/player";
 import { RemoteAlbumRow, RemoteCardsRow } from "../components/library/remote-cards";
 import { AppPage } from "../components/page";
+import { pageEnd } from "../components/layout";
 import { CardGrid } from "../components/library/cards";
 import { albumCoverTrack, itemTracks, openItem } from "../state/catalog";
 import { CardsSkeleton, EmptyState, ErrorState } from "../components/ui/feedback";
@@ -229,7 +230,7 @@ export function AlbumsPage() {
                 <If
                   when={isList()}
                   else={
-                    <Scroll class="flex-1" contentClass="px-6 pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
+                    <Scroll class="flex-1" contentClass={`px-6 ${pageEnd()}`} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
                       <Text role="header" class="pb-4 text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
                         专辑
                       </Text>
@@ -243,7 +244,7 @@ export function AlbumsPage() {
                     keyExtractor={(item) => `${item.kind}:${item.name}\u0000${item.subtitle}`}
                     estimatedItemSize={56}
                     class="flex-1"
-                    contentClass="px-6 pb-28 gap-1.5"
+                    contentClass={`px-6 gap-1.5 ${pageEnd()}`}
                     contentOffset={scroll.contentOffset}
                     onScroll={scroll.onScroll}
                     ref={scroll.ref}
@@ -276,7 +277,7 @@ export function AlbumsPage() {
               <If
                 when={isList()}
                 else={
-                  <Scroll class="flex-1" contentClass="px-6 pb-28" contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
+                  <Scroll class="flex-1" contentClass={`px-6 ${pageEnd()}`} contentOffset={scroll.contentOffset} onScroll={scroll.onScroll} ref={scroll.ref}>
                     <Text role="header" class="pb-4 text-3xl font-bold text-foreground" style={enter("fadeInUp")}>
                       专辑
                     </Text>
@@ -290,7 +291,7 @@ export function AlbumsPage() {
                   keyExtractor={(item) => item.key}
                   estimatedItemSize={56}
                   class="flex-1"
-                  contentClass="px-6 pb-28 gap-1.5"
+                  contentClass={`px-6 gap-1.5 ${pageEnd()}`}
                   contentOffset={scroll.contentOffset}
                   onScroll={scroll.onScroll}
                   ref={scroll.ref}

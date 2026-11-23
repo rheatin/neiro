@@ -59,6 +59,9 @@ export function AppSheet(props: {
   full?: boolean;
   closeOnSwipe?: boolean;
   testID?: string;
+  /** The content's entrance (the panel itself slides in as NSH's `Sheet`
+   * does); `fadeInUp` by default. */
+  entrance?: MotionSpec;
   /** 侧宽覆盖（points；只有左/右用得上，例如输出抽屉的两列蛇形）。 */
   popupWidth?: number;
   children?: JSX.Element;
@@ -90,7 +93,7 @@ export function AppSheet(props: {
       <View
         class={props.full ? "flex-1" : "h-full"}
         style={{
-          ...enter("fadeInUp", 90),
+          ...enter(props.entrance ?? "fadeInUp", 90),
           paddingTop: props.full ? 0 : titleBarArea().height,
         }}
       >

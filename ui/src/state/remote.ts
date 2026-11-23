@@ -1,14 +1,18 @@
-// 远程库的状态: 服务器会话 (一组凭据，仅保存在 Storage 中 — 它们不进源码),
+// 远程库的状态: 服务器会话 (一组凭据 — 桌面存 Storage，iOS 存钥匙串, 它们
+// 都不进源码),
 // `remote_listed` 数据已合并完整 (搜索会在本地过滤)，封面已连接至共享的
-// artwork 栈, 流程 设为 fetch→fetched→play。
+// artwork 栈。桌面上有 source 形式的服务器 (描述符里的 `source`) 直接按虚拟
+// 路径播放，Base 边播边读；没有的走 fetch→fetched→play。iOS 一律走整文件
+// 下载：这一版没有 Range 来源，也没有边下边播。
 
-import { cleanup, computed, effect, signal, Storage, untracked } from "nsh";
+import { cleanup, computed, effect, platform, signal, Storage, untracked } from "nsh";
 import { engine, registerRemoteTrackLookup, reportEngineFailure } from "../backend/engine";
 import type { RemoteKind, RemoteStatus, RemoteTrack, Track } from "../backend/types";
 import { notifyRemoteFetchFailed, playAll, playQueue, registerRemotePlayer, playTrack } from "./player";
 import { registerRemoteCatalog } from "./catalog";
+import { remoteProviders } from "./plugins";
 import { ALL_ID } from "./sources";
-import { activeSourceId, registerRemoteActivator, registerRemoteDisconnector, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
+import { activeSourceId, registerRemoteActivator, registerRemoteDisconnector, removeServer, secretsInKeychain, serverCredentials, servers, serversLoaded, type RemoteServer } from "./sources";
 import { notify } from "./feedback";
 
 const CONFIG_KEY = "remote:config";
@@ -82,9 +86,26 @@ function applyRemote(cfg: RemoteConfig): void {
 export async function saveRemoteConfig(cfg: RemoteConfig): Promise<void> {
   applyRemote(cfg);
   config.set(cfg);
+  // On iOS the roster plus the Keychain are where this lives. A copy in
+  // Storage would put the secret back in the clear.
+  if (secretsInKeychain) return;
   await Storage.setItem(CONFIG_KEY, JSON.stringify(cfg)).catch((error) =>
     console.warn("neiro: 远程配置没有记住:", String(error)),
   );
+}
+
+/** The engine's view of one roster row: the row plus its secret, which on
+ * iOS lives in the Keychain rather than in the row. */
+function configOfServer(server: RemoteServer): RemoteConfig {
+  const credentials = serverCredentials(server);
+  return {
+    kind: server.kind,
+    baseUrl: server.baseUrl,
+    user: server.user ?? "",
+    password: credentials.password,
+    token: credentials.token,
+    params: credentials,
+  };
 }
 
 /** 探测服务器连通性与凭据有效性（用于 ServerDialog 的测试连接按钮与排障）。 */
@@ -105,10 +126,13 @@ export async function probeRemoteConfig(
       }
       const info = (await infoRes.json().catch(() => ({}))) as { ServerName?: string; Version?: string };
       const serverName = info.ServerName ?? "Jellyfin";
+      // The same per-install identity `set_remote` sends. No engine handle
+      // (the engine-down page still offers Settings) keeps the old id.
+      const deviceId = engine.deviceId() || "neiro-base";
 
       // 2. Token 模式验证
       if (cfg.token) {
-        const claim = `MediaBrowser Client="neiro", Device="desktop", DeviceId="neiro-base", Version="0.1", Token="${cfg.token}"`;
+        const claim = `MediaBrowser Client="neiro", Device="desktop", DeviceId="${deviceId}", Version="0.1", Token="${cfg.token}"`;
         const testRes = await fetch(`${url}/Items?Limit=1`, {
           signal: controller.signal,
           headers: {
@@ -125,7 +149,7 @@ export async function probeRemoteConfig(
 
       // 3. 密码模式验证
       if (cfg.password || cfg.user) {
-        const claim = `MediaBrowser Client="neiro", Device="desktop", DeviceId="neiro-base", Version="0.1"`;
+        const claim = `MediaBrowser Client="neiro", Device="desktop", DeviceId="${deviceId}", Version="0.1"`;
         const authRes = await fetch(`${url}/Users/AuthenticateByName`, {
           method: "POST",
           signal: controller.signal,
@@ -262,13 +286,7 @@ effect(() => {
         if (cached && cached.length > 0) {
           remoteTracks.set([...cached]);
         }
-        const cfg: RemoteConfig = {
-          kind: first.kind,
-          baseUrl: first.baseUrl,
-          user: first.user ?? "",
-          password: first.password,
-          token: first.token,
-        };
+        const cfg = configOfServer(first);
         config.set(cfg);
         applyRemote(cfg);
         configLoaded.set(true);
@@ -377,13 +395,7 @@ export async function activateServer(serverId: string, force: boolean = false): 
     remoteConfig()?.user === (server.user ?? "");
   if (!sameServer) {
     try {
-      await saveRemoteConfig({
-        kind: server.kind,
-        baseUrl: server.baseUrl,
-        user: server.user ?? "",
-        password: server.password,
-        token: server.token,
-      });
+      await saveRemoteConfig(configOfServer(server));
     } catch (error) {
       // 引擎没就绪或命令被拒：错误进 toast，远程视图给可重试的空态。
       reportEngineFailure(error, "连接失败");
@@ -497,7 +509,8 @@ function handleListed(tracks: RemoteTrack[]): void {
     // sign-in before the page claims the server is empty.
     const cfg = remoteConfig();
     const roster = activeRemoteServer();
-    const password = (cfg?.password ?? "") !== "" ? cfg?.password : roster?.password;
+    const password =
+      (cfg?.password ?? "") !== "" ? cfg?.password : roster ? serverCredentials(roster).password : undefined;
     if (!emptyHandled && (freshList === null || freshList.length === 0) && cfg && (password ?? "") !== "") {
       emptyHandled = true;
       void saveRemoteConfig({
@@ -723,12 +736,38 @@ export const remoteTrackForPath = remoteTrackForCachePath;
 // cached file's own tags, which a stale/preloaded analysis can get wrong.
 registerRemoteTrackLookup((path) => remoteTrackForCachePath(path) ?? undefined);
 
-// ---- 播放：fetch → fetched → play --------------------------------------------
+// ---- 播放：source 直读，或 fetch → fetched → play -----------------------------
 
 export function remoteAsTrack(rt: RemoteTrack): Track {
-  const ext = (rt.container || "flac").toLowerCase();
-  const path = cachedRemotePath(rt) ?? `remote://${rt.id}.${ext}`;
+  const path = cachedRemotePath(rt) ?? virtualPathOf(rt);
   return asLocalTrack(rt, path);
+}
+
+/** The address Base opens when it plays a row without downloading it. */
+function virtualPathOf(track: RemoteTrack): string {
+  const ext = (track.container || "flac").toLowerCase();
+  return `remote://${track.id}.${ext}`;
+}
+
+/** Whether Base can serve this row's bytes itself. The provider declares it in
+ * its descriptor, so the host keeps no list of its own; a provider that only
+ * answers with a download reports false and the row is fetched first. The
+ * declaration is about the provider, not the row: the caller still has to be
+ * pointed at the server the row belongs to.
+ *
+ * iOS is the exception for this release: the app ships the whole-file fetch
+ * only, with no byte-range path, so every row is downloaded before it plays
+ * no matter what the provider's descriptor says. */
+function servesSource(track: RemoteTrack): boolean {
+  if (platform.os === "ios") return false;
+  const owner = ownerServerOf(track);
+  const kind = owner
+    ? servers().find((s) => s.id === owner)?.kind
+    : remoteConfig()?.kind ?? "";
+  if (!kind) return false;
+  // The descriptor list merges the two Jellyfin forms into one entry.
+  const id = kind === "jellyfin_token" ? "jellyfin" : kind;
+  return remoteProviders().some((provider) => provider.id === id && provider.source === true);
 }
 
 /** 把远程行变成播放意图所需的形状（path 是引擎缓存后的本地文件路径）。 */
@@ -750,9 +789,9 @@ export function asLocalTrack(track: RemoteTrack, path: string): Track {
   };
 }
 
-/** 点远程列表的第 `index` 首:取流播放,并在当前曲开始后只预取下一首。
- * 远程曲目在缓存里才有本地路径,而 Base 会整首下载;所以不再一次拉 10 首,
- * 只把下一首准备好,其余等真正播到时再取。 */
+/** 点远程列表的第 `index` 首:曲目原地播放,后面按列表顺序进队列。
+ * 桌面上有 source 形式的服务器(Base 直接按 Range 读)不产生下载;没有的
+ * 才在轮到它之前取流。iOS 上每一首都在轮到它时整文件下载。 */
 export function queueRemoteFrom(rows: RemoteTrack[], index: number): void {
   const at = Math.min(Math.max(index, 0), Math.max(rows.length - 1, 0));
   if (rows.length === 0) return;
@@ -851,6 +890,9 @@ interface DeferredRemoteFetch {
   track: RemoteTrack;
   /** null plays the row (last click wins); otherwise the path goes here. */
   then: ((path: string) => void) | null;
+  /** The callback wants the row's own address, not a downloaded file: once
+   * the server is up it is handed the virtual path and nothing is fetched. */
+  source: boolean;
 }
 
 const deferredFetches: DeferredRemoteFetch[] = [];
@@ -871,7 +913,11 @@ function armDeferredTimer(): void {
  * the wrong server (same id, different file). Switch to its server first and
  * finish the fetch once that server is the engine's. Returns true when the
  * call was deferred. */
-function waitForOwner(track: RemoteTrack, then: ((path: string) => void) | null): boolean {
+function waitForOwner(
+  track: RemoteTrack,
+  then: ((path: string) => void) | null,
+  source: boolean = false,
+): boolean {
   const owner = ownerServerOf(track);
   if (!owner || engineServes(owner)) return false;
   if (then === null) {
@@ -880,7 +926,7 @@ function waitForOwner(track: RemoteTrack, then: ((path: string) => void) | null)
       if (deferredFetches[i].then === null) deferredFetches.splice(i, 1);
     }
   }
-  deferredFetches.push({ owner, track, then });
+  deferredFetches.push({ owner, track, then, source });
   armDeferredTimer();
   if (activeEngineServerId !== owner) {
     const label = servers().find((s) => s.id === owner)?.label ?? "远程服务器";
@@ -966,12 +1012,23 @@ registerRemotePlayer({
   withRemotePathByPath: (path, then) => {
     const rt = remoteTrackForCachePath(path);
     if (!rt) return false;
+    // A provider with a source form hands the row's own address to the
+    // caller; the switch to its server, when one is needed, is the only wait.
+    if (!cachedRemotePath(rt) && servesSource(rt)) {
+      if (waitForOwner(rt, then, true)) return true;
+      then(path);
+      return true;
+    }
     withRemotePath(rt, then);
     return true;
   },
   resolveRemotePath: (path) => {
     const rt = remoteTrackForCachePath(path);
     return rt ? cachedRemotePath(rt) : null;
+  },
+  playsSource: (path) => {
+    const rt = remoteTrackForCachePath(path);
+    return rt ? servesSource(rt) : false;
   },
   cancelPlayIntent: () => {
     playIntent = null;
@@ -987,6 +1044,13 @@ export function playRemote(track: RemoteTrack): void {
   playIntent = track.id;
   playTracks.set(track.id, track);
   if (waitForOwner(track, null)) return;
+  if (servesSource(track)) {
+    // Nothing to fetch: Base reads the track from the server as it plays.
+    playIntent = null;
+    playTracks.delete(track.id);
+    playTrack(remoteAsTrack(track));
+    return;
+  }
   if (fetchingId(track.id)) return;
   fetchingIds.update((set) => new Set(set).add(track.id));
   try {
@@ -1033,7 +1097,8 @@ effect(() => {
       if (at >= 0) deferredFetches.splice(at, 1);
     }
     for (const entry of ready) {
-      if (entry.then) withRemotePath(entry.track, entry.then);
+      if (entry.then && entry.source) entry.then(virtualPathOf(entry.track));
+      else if (entry.then) withRemotePath(entry.track, entry.then);
       else if (playIntent === entry.track.id) playRemote(entry.track);
     }
   });

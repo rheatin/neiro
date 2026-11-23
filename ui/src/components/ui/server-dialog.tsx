@@ -2,7 +2,7 @@
 // 表单字段完全由引擎的动态插件注册表（PluginRegistry / engine.remoteProviders()）下发，
 // 零硬编码枚举，支持任意新增的远程协议与存储插件。
 
-import { effect, signal, token, Text, View, type JSX } from "nsh";
+import { effect, platform, Scroll, signal, token, Text, View, type JSX } from "nsh";
 import { Button, Input } from "nsh/base";
 import type { ProviderDescriptor, RemoteKind } from "../../backend/types";
 import {
@@ -13,7 +13,7 @@ import {
   removeServerById,
   type RemoteConfig,
 } from "../../state/remote";
-import { selectSource, servers, upsertServer, type RemoteServer } from "../../state/sources";
+import { selectSource, secretsInKeychain, servers, upsertServer, readServerSecret, type RemoteServer } from "../../state/sources";
 import { setServerDialogOpen, serverDialogOpen } from "../../state/overlays";
 import { isRemoteKindEnabled, refreshPlugins, remoteProviders } from "../../state/plugins";
 import { reportEngineFailure } from "../../backend/engine";
@@ -32,6 +32,37 @@ function remoteProvidersList(): ProviderDescriptor[] {
 
 function hostOf(baseUrl: string): string {
   return baseUrl.replace(/^\w+:\/\//, "").replace(/\/.*$/, "") || baseUrl;
+}
+
+/** Whether a phone may reach this host over plain http. The loopback, the
+ * private IPv4/IPv6 ranges, `.local` names and single-label machine names
+ * are the LAN; everything else is a public server and needs https. */
+export function isLocalRemoteHost(hostname: string): boolean {
+  const name = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!name) return false;
+  if (name === "localhost" || name === "local" || name.endsWith(".local")) return true;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(name)) {
+    return (
+      name.startsWith("10.") ||
+      name.startsWith("127.") ||
+      name.startsWith("169.254.") ||
+      name.startsWith("192.168.") ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(name)
+    );
+  }
+  if (name.includes(":")) {
+    return (
+      name === "::1" ||
+      name.startsWith("fe8") ||
+      name.startsWith("fe9") ||
+      name.startsWith("fea") ||
+      name.startsWith("feb") ||
+      name.startsWith("fc") ||
+      name.startsWith("fd")
+    );
+  }
+  // A name with no dot is a single-label machine name resolved by the LAN.
+  return !name.includes(".");
 }
 
 const editing = signal<RemoteServer | null | undefined>(undefined);
@@ -163,21 +194,29 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
   const jellyfinAuthMode = signal<"password" | "token">(
     (existing?.token || existing?.kind === "jellyfin_token") ? "token" : "password"
   );
+  // On iOS the saved credential is in the Keychain, not in the row. It is
+  // read once here so the masked fields show it (and so a save that only
+  // changes the label does not wipe it). A restore that lost the item
+  // leaves them empty, and validation then asks for it again.
+  const savedSecret = existing ? readServerSecret(existing) : {};
   const values = signal<Record<string, string>>({
+    ...savedSecret,
     base_url: existing?.baseUrl ?? "",
     user: existing?.user ?? "",
-    password: existing?.password ?? "",
-    token: existing?.token ?? "",
+    password: existing?.password ?? savedSecret.password ?? "",
+    token: existing?.token ?? savedSecret.token ?? "",
   });
   const label = signal(existing?.label ?? "");
   const busy = signal(false);
   const testStatus = signal<{ state: "idle" | "testing" | "ok" | "error"; message?: string } | null>(null);
+  const formError = signal("");
 
   const currentDescriptor = () => providers().find((p) => p.id === selectedKind()) ?? providers()[0];
 
   const updateValue = (key: string, val: string) => {
     values.update((v) => ({ ...v, [key]: val }));
     testStatus.set(null);
+    formError.set("");
   };
 
   const isLocal = () => selectedKind() === "local";
@@ -190,16 +229,60 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
     return url.replace(/\/+$/, "");
   };
 
-  const buildConfig = (): { server: RemoteServer; cfg: RemoteConfig } | null => {
+  /** What stops 连接 or 测试连接, said before anything is sent. iOS refuses
+   * plain http to a public host: ATS allows the LAN only. */
+  const validate = (): string => {
+    const raw = (values().base_url ?? "").trim();
+    if (!raw) return "请输入服务器地址";
+    let parsed: URL;
+    try {
+      parsed = new URL(normalizeUrl(raw));
+    } catch {
+      return "服务器地址格式不正确";
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "服务器地址必须以 http:// 或 https:// 开头";
+    }
+    if (platform.os === "ios" && parsed.protocol === "http:" && !isLocalRemoteHost(parsed.hostname)) {
+      return "iOS 只允许局域网服务器使用 http，其他地址请用 https";
+    }
+    if (selectedKind() === "jellyfin") {
+      if (jellyfinAuthMode() === "token") {
+        if (!(values().token ?? "").trim()) return "请输入 API Token";
+      } else {
+        if (!(values().user ?? "").trim()) return "请输入用户名";
+        if (!(values().password ?? "").trim()) return "请输入密码";
+      }
+    }
+    return "";
+  };
+
+  /** The provider keys that hold a credential. Jellyfin has its two fixed
+   * shapes; a descriptor names its own (`password`-kind fields, or the
+   * plugin's explicit `secret` flag). */
+  const secretFieldKeys = (): string[] => {
+    if (selectedKind() === "jellyfin") return ["password", "token"];
+    const fields = currentDescriptor()?.fields ?? [];
+    return fields
+      .filter((field) => field.secret === true || field.kind === "password")
+      .map((field) => field.key);
+  };
+
+  const buildConfig = (): { server: RemoteServer; cfg: RemoteConfig; secretKeys: string[] } | null => {
     const vals = values();
     const url = normalizeUrl(vals.base_url ?? "");
     if (!url) return null;
     const host = hostOf(url);
     const serverLabel = label().trim() || host;
     const userName = (vals.user ?? "").trim();
+    const secretKeys = secretFieldKeys();
 
     let targetKind = selectedKind();
+    // Secrets never ride in `params` on iOS: that object is the roster row's
+    // share of the config, which goes to Storage. The engine's copy is
+    // assembled below, after the credential fields are known.
     const cleanParams: Record<string, string> = { ...vals, base_url: url };
+    for (const key of [...secretKeys, "password", "token"]) delete cleanParams[key];
     let tokenVal: string | undefined = vals.token?.trim();
     let passwordVal: string | undefined = vals.password?.trim();
 
@@ -207,12 +290,17 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       if (jellyfinAuthMode() === "password") {
         targetKind = "jellyfin";
         tokenVal = undefined;
-        delete cleanParams.token;
       } else {
         targetKind = "jellyfin_token";
         passwordVal = undefined;
-        delete cleanParams.password;
       }
+    }
+
+    const secretParams: Record<string, string> = {};
+    for (const key of secretKeys) {
+      const value =
+        key === "token" ? tokenVal : key === "password" ? passwordVal : (vals[key] ?? "").trim();
+      if (value) secretParams[key] = value;
     }
 
     const server: RemoteServer = {
@@ -223,7 +311,9 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       user: userName,
       ...(tokenVal ? { token: tokenVal } : {}),
       ...(passwordVal ? { password: passwordVal } : {}),
-      params: cleanParams,
+      // The roster keeps what is not a secret; on the desktop the credential
+      // also stays here, because there is no Keychain to move it to.
+      params: secretsInKeychain ? cleanParams : { ...cleanParams, ...secretParams },
     };
 
     const cfg: RemoteConfig = {
@@ -232,13 +322,20 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       user: userName,
       ...(tokenVal ? { token: tokenVal } : {}),
       ...(passwordVal ? { password: passwordVal } : {}),
-      params: cleanParams,
+      params: { ...cleanParams, ...secretParams },
     };
 
-    return { server, cfg };
+    return { server, cfg, secretKeys };
   };
 
   const testConnection = async () => {
+    const problem = validate();
+    if (problem) {
+      formError.set(problem);
+      testStatus.set({ state: "error", message: problem });
+      return;
+    }
+    formError.set("");
     const built = buildConfig();
     if (!built) {
       testStatus.set({ state: "error", message: "请输入有效的服务器地址" });
@@ -267,6 +364,12 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
   };
 
   const save = () => {
+    const problem = validate();
+    if (problem) {
+      formError.set(problem);
+      return;
+    }
+    formError.set("");
     const built = buildConfig();
     if (!built) return;
 
@@ -274,7 +377,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
 
     void (async () => {
       try {
-        await upsertServer(built.server);
+        await upsertServer(built.server, built.secretKeys);
         selectSource(`remote:${built.server.id}`);
         setServerDialogOpen(false);
         editing.set(undefined);
@@ -288,7 +391,12 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
   };
 
   return (
-    <View class="gap-4 p-6" testID="server-form">
+    <Scroll
+      class="w-full"
+      contentClass="gap-4 p-6"
+      testID="server-form"
+      style={{ maxHeight: 560 }}
+    >
       <View class="flex-row items-center justify-between">
         <Text role="header" class="text-xl font-bold text-foreground">
           {existing ? "编辑服务器" : "连接服务器"}
@@ -428,7 +536,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
           </Field>
 
           <If when={jellyfinAuthMode() === "password"}>
-            <Field label="用户名" hint="选填">
+            <Field label="用户名" hint="必填">
               <Input
                 testID="input-username"
                 accessibilityLabel="用户名"
@@ -441,7 +549,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
                 style={{ placeholderColor: token("muted-foreground"), caretColor: token("foreground") }}
               />
             </Field>
-            <Field label="密码" hint="选填">
+            <Field label="密码" hint="必填">
               <Input
                 testID="input-password"
                 accessibilityLabel="密码"
@@ -505,6 +613,12 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
           </View>
         </If>
 
+        <If when={formError()}>
+          <Text testID="server-form-error" class="text-xs font-medium text-destructive">
+            {formError()}
+          </Text>
+        </If>
+
         <View class="flex-row items-center justify-between pt-2">
           <TextLink label="取消" small onPress={props.onCancel} />
           <View class="flex-row items-center gap-2">
@@ -524,7 +638,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
           </View>
         </View>
       </If>
-    </View>
+    </Scroll>
   );
 }
 
