@@ -40,10 +40,21 @@ objc2-foundation = { version = "0.3", features = [
     "NSArray",
     "NSData",
     "NSError",
+    "NSPathUtilities",
     "NSString",
     "NSURL",
 ] }
 dispatch2 = "0.3"
+# The Keychain is where the iOS build keeps remote secrets; the Security
+# framework's C bindings come from the same objc2 release. The dictionaries it
+# takes are CoreFoundation's, so those types are named here too.
+objc2-security = "0.3.2"
+objc2-core-foundation = { version = "0.3.2", features = [
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
 
 [dependencies]
 nsh-core = { git = "https://github.com/longbridge/nsh", tag = "v0.6.1" }

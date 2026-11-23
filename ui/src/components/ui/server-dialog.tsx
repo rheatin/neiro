@@ -13,7 +13,7 @@ import {
   removeServerById,
   type RemoteConfig,
 } from "../../state/remote";
-import { selectSource, servers, upsertServer, type RemoteServer } from "../../state/sources";
+import { selectSource, secretsInKeychain, servers, upsertServer, readServerSecret, type RemoteServer } from "../../state/sources";
 import { setServerDialogOpen, serverDialogOpen } from "../../state/overlays";
 import { isRemoteKindEnabled, refreshPlugins, remoteProviders } from "../../state/plugins";
 import { reportEngineFailure } from "../../backend/engine";
@@ -194,11 +194,17 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
   const jellyfinAuthMode = signal<"password" | "token">(
     (existing?.token || existing?.kind === "jellyfin_token") ? "token" : "password"
   );
+  // On iOS the saved credential is in the Keychain, not in the row. It is
+  // read once here so the masked fields show it (and so a save that only
+  // changes the label does not wipe it). A restore that lost the item
+  // leaves them empty, and validation then asks for it again.
+  const savedSecret = existing ? readServerSecret(existing) : {};
   const values = signal<Record<string, string>>({
+    ...savedSecret,
     base_url: existing?.baseUrl ?? "",
     user: existing?.user ?? "",
-    password: existing?.password ?? "",
-    token: existing?.token ?? "",
+    password: existing?.password ?? savedSecret.password ?? "",
+    token: existing?.token ?? savedSecret.token ?? "",
   });
   const label = signal(existing?.label ?? "");
   const busy = signal(false);
@@ -251,16 +257,32 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
     return "";
   };
 
-  const buildConfig = (): { server: RemoteServer; cfg: RemoteConfig } | null => {
+  /** The provider keys that hold a credential. Jellyfin has its two fixed
+   * shapes; a descriptor names its own (`password`-kind fields, or the
+   * plugin's explicit `secret` flag). */
+  const secretFieldKeys = (): string[] => {
+    if (selectedKind() === "jellyfin") return ["password", "token"];
+    const fields = currentDescriptor()?.fields ?? [];
+    return fields
+      .filter((field) => field.secret === true || field.kind === "password")
+      .map((field) => field.key);
+  };
+
+  const buildConfig = (): { server: RemoteServer; cfg: RemoteConfig; secretKeys: string[] } | null => {
     const vals = values();
     const url = normalizeUrl(vals.base_url ?? "");
     if (!url) return null;
     const host = hostOf(url);
     const serverLabel = label().trim() || host;
     const userName = (vals.user ?? "").trim();
+    const secretKeys = secretFieldKeys();
 
     let targetKind = selectedKind();
+    // Secrets never ride in `params` on iOS: that object is the roster row's
+    // share of the config, which goes to Storage. The engine's copy is
+    // assembled below, after the credential fields are known.
     const cleanParams: Record<string, string> = { ...vals, base_url: url };
+    for (const key of [...secretKeys, "password", "token"]) delete cleanParams[key];
     let tokenVal: string | undefined = vals.token?.trim();
     let passwordVal: string | undefined = vals.password?.trim();
 
@@ -268,12 +290,17 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       if (jellyfinAuthMode() === "password") {
         targetKind = "jellyfin";
         tokenVal = undefined;
-        delete cleanParams.token;
       } else {
         targetKind = "jellyfin_token";
         passwordVal = undefined;
-        delete cleanParams.password;
       }
+    }
+
+    const secretParams: Record<string, string> = {};
+    for (const key of secretKeys) {
+      const value =
+        key === "token" ? tokenVal : key === "password" ? passwordVal : (vals[key] ?? "").trim();
+      if (value) secretParams[key] = value;
     }
 
     const server: RemoteServer = {
@@ -284,7 +311,9 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       user: userName,
       ...(tokenVal ? { token: tokenVal } : {}),
       ...(passwordVal ? { password: passwordVal } : {}),
-      params: cleanParams,
+      // The roster keeps what is not a secret; on the desktop the credential
+      // also stays here, because there is no Keychain to move it to.
+      params: secretsInKeychain ? cleanParams : { ...cleanParams, ...secretParams },
     };
 
     const cfg: RemoteConfig = {
@@ -293,10 +322,10 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
       user: userName,
       ...(tokenVal ? { token: tokenVal } : {}),
       ...(passwordVal ? { password: passwordVal } : {}),
-      params: cleanParams,
+      params: { ...cleanParams, ...secretParams },
     };
 
-    return { server, cfg };
+    return { server, cfg, secretKeys };
   };
 
   const testConnection = async () => {
@@ -348,7 +377,7 @@ function ServerForm(props: { server: RemoteServer | null; onDone: () => void; on
 
     void (async () => {
       try {
-        await upsertServer(built.server);
+        await upsertServer(built.server, built.secretKeys);
         selectSource(`remote:${built.server.id}`);
         setServerDialogOpen(false);
         editing.set(undefined);

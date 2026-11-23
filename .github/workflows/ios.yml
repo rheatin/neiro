@@ -54,3 +54,16 @@ jobs:
           else
             echo "nsh not installed in runner, skipping nsh check"
           fi
+
+      # The packaged bundle is where the plist promises and the privacy
+      # manifest become real; `nsh check` only proves the sources.
+      - name: Package and verify the simulator bundle (if nsh available)
+        run: |
+          set -euo pipefail
+          if command -v nsh >/dev/null 2>&1; then
+            (cd ui && nsh package --target ios-simulator)
+            ./scripts/ios-prepare.sh --check ui/.nsh/out/Neiro.app
+            test -f ui/.nsh/out/Neiro.app/PrivacyInfo.xcprivacy
+          else
+            echo "nsh not installed in runner, skipping the simulator package"
+          fi

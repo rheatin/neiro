@@ -1003,6 +1003,26 @@ export class Engine implements Backend {
     }
   }
 
+  /** The Keychain blob for one server. A missing handle or a refused read
+   * answers `null`: the caller then asks the user to re-enter the
+   * credential instead of failing the whole page. */
+  secretGet(server: string): string | null {
+    try {
+      return this.#base?.secretGet(server) ?? null;
+    } catch (error) {
+      console.warn("neiro: 钥匙串没有读到:", String(error));
+      return null;
+    }
+  }
+
+  secretSet(server: string, value: string): void {
+    this.#command((base) => base.secretSet(server, value));
+  }
+
+  secretDelete(server: string): void {
+    this.#command((base) => base.secretDelete(server));
+  }
+
   setRemoteJellyfinPassword(baseUrl: string, user: string, password: string): void {
     this.#command((base) => base.setRemoteJellyfinPassword(baseUrl, user, password));
   }

@@ -548,6 +548,15 @@ fn data_root() -> std::path::PathBuf {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     }
+    #[cfg(target_os = "ios")]
+    {
+        // The app container's Application Support: backed up, and the only
+        // place iOS expects a database and a device id to live. The unix
+        // branch below is wrong here — an iOS process owns no XDG tree.
+        crate::ios::home()
+            .join("Library")
+            .join("Application Support")
+    }
     #[cfg(target_os = "macos")]
     {
         std::env::var_os("HOME")
@@ -556,7 +565,7 @@ fn data_root() -> std::path::PathBuf {
             .join("Library")
             .join("Application Support")
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
     {
         std::env::var_os("XDG_DATA_HOME")
             .map(std::path::PathBuf::from)
@@ -566,6 +575,22 @@ fn data_root() -> std::path::PathBuf {
                     .map(|home| home.join(".local").join("share"))
             })
             .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+}
+
+/// Where regenerable data lives. On iOS that is the Caches directory:
+/// downloads and artwork are excluded from backup and may be purged by the
+/// system, which is exactly what they are. Everywhere else the caches stay
+/// beside the library, as they always have — moving them would orphan the
+/// paths favourites and playlists already name.
+fn cache_root() -> std::path::PathBuf {
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios::home().join("Library").join("Caches")
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        data_root()
     }
 }
 
@@ -579,10 +604,7 @@ fn library_path() -> std::path::PathBuf {
 /// cache directory that moved would orphan every favourite and playlist
 /// entry that names one of its files.
 fn remote_cache_dir() -> String {
-    library_path()
-        .parent()
-        .expect("the library always has a directory")
-        .join("remote")
+    remote_cache_dir_in(&cache_root())
         .to_string_lossy()
         .into_owned()
 }
@@ -780,10 +802,7 @@ fn reconcile_remote_cache_in(root: &std::path::Path) -> usize {
 
 /// One text file per cover, holding the `data:` URI (or `none`).
 fn local_cover_cache_dir() -> std::path::PathBuf {
-    library_path()
-        .parent()
-        .expect("the library always has a directory")
-        .join("artwork-local")
+    local_cover_cache_dir_in(&cache_root())
 }
 
 /// The local cover cache under an explicit root (tests).
@@ -1388,7 +1407,7 @@ impl Inner {
                 self.on_remote_fetched
                     .post(&RemoteFetched { track: remote_track_of(track), path });
                 // A download just grew the bucket; keep it under its ceiling.
-                prune_remote_audio_cache_in(&data_root(), REMOTE_AUDIO_CACHE_BUDGET);
+                prune_remote_audio_cache_in(&cache_root(), REMOTE_AUDIO_CACHE_BUDGET);
             }
             WireEvent::RemoteArtwork { id, mime, data } => {
                 self.on_remote_artwork
@@ -1856,9 +1875,25 @@ impl Base {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("E_ENGINE: 无法创建数据目录 {}：{e}", dir.display()))?;
         }
+        // Regenerable data may live in a directory of its own (iOS: Caches).
+        // A missing cache is not an error — the next download creates it —
+        // but a stats screen should not report buckets that cannot exist.
+        let cache = remote_cache_dir_in(&cache_root());
+        if let Err(error) = std::fs::create_dir_all(&cache) {
+            eprintln!("neiro: 无法创建缓存目录 {}：{error}", cache.display());
+        }
+        // The database holds favourites and playlists, which the lock screen's
+        // playback may still be reading: `CompleteUnlessOpen` keeps an open
+        // handle usable while locked and seals the rest. The folder is
+        // protected before SQLite creates its files, so they inherit the
+        // class; the file itself is set once it exists (below).
+        #[cfg(target_os = "ios")]
+        if let Some(dir) = library.parent() {
+            ios::protect(dir);
+        }
         // Nothing is downloading yet, so a `.part` file now is what a killed
         // process left behind, and the oldest downloads may be over budget.
-        let cleaned = reconcile_remote_cache_in(&data_root());
+        let cleaned = reconcile_remote_cache_in(&cache_root());
         if cleaned > 0 {
             eprintln!("neiro: 启动时清理了 {cleaned} 个远程缓存文件");
         }
@@ -1866,6 +1901,8 @@ impl Base {
         let granted = audio_session::activate()
             .map_err(|e| format!("E_ENGINE: 无法激活音频会话：{e}"))?;
         let (engine, receiver) = Engine::open(&library)?;
+        #[cfg(target_os = "ios")]
+        ios::protect(&library);
         // The contract's first-play order: activate, then tell the core the
         // format the route granted, then open. Nothing is stale this early, so
         // a refusal here is not fatal -- a core that predates this call (it
@@ -2656,7 +2693,7 @@ impl Base {
     /// The cache buckets' size and count, as a JSON object the interface
     /// formats for people.
     pub fn cache_stats(&self) -> Result<String, String> {
-        let root = data_root();
+        let root = cache_root();
         let stats = cache_stats_in(&root);
         serde_json::to_string(&stats).map_err(|e| format!("E_CACHE: 统计结果序列化失败：{e}"))
     }
@@ -2678,7 +2715,7 @@ impl Base {
     /// Deletes one cache bucket's files (`all` = every bucket), keeps the
     /// directories, and answers the stats as they are after the clean.
     pub fn clear_cache(&self, kind: String) -> Result<String, String> {
-        clear_cache_in(&data_root(), &kind)
+        clear_cache_in(&cache_root(), &kind)
     }
 
     /// Writes the iOS test tone once, then plays it through the core.
@@ -3136,6 +3173,50 @@ impl Base {
         ios::bookmarks::release(&bookmark);
         #[cfg(not(target_os = "ios"))]
         let _ = bookmark;
+    }
+
+    /// The secret saved for the server with this roster id, or `None`. On
+    /// iOS it is a Keychain item; the desktop keeps credentials in the
+    /// roster row itself and this answers `None` so the roster stays the
+    /// single place that has them.
+    pub fn secret_get(&self, server: String) -> Option<String> {
+        #[cfg(target_os = "ios")]
+        {
+            ios::keychain::get(&server)
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = server;
+            None
+        }
+    }
+
+    /// Saves the server's secret. iOS: one Keychain item, replacing what was
+    /// there. The desktop has no Keychain and stores nothing here.
+    pub fn secret_set(&self, server: String, value: String) -> Result<(), String> {
+        #[cfg(target_os = "ios")]
+        {
+            ios::keychain::set(&server, &value)
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = (server, value);
+            Ok(())
+        }
+    }
+
+    /// Forgets the server's secret. iOS: deletes the Keychain item; the
+    /// desktop has nothing to delete.
+    pub fn secret_delete(&self, server: String) -> Result<(), String> {
+        #[cfg(target_os = "ios")]
+        {
+            ios::keychain::delete(&server)
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = server;
+            Ok(())
+        }
     }
 
     /// Registers `listener` and posts the cached value, in one place: every

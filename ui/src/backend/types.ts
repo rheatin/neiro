@@ -533,6 +533,15 @@ export interface Backend {
   /** This installation's remote identity, the same value `set_remote`
    * sends. Empty when no engine handle is loaded. */
   deviceId(): string;
+  /** The secret blob saved for the server with this roster id: a JSON
+   * object of the provider's secret params, or `null`. iOS reads the
+   * Keychain; the desktop keeps credentials in the roster row. */
+  secretGet(server: string): string | null;
+  /** Saves the server's secret blob. iOS: one Keychain item; the desktop
+   * has no Keychain and stores nothing here. */
+  secretSet(server: string, value: string): void;
+  /** Forgets the server's secret blob. */
+  secretDelete(server: string): void;
   setRemoteJellyfinPassword(baseUrl: string, user: string, password: string): void;
   setRemoteJellyfinToken(baseUrl: string, token: string): void;
   setRemoteNavidrome(baseUrl: string, user: string, password: string): void;

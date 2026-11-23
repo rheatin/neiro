@@ -407,3 +407,45 @@ Proof, on the Mac: `engine/build-macos/macos_play_check /tmp/tone.wav` prints
 reports `engine down page: false` and lists the shell pages; the packaged
 `Neiro.app` launches with `libneiro_base.dylib`, `libnae.dylib` and the FFmpeg
 dylibs beside it, all references rewritten to `@loader_path`.
+
+
+## iOS Stage 5: packaging and secrets (2026-11-23)
+
+The device build's shape is now written down where the tools can enforce it.
+
+- **Plist keys belong to `ui/nsh.json`.** NSH v0.6.1 writes `ios.infoPlist`
+  into the packaged `Info.plist`, so there is no hand-maintained
+  `ui/ios/Info.plist`. `UIBackgroundModes: ["audio"]`,
+  `NSLocalNetworkUsageDescription` and
+  `NSAppTransportSecurity.NSAllowsLocalNetworking` (no arbitrary loads) are
+  verified in the built bundle. No entitlements are needed beyond NSH's own
+  identity, so `App.entitlements` waits for the release owner's signing
+  inputs.
+- **NSH has no privacy-manifest support.** `scripts/ios-prepare.sh` copies
+  `ui/ios/PrivacyInfo.xcprivacy` into the `.app` after `nsh package` and
+  re-signs it (a file added after signing is not covered). `--check` verifies
+  the three plist promises and the manifest and writes nothing; CI runs it
+  against the simulator package.
+- **Secrets are Keychain-only on iOS.** `ui/src/ios/keychain.rs` holds one
+  generic-password item per server (`app.neiro.ui.remote`,
+  `remote:secret:{id}`, accessibility AfterFirstUnlock) through
+  `objc2-security`. The roster keeps `hasSecret`; `state/sources.ts` is the
+  bridge (`readServerSecret`, `upsertServer`); `saveRemoteConfig` stops
+  writing `remote:config` on iOS; a ready-engine migration moves any legacy
+  plaintext row into the Keychain. Settings shows 凭据需重新输入 when the
+  marker has no item, and the dialog's validation then asks for the
+  credential again.
+- **Two roots.** `data_root()` is `NSHomeDirectory()/Library/Application
+  Support` on iOS; `cache_root()` is `Library/Caches`, where downloads,
+  covers, stats and pruning now live. `library.db` and its directory get
+  `NSFileProtectionCompleteUnlessOpen` at launch.
+
+Verified on this machine: `cargo check` for `aarch64-apple-ios` and
+`aarch64-apple-ios-sim`; `nsh check`; `cargo test --lib` 32 passed;
+`nsh test` 126 passed; `nsh package --target ios-simulator` (3 min, 81 MB
+bundle) followed by `scripts/ios-prepare.sh --check` passing.
+
+Still open: the manual device matrix (background audio under lock,
+interruption, route change, media-services reset, local-network denial,
+bookmark re-pick, cache cap), a signed device `.ipa`, and the
+Keychain-after-restore case.

@@ -1,4 +1,5 @@
-// 远程库的状态: 服务器会话 (一组凭据，仅保存在 Storage 中 — 它们不进源码),
+// 远程库的状态: 服务器会话 (一组凭据 — 桌面存 Storage，iOS 存钥匙串, 它们
+// 都不进源码),
 // `remote_listed` 数据已合并完整 (搜索会在本地过滤)，封面已连接至共享的
 // artwork 栈。桌面上有 source 形式的服务器 (描述符里的 `source`) 直接按虚拟
 // 路径播放，Base 边播边读；没有的走 fetch→fetched→play。iOS 一律走整文件
@@ -11,7 +12,7 @@ import { notifyRemoteFetchFailed, playAll, playQueue, registerRemotePlayer, play
 import { registerRemoteCatalog } from "./catalog";
 import { remoteProviders } from "./plugins";
 import { ALL_ID } from "./sources";
-import { activeSourceId, registerRemoteActivator, registerRemoteDisconnector, removeServer, servers, serversLoaded, type RemoteServer } from "./sources";
+import { activeSourceId, registerRemoteActivator, registerRemoteDisconnector, removeServer, secretsInKeychain, serverCredentials, servers, serversLoaded, type RemoteServer } from "./sources";
 import { notify } from "./feedback";
 
 const CONFIG_KEY = "remote:config";
@@ -85,9 +86,26 @@ function applyRemote(cfg: RemoteConfig): void {
 export async function saveRemoteConfig(cfg: RemoteConfig): Promise<void> {
   applyRemote(cfg);
   config.set(cfg);
+  // On iOS the roster plus the Keychain are where this lives. A copy in
+  // Storage would put the secret back in the clear.
+  if (secretsInKeychain) return;
   await Storage.setItem(CONFIG_KEY, JSON.stringify(cfg)).catch((error) =>
     console.warn("neiro: 远程配置没有记住:", String(error)),
   );
+}
+
+/** The engine's view of one roster row: the row plus its secret, which on
+ * iOS lives in the Keychain rather than in the row. */
+function configOfServer(server: RemoteServer): RemoteConfig {
+  const credentials = serverCredentials(server);
+  return {
+    kind: server.kind,
+    baseUrl: server.baseUrl,
+    user: server.user ?? "",
+    password: credentials.password,
+    token: credentials.token,
+    params: credentials,
+  };
 }
 
 /** 探测服务器连通性与凭据有效性（用于 ServerDialog 的测试连接按钮与排障）。 */
@@ -268,13 +286,7 @@ effect(() => {
         if (cached && cached.length > 0) {
           remoteTracks.set([...cached]);
         }
-        const cfg: RemoteConfig = {
-          kind: first.kind,
-          baseUrl: first.baseUrl,
-          user: first.user ?? "",
-          password: first.password,
-          token: first.token,
-        };
+        const cfg = configOfServer(first);
         config.set(cfg);
         applyRemote(cfg);
         configLoaded.set(true);
@@ -383,13 +395,7 @@ export async function activateServer(serverId: string, force: boolean = false): 
     remoteConfig()?.user === (server.user ?? "");
   if (!sameServer) {
     try {
-      await saveRemoteConfig({
-        kind: server.kind,
-        baseUrl: server.baseUrl,
-        user: server.user ?? "",
-        password: server.password,
-        token: server.token,
-      });
+      await saveRemoteConfig(configOfServer(server));
     } catch (error) {
       // 引擎没就绪或命令被拒：错误进 toast，远程视图给可重试的空态。
       reportEngineFailure(error, "连接失败");
@@ -503,7 +509,8 @@ function handleListed(tracks: RemoteTrack[]): void {
     // sign-in before the page claims the server is empty.
     const cfg = remoteConfig();
     const roster = activeRemoteServer();
-    const password = (cfg?.password ?? "") !== "" ? cfg?.password : roster?.password;
+    const password =
+      (cfg?.password ?? "") !== "" ? cfg?.password : roster ? serverCredentials(roster).password : undefined;
     if (!emptyHandled && (freshList === null || freshList.length === 0) && cfg && (password ?? "") !== "") {
       emptyHandled = true;
       void saveRemoteConfig({

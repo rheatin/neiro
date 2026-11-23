@@ -12,5 +12,14 @@
       "height": 52
     }
   },
-  "rust": "."
+  "rust": ".",
+  "ios": {
+    "infoPlist": {
+      "UIBackgroundModes": ["audio"],
+      "NSLocalNetworkUsageDescription": "Neiro 连接你局域网里的音乐服务器（Jellyfin、Navidrome、WebDAV），浏览并播放它们的曲库。",
+      "NSAppTransportSecurity": {
+        "NSAllowsLocalNetworking": true
+      }
+    }
+  }
 }

@@ -20,7 +20,7 @@ import {
   scan,
   setHomeRoot,
 } from "../state/catalog";
-import { servers, selectSource } from "../state/sources";
+import { secretsInKeychain, servers, selectSource } from "../state/sources";
 import { cachedRemoteTracks, reconnectServer, removeServerById } from "../state/remote";
 import { EFFECT_NAMES, TOOLBAR_EFFECTS } from "../components/ui/toolbar-fx";
 import { lightEffect, setLight } from "../state/visual";
@@ -356,6 +356,11 @@ export function SettingsPage() {
                               <If when={!enabled()}>
                                 <View class="rounded px-1.5 py-0.5 bg-amber-500/15">
                                   <Text class="text-[10px] font-bold text-amber-500">插件已停用</Text>
+                                </View>
+                              </If>
+                              <If when={secretsInKeychain && !srv().hasSecret}>
+                                <View class="rounded px-1.5 py-0.5 bg-destructive/15">
+                                  <Text class="text-[10px] font-bold text-destructive">凭据需重新输入</Text>
                                 </View>
                               </If>
                             </View>
