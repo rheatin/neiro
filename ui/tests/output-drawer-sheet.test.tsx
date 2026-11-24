@@ -8,11 +8,10 @@ test("the 输出信息 drawer opens and paints its sections", async () => {
     storage: { "library:roots": "[]" },
   });
   await app.waitFor("text:全部曲目");
-  // 通过 (i)（真机同一链路）；等控台自己的模组标题挂上为止。
   await app.press("label:输出信息");
-  const lower = () => app.texts().map((t) => t.toLowerCase());
-  await app.waitUntil(() => lower().some((t) => t === "decoder input bus"), { timeout: 10_000 });
-  // The surface paints its own chassis: the five module headers are the
-  // contract this test holds, not one control's label.
-  expect(lower().filter((t) => t.startsWith("0")).length).toBeGreaterThanOrEqual(4);
+  await app.waitFor("text:Output 控制台", { timeout: 10_000 });
+  const texts = app.texts();
+  expect(texts).toContain("信号链路");
+  expect(texts).toContain("输出与设备");
+  expect(texts).toContain("Bit-Perfect 校验");
 }, 60_000);

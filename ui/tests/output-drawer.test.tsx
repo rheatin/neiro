@@ -1,7 +1,4 @@
-// 输出信息抽屉：从播放条的 (i) 打开，五个硬件模组都在，且各自的契约成立。
-//
-// 这一版抽屉是 CS-02 控台（01…05），不再是原来的 Processing Chain 卡片堆：
-// 断言跟着契约走（模块名、四个校验灯、根因诊断），不跟着某一段的措辞走。
+// 输出信息抽屉：从播放条的 (i) 打开，现代精密信号链路面板各模块契约成立。
 
 import { expect, open, test } from "nsh/test";
 
@@ -18,46 +15,34 @@ async function openDrawer() {
   return app;
 }
 
-test("抽屉从播放条的 (i) 打开，五个模组都在", async () => {
+test("抽屉从播放条的 (i) 打开，现代信号链路各卡片都在", async () => {
   const app = await openDrawer();
-  const lower = app.texts().map((t) => t.toLowerCase());
-  // 每个模组的编号徽章与标题是两块文本（徽章是方框，标题在它右边）。
-  for (const text of [
-    "decoder input bus",
-    "dsp matrix & channel strips",
-    "bit-perfect master bus",
-    "output interface & master gain",
-    "telemetry & root-cause diagnostics",
-  ]) {
-    expect(lower).toContain(text);
+  const texts = app.texts();
+  for (const heading of ["信号链路", "输出与设备", "Bit-Perfect 校验", "音效处理与工程遥测"]) {
+    expect(texts).toContain(heading);
   }
-  for (const badge of ["01", "02", "03", "04", "05"]) {
-    expect(lower).toContain(badge);
-  }
-  // 四个校验灯是这一版的核心：每盏两行（面板刻字的断行），状态由引擎给。
-  for (const lamp of [
-    ["dsp & eq", "clean"],
-    ["rate & hw", "match"],
-    ["excl", "stream"],
-    ["unity", "0db"],
-  ]) {
-    expect(lower).toContain(lamp[0]);
-    expect(lower).toContain(lamp[1]);
+  for (const badge of ["DSP 旁通", "采样一致", "独占直通", "音量 100%"]) {
+    expect(texts).toContain(badge);
   }
 });
 
 test("没有流时审计明说没有流，而不是假装通过", async () => {
   const app = await openDrawer();
   const texts = app.texts();
-  // 没播放：没有可审计的路径。这里必须是 NO STREAM，不能是 PASS。
   expect(texts.some((t) => /NO STREAM/.test(t))).toBe(true);
-  expect(texts.some((t) => /\[PASS\]/.test(t))).toBe(false);
+  expect(texts.some((t) => /整条通路未改动/.test(t))).toBe(false);
 });
 
-test("设备列表在播放中锁定，不枚举（枚举会抢走独占流）", async () => {
+test("设备列表与高级折叠区契约成立", async () => {
   const app = await openDrawer();
   const texts = app.texts();
-  // 没有播放时枚举锁是关的；一旦有流，锁打开且说明原因。
-  expect(texts.some((t) => /ENUM LOCK: (ON|OFF)/.test(t))).toBe(true);
   expect(texts.some((t) => t.includes("引擎默认"))).toBe(true);
+  expect(texts.some((t) => t === "可刷新设备" || t === "播放中锁定枚举")).toBe(true);
+
+  await app.press("id:output-advanced-toggle");
+  await app.waitFor("text:Dither 抖动算法", { timeout: 5_000 });
+  const expandedTexts = app.texts();
+  for (const algo of ["AUTO", "OFF", "TPDF", "SHAPED"]) {
+    expect(expandedTexts).toContain(algo);
+  }
 });
