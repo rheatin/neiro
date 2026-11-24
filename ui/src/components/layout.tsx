@@ -24,16 +24,16 @@ const COMPACT_BAR = 760;
 /** Narrower than this, it is stacked. */
 const STACKED_BAR = 520;
 
-/** The two mobile shells. A phone and the cover screen are folded; an iPad
- * and the inner screen of a foldable are unfolded. There is no hinge API: the
- * shell is chosen by measured width, with a band where the current one is
- * kept so a drag across the threshold does not flicker. */
+/** The two mobile shells. A phone, a foldable (cover & inner screen), and a
+ * portrait iPad stay in the unified floating-capsule shell; wide tablets /
+ * landscape iPads (>= 1000 pt) unfold the floating sidebar, keeping the current
+ * one inside the 960–1000 pt band so a drag across the threshold does not flicker. */
 export type MobileShell = "folded" | "unfolded";
-const UNFOLD_AT = 700;
-const FOLD_AT = 660;
+const UNFOLD_AT = 1000;
+const FOLD_AT = 960;
 
 /** Which mobile shell `width` pt asks for, keeping `current` inside the
- * 660–700 pt band. Pure, so the band is tested without a window. */
+ * 960–1000 pt band. Pure, so the band is tested without a window. */
 export function nextMobileShell(current: MobileShell, width: number): MobileShell {
   if (width >= UNFOLD_AT) return "unfolded";
   if (width < FOLD_AT) return "folded";

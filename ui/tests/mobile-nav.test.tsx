@@ -74,7 +74,7 @@ test("a tab keeps its stack, and choosing it again returns to its root", async (
 test("unfolded: the sidebar beside the pages, Settings pushed and popped", async () => {
   const app = await open("./mobile-shell-harness.tsx", {
     platform: "ios",
-    width: 900,
+    width: 1100,
     height: 800,
     storage: {
       "library:roots": JSON.stringify([{ id: "root-1", bookmark: "/music", label: "music" }]),
