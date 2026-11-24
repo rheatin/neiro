@@ -46,3 +46,32 @@ test("设备列表与高级折叠区契约成立", async () => {
     expect(expandedTexts).toContain(algo);
   }
 });
+
+test("移动端与折叠屏展开时 Output 控制台全屏展开", async () => {
+  for (const vp of [
+    { width: 390, height: 844 },
+    { width: 720, height: 840 },
+  ]) {
+    const app = await open("../App.tsx", {
+      platform: "ios",
+      width: vp.width,
+      height: vp.height,
+      safeArea: { top: 47, bottom: 34, left: 0, right: 0 },
+      storage: { "library:roots": "[]" },
+    });
+    await app.waitFor("text:首页", { timeout: 30_000 });
+    await app.press("label:设置");
+    await app.waitFor("text:打开输出控制台", { timeout: 10_000 });
+    await app.press("text:打开输出控制台");
+    await app.waitFor("text:Output 控制台", { timeout: 10_000 });
+
+    const texts = app.texts();
+    expect(texts).toContain("信号链路");
+    expect(texts).toContain("Bit-Perfect 校验");
+    expect(texts).toContain("输出与设备");
+    expect(app.shows("label:关闭输出信息")).toBe(true);
+    await app.press("label:关闭输出信息");
+    await app.wait(300);
+    expect(app.shows("text:Output 控制台")).toBe(false);
+  }
+});
